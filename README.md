@@ -68,8 +68,25 @@ Developer Portal.
 | `DISCORD_OAUTH_CLIENT_ID` | With dashboard | Discord application's OAuth2 client ID. |
 | `DISCORD_OAUTH_CLIENT_SECRET` | With dashboard | Discord application's OAuth2 client secret. |
 | `DASHBOARD_SESSION_SECRET` | With dashboard | Unique session-signing secret, at least 32 characters. |
+| `FACULTY_ROLE_ID` | With faculty dashboard | Discord server role ID granted to faculty; leave blank to disable faculty access. |
 | `DASHBOARD_HOST` | No | Bind address; defaults to `127.0.0.1` behind a local reverse proxy. |
 | `DASHBOARD_PORT` | No | Web server port; defaults to `8765`. |
+
+### Faculty dashboard
+
+Create a dedicated `Faculty` role in the configured Discord server and assign
+it only to faculty members. Enable Discord Developer Mode, copy the role ID,
+and set it as `FACULTY_ROLE_ID`. Faculty sign in with Discord; the dashboard
+checks their current server role through OAuth and requires the configured
+role. The OAuth sign-in requests the `guilds.members.read` scope to verify role
+membership. Administrators retain access to the existing admin dashboard.
+
+Each faculty account manages its own student list on `/faculty`. Faculty can
+search the synchronized human-member directory by USN and add or remove
+students. A student is available for assignment when their saved USN exists or
+their global display name matches an accepted USN format. Faculty can see
+attendance and performance only for students in their own list; assignments
+are isolated by faculty account and server.
 
 ### Enable the web dashboard
 

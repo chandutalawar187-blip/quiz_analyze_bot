@@ -448,6 +448,39 @@ class DatabaseTests(unittest.TestCase):
         self.assertIsNone(alternate_user.student_name)
         self.assertTrue(alternate_user.name_matches_usn_format)
 
+    def test_faculty_student_assignments_are_private_and_require_a_known_usn(
+        self,
+    ) -> None:
+        guild = SimpleNamespace(id=67890)
+        member = SimpleNamespace(
+            id=54321,
+            name="student_account",
+            display_name="Student Nickname",
+            global_name="4GM22CS001",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.sync_member(member)
+
+        self.assertTrue(self.database.add_faculty_student(67890, 111, "4gm22cs001"))
+        self.assertFalse(self.database.add_faculty_student(67890, 111, "4GM22CS001"))
+        self.assertEqual(
+            self.database.get_faculty_student_usns(67890, 111),
+            ("4GM22CS001",),
+        )
+        self.assertEqual(self.database.get_faculty_student_usns(67890, 222), ())
+        self.assertEqual(self.database.get_faculty_student_usns(99999, 111), ())
+        self.assertFalse(self.database.add_faculty_student(67890, 111, "NOT-A-USN"))
+        self.assertFalse(
+            self.database.remove_faculty_student(67890, 222, "4GM22CS001")
+        )
+        self.assertTrue(
+            self.database.remove_faculty_student(67890, 111, "4gm22cs001")
+        )
+        self.assertEqual(self.database.get_faculty_student_usns(67890, 111), ())
+
     def test_unmapped_privileged_mention_uses_cached_name_and_is_counted(
         self,
     ) -> None:

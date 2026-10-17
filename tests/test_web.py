@@ -4,7 +4,9 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -19,6 +21,7 @@ from quizcord_bot.database import (
 )
 from quizcord_bot.web import (
     _is_guild_admin,
+    _is_guild_faculty,
     _summary_detail,
     _student_analytics,
     create_dashboard_app,
@@ -42,11 +45,15 @@ class DashboardWebTests(unittest.TestCase):
                 "DISCORD_OAUTH_CLIENT_ID": "12345",
                 "DISCORD_OAUTH_CLIENT_SECRET": "oauth-secret",
                 "DASHBOARD_SESSION_SECRET": "s" * 40,
+                "FACULTY_ROLE_ID": "33333",
             },
             clear=True,
         ):
             self.settings = Settings.from_environment()
-        self.client = TestClient(create_dashboard_app(self.settings, self.database))
+        self.client = TestClient(
+            create_dashboard_app(self.settings, self.database),
+            base_url="https://testserver",
+        )
 
     def tearDown(self) -> None:
         self.client.close()
@@ -66,6 +73,12 @@ class DashboardWebTests(unittest.TestCase):
             _is_guild_admin([{"id": "11111", "owner": True}], 67890)
         )
 
+    def test_faculty_access_requires_the_configured_role_id(self) -> None:
+        self.assertTrue(_is_guild_faculty({"roles": ["33333"]}, 33333))
+        self.assertFalse(_is_guild_faculty({"roles": ["12345"]}, 33333))
+        self.assertFalse(_is_guild_faculty({"roles": "33333"}, 33333))
+        self.assertFalse(_is_guild_faculty({"roles": ["33333"]}, None))
+
     def test_dashboard_data_requires_discord_sign_in(self) -> None:
         response = self.client.get("/api/sessions")
 
@@ -77,6 +90,90 @@ class DashboardWebTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["detail"], "Please sign in again.")
+
+    def test_faculty_dashboard_and_student_apis_require_discord_sign_in(self) -> None:
+        for method, path in (
+            ("get", "/api/faculty/students"),
+            ("get", "/api/faculty/candidates"),
+            ("get", "/api/faculty/students/4GM22CS001"),
+            ("post", "/api/faculty/students/4GM22CS001"),
+            ("delete", "/api/faculty/students/4GM22CS001"),
+        ):
+            with self.subTest(method=method, path=path):
+                response = getattr(self.client, method)(path)
+                self.assertEqual(response.status_code, 401)
+
+    def test_faculty_page_redirects_to_faculty_discord_login(self) -> None:
+        response = self.client.get("/faculty", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["location"], "/login?destination=faculty")
+
+    def test_faculty_can_only_monitor_students_they_added(self) -> None:
+        member = SimpleNamespace(
+            id=98765,
+            name="student_account",
+            display_name="4GM22CS001",
+            global_name="4GM22CS001",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=SimpleNamespace(id=67890),
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.sync_member(member)
+
+        login = self.client.get(
+            "/auth/login?destination=faculty", follow_redirects=False
+        )
+        state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
+        token_response = Mock()
+        token_response.json.return_value = {
+            "access_token": "faculty-access-token",
+            "refresh_token": "faculty-refresh-token",
+            "expires_in": 3600,
+        }
+        user_response = Mock()
+        user_response.json.return_value = {
+            "id": "123456",
+            "global_name": "Faculty Member",
+        }
+        guilds_response = Mock()
+        guilds_response.json.return_value = [
+            {"id": "67890", "permissions": "0"}
+        ]
+        member_response = Mock()
+        member_response.json.return_value = {"roles": ["33333"]}
+        discord_client = Mock()
+        discord_client.post = AsyncMock(return_value=token_response)
+        discord_client.get = AsyncMock(
+            side_effect=[user_response, guilds_response, member_response]
+        )
+        client_context = Mock()
+        client_context.__aenter__ = AsyncMock(return_value=discord_client)
+        client_context.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "quizcord_bot.web.httpx.AsyncClient", return_value=client_context
+        ):
+            callback = self.client.get(
+                f"/auth/callback?code=faculty-code&state={state}",
+                follow_redirects=False,
+            )
+
+        self.assertEqual(callback.status_code, 302)
+        self.assertEqual(callback.headers["location"], "/faculty")
+        self.assertEqual(self.client.get("/faculty").status_code, 200)
+        candidates = self.client.get("/api/faculty/candidates").json()
+        self.assertEqual([row["usn"] for row in candidates], ["4GM22CS001"])
+        added = self.client.post("/api/faculty/students/4GM22CS001")
+        self.assertEqual(added.status_code, 204)
+        students = self.client.get("/api/faculty/students").json()
+        self.assertEqual([row["usn"] for row in students], ["4GM22CS001"])
+        self.assertEqual(
+            self.client.get("/api/faculty/students/NOTASSIGNED").status_code,
+            404,
+        )
+        self.assertEqual(self.client.get("/api/sessions").status_code, 403)
 
     def test_dashboard_redirects_to_sign_in_and_sets_security_headers(self) -> None:
         response = self.client.get("/", follow_redirects=False)
@@ -137,7 +234,10 @@ class DashboardWebTests(unittest.TestCase):
     def test_oauth_callback_rejects_invalid_state(self) -> None:
         login = self.client.get("/auth/login", follow_redirects=False)
         self.assertEqual(login.status_code, 302)
-        self.assertIn("scope=identify+guilds", login.headers["location"])
+        self.assertIn(
+            "scope=identify+guilds+guilds.members.read",
+            login.headers["location"],
+        )
 
         callback = self.client.get(
             "/auth/callback?code=not-a-real-code&state=invalid",

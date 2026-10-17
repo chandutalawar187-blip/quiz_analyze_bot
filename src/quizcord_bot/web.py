@@ -40,6 +40,8 @@ class _OAuthSession:
     access_token_expires_at: float
     expires_at: float
     last_permission_check: float
+    is_admin: bool
+    is_faculty: bool
     permission_check_lock: asyncio.Lock
 
 
@@ -79,7 +81,8 @@ HTML_PAGE = r"""<!doctype html>
     const dashboardTabs = document.getElementById("dashboard-tabs");
     const sessionHeading = document.getElementById("session-heading");
     const initialSession = new URLSearchParams(location.search).get("session");
-    const studentPath = location.pathname.startsWith("/students/") ? location.pathname.slice("/students/".length) : null;
+    const facultyStudentPath = location.pathname.startsWith("/faculty/students/");
+    const studentPath = facultyStudentPath ? location.pathname.slice("/faculty/students/".length) : location.pathname.startsWith("/students/") ? location.pathname.slice("/students/".length) : null;
     const studentUSN = studentPath ? decodeURIComponent(studentPath) : null;
     const safe = value => String(value ?? "");
     const el = (tag, className, text) => { const node=document.createElement(tag); if(className)node.className=className; if(text!==undefined)node.textContent=text; return node; };
@@ -154,6 +157,7 @@ HTML_PAGE = r"""<!doctype html>
     }
     function renderStudent(student){
       document.getElementById("back-link").hidden=false;
+      document.getElementById("back-link").href=facultyStudentPath?"/faculty":"/";
       select.hidden=true;
       document.querySelector(".eyebrow").textContent="Student analytics";
       document.querySelector("h1").textContent=student.student_name;
@@ -222,9 +226,110 @@ HTML_PAGE = r"""<!doctype html>
     if(studentUSN){
       dashboardTabs.hidden=true;
       select.hidden=true;
-      async function refreshStudent(){try{const response=await fetch("/api/students/"+encodeURIComponent(studentUSN),{cache:"no-store"});if(response.status===401){location.replace("/");return;}if(!response.ok)throw new Error("Could not load student analytics.");renderStudent(await response.json());}catch(error){content.replaceChildren(el("div","empty error",error.message));}}
+      async function refreshStudent(){try{const endpoint=facultyStudentPath?"/api/faculty/students/":"/api/students/";const response=await fetch(endpoint+encodeURIComponent(studentUSN),{cache:"no-store"});if(response.status===401){location.replace(facultyStudentPath?"/login?destination=faculty":"/");return;}if(!response.ok)throw new Error("Could not load student analytics.");renderStudent(await response.json());}catch(error){content.replaceChildren(el("div","empty error",error.message));}}
       refreshStudent();setInterval(refreshStudent,10000);
     }else{refresh();setInterval(()=>{if(activeView==="users")refreshUsers();else refresh();},3000);}
+  </script>
+</body>
+</html>
+"""
+
+FACULTY_PAGE = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Faculty · Quizcord Analytics</title>
+  <style>
+    :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#e7edf8;background:#0b1020}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 10% 0%,#17264a 0,transparent 42%),#0b1020}
+    button,a,input{font:inherit}.top{height:72px;display:flex;align-items:center;justify-content:space-between;padding:0 max(24px,calc((100vw - 1100px)/2));border-bottom:1px solid #26314b;background:#0b1020cc;position:sticky;top:0}
+    .brand{font-weight:750}.brand span{color:#8fa7ff}.account{display:flex;gap:16px;align-items:center;color:#aebbd2;font-size:14px}.account a{color:#aebbd2;text-decoration:none}
+    main{max-width:1100px;margin:38px auto;padding:0 24px}.eyebrow{color:#91a6ff;font-size:12px;text-transform:uppercase;letter-spacing:1.4px;font-weight:700}h1{font-size:30px;margin:8px 0}.intro{color:#aebbd2;margin:0 0 26px}
+    .panel{background:#11182b;border:1px solid #26334e;border-radius:16px;overflow:hidden;margin:18px 0}.panel-head{padding:19px 21px;border-bottom:1px solid #26314b}.panel h2{font-size:16px;margin:0}.panel-sub{font-size:12px;color:#8291ac;margin-top:5px}.table-wrap{overflow:auto;max-height:520px}table{border-collapse:collapse;width:100%;text-align:left}th,td{padding:13px 18px;border-bottom:1px solid #202b42;font-size:13px}th{color:#8797b3;font-size:11px;text-transform:uppercase;letter-spacing:.7px;position:sticky;top:0;background:#11182b}
+    .usn{font-weight:700;letter-spacing:.2px}.student-link{color:#dce5f8;text-decoration:none}.student-link:hover{color:#91a6ff;text-decoration:underline}.muted{color:#91a0ba}.button{border:1px solid #425681;border-radius:8px;background:#26365b;color:#e7edf8;padding:8px 12px;cursor:pointer;font-size:12px;font-weight:650}.button:hover{background:#344875}.button.remove{background:#2c2030;border-color:#654052}.button:disabled{opacity:.55;cursor:wait}
+    .search-tools{display:flex;gap:12px;padding:16px 18px}.search{flex:1;min-width:0;padding:11px 12px;background:#0b1020;color:#e7edf8;border:1px solid #33415e;border-radius:9px}.empty{color:#8797b3;text-align:center;padding:36px 20px;font-size:14px}.error{color:#ff9e9e}.notice{padding:12px 18px;color:#95a4bd;font-size:13px}.row-metrics{white-space:nowrap;color:#aebbd2}
+    @media(max-width:600px){.top{padding:0 16px}.account{gap:8px}main{margin:24px auto;padding:0 16px}.search-tools{flex-direction:column}th,td{padding:12px}}
+  </style>
+</head>
+<body>
+  <header class="top"><div class="brand">Quizcord <span>Faculty</span></div><div class="account"><span id="account-name"></span><a href="/auth/logout">Sign out</a></div></header>
+  <main>
+    <div class="eyebrow">Student mentoring</div><h1>Monitor your students</h1>
+    <p class="intro">Add students by USN to follow their Quizcord attendance and performance.</p>
+    <section class="panel"><div class="panel-head"><h2>Your students</h2><div class="panel-sub">Only you can manage your student list.</div></div><div id="assigned"><div class="empty">Loading students…</div></div></section>
+    <section class="panel"><div class="panel-head"><h2>Add your students</h2><div class="panel-sub">Search by USN, then add the student to your list.</div></div>
+      <div class="search-tools"><input class="search" id="student-search" type="search" placeholder="Search by USN" aria-label="Search students by USN"></div>
+      <div id="candidates"><div class="empty">Enter a USN to find students.</div></div>
+    </section>
+  </main>
+  <script>
+    const el=(tag,className,text)=>{const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node;};
+    const assigned=document.getElementById("assigned"),candidates=document.getElementById("candidates"),search=document.getElementById("student-search");
+    let assignedUSNs=new Set(),searchTimer;
+    async function api(path,options={}){
+      const response=await fetch(path,{cache:"no-store",...options});
+      if(response.status===401){location.replace("/login?destination=faculty");throw new Error("Sign-in expired.");}
+      return response;
+    }
+    async function loadAssigned(){
+      try{
+        const response=await api("/api/faculty/students");
+        if(!response.ok)throw new Error("Could not load your students.");
+        const students=await response.json();assignedUSNs=new Set(students.map(student=>student.usn.toLocaleLowerCase()));
+        if(!students.length){assigned.replaceChildren(el("div","empty","You haven't added any students yet. Search for a USN below to get started."));return;}
+        const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),head=el("tr");
+        ["Student","Quizzes attended","Attendance","Total points",""].forEach(label=>head.append(el("th","",label)));
+        thead.append(head);table.append(thead);const body=el("tbody");
+        students.forEach(student=>{const row=el("tr"),nameCell=el("td","");
+          const link=el("a","student-link",student.student_name);link.href="/faculty/students/"+encodeURIComponent(student.usn);
+          nameCell.append(link,el("div","usn muted",student.usn));
+          const remove=el("button","button remove","Remove");remove.type="button";remove.addEventListener("click",()=>removeStudent(student.usn,remove));
+          row.append(nameCell,el("td","row-metrics",student.quizzes_attended+" / "+student.completed_quizzes),el("td","row-metrics",Number(student.attendance_percentage).toFixed(1)+"%"),el("td","row-metrics",String(student.total_points)),el("td","",remove));body.append(row);
+        });
+        table.append(body);wrap.append(table);assigned.replaceChildren(wrap);
+      }catch(error){assigned.replaceChildren(el("div","empty error",error.message));}
+    }
+    async function loadCandidates(){
+      const query=search.value.trim();
+      try{
+        const response=await api("/api/faculty/candidates?search="+encodeURIComponent(query));
+        if(!response.ok)throw new Error("Could not search students.");
+        const users=await response.json();
+        if(!users.length){candidates.replaceChildren(el("div","empty","No students found for that USN."));return;}
+        const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),head=el("tr");
+        ["Student","USN",""].forEach(label=>head.append(el("th","",label)));
+        thead.append(head);table.append(thead);const body=el("tbody");
+        users.forEach(user=>{const row=el("tr");
+          row.append(el("td","",user.student_name),el("td","usn",user.usn));
+          const button=el("button","button",user.assigned?"Added":"+ Add");button.type="button";button.disabled=user.assigned;
+          if(!button.disabled)button.addEventListener("click",()=>addStudent(user.usn,button));
+          row.append(el("td","",button));body.append(row);
+        });
+        table.append(body);wrap.append(table);candidates.replaceChildren(wrap);
+      }catch(error){candidates.replaceChildren(el("div","empty error",error.message));}
+    }
+    async function addStudent(usn,button){
+      button.disabled=true;
+      try{
+        const response=await api("/api/faculty/students/"+encodeURIComponent(usn),{method:"POST"});
+        if(response.status===409){await loadAssigned();await loadCandidates();return;}
+        if(!response.ok)throw new Error("Could not add this student.");
+        await loadAssigned();await loadCandidates();
+      }catch(error){candidates.prepend(el("div","notice error",error.message));button.disabled=false;}
+    }
+    async function removeStudent(usn,button){
+      button.disabled=true;
+      try{
+        const response=await api("/api/faculty/students/"+encodeURIComponent(usn),{method:"DELETE"});
+        if(!response.ok)throw new Error("Could not remove this student.");
+        await loadAssigned();await loadCandidates();
+      }catch(error){assigned.prepend(el("div","notice error",error.message));button.disabled=false;}
+    }
+    search.addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(loadCandidates,200);});
+    api("/api/me").then(response=>{if(!response.ok)throw new Error();return response.json();}).then(user=>{document.getElementById("account-name").textContent=user.username;}).catch(()=>location.replace("/login?destination=faculty"));
+    loadAssigned();loadCandidates();
   </script>
 </body>
 </html>
@@ -289,7 +394,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             settings.discord_oauth_client_secret,
         )
 
-    async def current_admin(request: Request) -> _OAuthSession:
+    async def current_authenticated(request: Request) -> _OAuthSession:
         require_oauth_config()
         session_key = request.session.get("dashboard_session")
         auth_session = oauth_sessions.get(session_key) if session_key else None
@@ -300,15 +405,45 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         async with auth_session.permission_check_lock:
             now = time.time()
             if now - auth_session.last_permission_check >= PERMISSION_CACHE_SECONDS:
-                auth_session = await _verify_current_guild_admin(
+                auth_session = await _verify_current_guild_access(
                     auth_session, settings
                 )
                 oauth_sessions[session_key] = auth_session
+        if not auth_session.is_admin and not auth_session.is_faculty:
+            raise HTTPException(
+                status_code=403,
+                detail="Administrator or Faculty role access to the configured server is required.",
+            )
+        return auth_session
+
+    async def current_admin(request: Request) -> _OAuthSession:
+        auth_session = await current_authenticated(request)
+        if not auth_session.is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail="Administrator access to the configured server is required.",
+            )
+        return auth_session
+
+    async def current_faculty(request: Request) -> _OAuthSession:
+        if settings.faculty_role_id is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Faculty dashboard access is not configured.",
+            )
+        auth_session = await current_authenticated(request)
+        if not auth_session.is_faculty and not auth_session.is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail="The configured Faculty role is required.",
+            )
         return auth_session
 
     @app.get("/auth/login")
     async def login(
-        request: Request, session: str | None = None
+        request: Request,
+        session: str | None = None,
+        destination: str | None = None,
     ) -> RedirectResponse:
         public_url, client_id, _ = require_oauth_config()
         now = time.time()
@@ -322,7 +457,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         state = secrets.token_urlsafe(32)
         request.session.clear()
         request.session["oauth_state"] = state
-        if session and len(session) == 32 and all(
+        if destination == "faculty":
+            request.session["return_to"] = "/faculty"
+        elif session and len(session) == 32 and all(
             character in "0123456789abcdef" for character in session.casefold()
         ):
             request.session["return_to"] = f"/?session={session}"
@@ -330,7 +467,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             "client_id": client_id,
             "redirect_uri": f"{public_url}/auth/callback",
             "response_type": "code",
-            "scope": "identify guilds",
+            "scope": "identify guilds guilds.members.read",
             "state": state,
         }
         return RedirectResponse(
@@ -382,6 +519,16 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 )
                 guilds_response.raise_for_status()
                 guilds = guilds_response.json()
+                member = None
+                if settings.faculty_role_id is not None and _is_guild_member(
+                    guilds, settings.guild_id
+                ):
+                    member_response = await client.get(
+                        f"{DISCORD_API}/users/@me/guilds/{settings.guild_id}/member",
+                        headers={"Authorization": f"******"},
+                    )
+                    member_response.raise_for_status()
+                    member = member_response.json()
         except (httpx.HTTPError, KeyError, ValueError):
             LOGGER.exception("Discord OAuth sign-in failed.")
             raise HTTPException(
@@ -389,13 +536,15 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 detail="Discord sign-in could not be completed. Please try again.",
             ) from None
 
-        if not _is_guild_admin(guilds, settings.guild_id):
+        is_admin = _is_guild_admin(guilds, settings.guild_id)
+        is_faculty = _is_guild_faculty(member, settings.faculty_role_id)
+        if not is_admin and not is_faculty:
             await _revoke_oauth_token(
                 access_token, client_id, client_secret
             )
             raise HTTPException(
                 status_code=403,
-                detail="This Discord account is not an administrator in the configured server.",
+                detail="This Discord account is not an administrator and does not have the Faculty role in the configured server.",
             )
         return_to = request.session.get("return_to", "/")
         session_key = secrets.token_urlsafe(32)
@@ -408,6 +557,8 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             access_token_expires_at=now + int(token.get("expires_in", 3600)),
             expires_at=now + OAUTH_SESSION_TTL_SECONDS,
             last_permission_check=now,
+            is_admin=is_admin,
+            is_faculty=is_faculty,
             permission_check_lock=asyncio.Lock(),
         )
         request.session.clear()
@@ -448,6 +599,17 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             raise
         return HTMLResponse(HTML_PAGE)
 
+    @app.get("/faculty", response_class=HTMLResponse, response_model=None)
+    async def faculty_page(request: Request) -> HTMLResponse | RedirectResponse:
+        require_oauth_config()
+        try:
+            await current_faculty(request)
+        except HTTPException as error:
+            if error.status_code == 401:
+                return RedirectResponse("/login?destination=faculty", status_code=302)
+            raise
+        return HTMLResponse(FACULTY_PAGE)
+
     @app.get("/students/{usn}", response_class=HTMLResponse)
     async def student_page(usn: str, request: Request) -> HTMLResponse:
         await current_admin(request)
@@ -455,30 +617,46 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             raise HTTPException(status_code=404, detail="Student not found.")
         return HTMLResponse(HTML_PAGE)
 
-    @app.get("/login", response_class=HTMLResponse)
-    async def login_page(session: str | None = None) -> HTMLResponse:
-        require_oauth_config()
-        query = (
-            f"?session={session}"
-            if session
-            and len(session) == 32
-            and all(
-                character in "0123456789abcdef" for character in session.casefold()
+    @app.get("/faculty/students/{usn}", response_class=HTMLResponse)
+    async def faculty_student_page(usn: str, request: Request) -> HTMLResponse:
+        auth_session = await current_faculty(request)
+        if not usn.strip() or len(usn) > 100:
+            raise HTTPException(status_code=404, detail="Student not found.")
+        if usn.casefold() not in {
+            assigned.casefold()
+            for assigned in database.get_faculty_student_usns(
+                settings.guild_id, auth_session.user_id
             )
-            else ""
-        )
+        }:
+            raise HTTPException(status_code=404, detail="Student not found.")
+        return HTMLResponse(HTML_PAGE)
+
+    @app.get("/login", response_class=HTMLResponse)
+    async def login_page(
+        session: str | None = None, destination: str | None = None
+    ) -> HTMLResponse:
+        require_oauth_config()
+        query = "?destination=faculty" if destination == "faculty" else ""
+        if not query and session and len(session) == 32 and all(
+            character in "0123456789abcdef" for character in session.casefold()
+        ):
+            query = f"?session={session}"
         return HTMLResponse(
             """<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-            <title>Quizcord Analytics · Sign in</title><style>body{margin:0;background:#0b1020;color:#e7edf8;font:16px system-ui;min-height:100vh;display:grid;place-items:center}.card{max-width:440px;padding:38px;border:1px solid #26334e;border-radius:18px;background:#141d32}p{color:#aebbd2;line-height:1.6}a{display:inline-block;padding:12px 18px;border-radius:9px;background:#5865f2;color:white;text-decoration:none;font-weight:650}</style>
-            <main class="card"><h1>Quizcord Analytics</h1><p>Sign in with Discord. Access is limited to administrators of the configured server.</p><a href="/auth/login">Continue with Discord</a></main></html>""".replace(
+            <title>Quizcord Analytics · Sign in</title><style>body{margin:0;background:#0b1020;color:#e7edf8;font:16px system-ui;min-height:100vh;display:grid;place-items:center}.card{max-width:440px;padding:38px;border:1px solid #26334e;border-radius:18px;background:#141d32}p{color:#aebbd2;line-height:1.6}a{display:inline-block;padding:12px 18px;border-radius:9px;background:#5865f2;color:white;text-decoration:none;font-weight:650}.faculty-link{display:block;margin-top:14px;padding:0;background:transparent;color:#aebbd2;font-size:14px;font-weight:500}</style>
+            <main class="card"><h1>Quizcord Analytics</h1><p>Sign in with Discord. Access is limited to administrators or members with the Faculty role.</p><a href="/auth/login">Continue with Discord</a><a class="faculty-link" href="/faculty">Faculty? Open the faculty portal.</a></main></html>""".replace(
                 'href="/auth/login"', f'href="/auth/login{query}"'
             )
         )
 
     @app.get("/api/me")
     async def me(request: Request) -> dict[str, str]:
-        auth_session = await current_admin(request)
-        return {"id": str(auth_session.user_id), "username": auth_session.username}
+        auth_session = await current_authenticated(request)
+        return {
+            "id": str(auth_session.user_id),
+            "username": auth_session.username,
+            "role": "admin" if auth_session.is_admin else "faculty",
+        }
 
     @app.get("/api/sessions")
     async def sessions(request: Request) -> list[dict[str, Any]]:
@@ -497,6 +675,126 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             _dashboard_user(user)
             for user in database.get_dashboard_users(settings.guild_id)
         ]
+
+    @app.get("/api/faculty/students")
+    async def faculty_students(request: Request) -> list[dict[str, Any]]:
+        auth_session = await current_faculty(request)
+        assigned_usns = database.get_faculty_student_usns(
+            settings.guild_id, auth_session.user_id
+        )
+        dashboard_users = {
+            user.usn.casefold(): user
+            for user in database.get_dashboard_users(settings.guild_id)
+            if user.usn is not None
+        }
+        students = []
+        for usn in assigned_usns:
+            user = dashboard_users.get(usn.casefold())
+            analytics = database.get_student_quiz_analytics(settings.guild_id, usn)
+            students.append(
+                {
+                    "usn": usn,
+                    "student_name": (
+                        (
+                            user.student_name
+                            or user.global_name
+                            or user.server_nickname
+                        )
+                        if user
+                        else analytics.student_name
+                    ),
+                    "quizzes_attended": analytics.quizzes_attended,
+                    "completed_quizzes": analytics.completed_quizzes,
+                    "attendance_percentage": analytics.attendance_percentage,
+                    "total_points": analytics.total_points,
+                }
+            )
+        return students
+
+    @app.get("/api/faculty/candidates")
+    async def faculty_candidates(
+        request: Request, search: str = ""
+    ) -> list[dict[str, Any]]:
+        auth_session = await current_faculty(request)
+        query = search.strip().upper()
+        if len(query) > 100:
+            raise HTTPException(status_code=422, detail="USN search is too long.")
+        assigned_usns = {
+            usn.casefold()
+            for usn in database.get_faculty_student_usns(
+                settings.guild_id, auth_session.user_id
+            )
+        }
+        candidates = []
+        for user in database.get_dashboard_users(settings.guild_id):
+            if user.usn is None or query not in user.usn.upper():
+                continue
+            candidates.append(
+                {
+                    "usn": user.usn,
+                    "student_name": (
+                        user.student_name
+                        or user.global_name
+                        or user.server_nickname
+                        or user.usn
+                    ),
+                    "assigned": user.usn.casefold() in assigned_usns,
+                }
+            )
+        return candidates
+
+    @app.post("/api/faculty/students/{usn}", status_code=204)
+    async def add_faculty_student(
+        usn: str, request: Request
+    ) -> Response:
+        auth_session = await current_faculty(request)
+        if not usn.strip() or len(usn) > 100:
+            raise HTTPException(status_code=404, detail="Student not found.")
+        added = database.add_faculty_student(
+            settings.guild_id, auth_session.user_id, usn
+        )
+        if not added:
+            available_usns = {
+                user.usn.casefold()
+                for user in database.get_dashboard_users(settings.guild_id)
+                if user.usn is not None
+            }
+            if usn.casefold() not in available_usns:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No current server member has this USN.",
+                )
+            raise HTTPException(
+                status_code=409, detail="This student is already in your list."
+            )
+        return Response(status_code=204)
+
+    @app.delete("/api/faculty/students/{usn}", status_code=204)
+    async def remove_faculty_student(
+        usn: str, request: Request
+    ) -> Response:
+        auth_session = await current_faculty(request)
+        if not database.remove_faculty_student(
+            settings.guild_id, auth_session.user_id, usn
+        ):
+            raise HTTPException(status_code=404, detail="Student not found.")
+        return Response(status_code=204)
+
+    @app.get("/api/faculty/students/{usn}")
+    async def faculty_student_analytics(
+        usn: str, request: Request
+    ) -> dict[str, Any]:
+        auth_session = await current_faculty(request)
+        if not usn.strip() or len(usn) > 100 or usn.casefold() not in {
+            assigned.casefold()
+            for assigned in database.get_faculty_student_usns(
+                settings.guild_id, auth_session.user_id
+            )
+        }:
+            raise HTTPException(status_code=404, detail="Student not found.")
+        return _student_analytics(
+            database.get_student_quiz_analytics(settings.guild_id, usn)
+        )
 
     @app.get("/api/students/{usn}")
     async def student_analytics(usn: str, request: Request) -> dict[str, Any]:
@@ -565,7 +863,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
     return app
 
 
-async def _verify_current_guild_admin(
+async def _verify_current_guild_access(
     auth_session: _OAuthSession, settings: Settings
 ) -> _OAuthSession:
     now = time.time()
@@ -599,6 +897,7 @@ async def _verify_current_guild_admin(
             token.get("expires_in", 3600)
         )
 
+    member: Any = None
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.get(
@@ -607,18 +906,26 @@ async def _verify_current_guild_admin(
             )
             response.raise_for_status()
             guilds = response.json()
+            if settings.faculty_role_id is not None and _is_guild_member(
+                guilds, settings.guild_id
+            ):
+                member_response = await client.get(
+                    f"{DISCORD_API}/users/@me/guilds/{settings.guild_id}/member",
+                    headers={"Authorization": f"Bearer {auth_session.access_token}"},
+                )
+                member_response.raise_for_status()
+                member = member_response.json()
     except (httpx.HTTPError, ValueError):
-        LOGGER.exception("Could not verify dashboard administrator permissions.")
+        LOGGER.exception("Could not verify dashboard server roles.")
         raise HTTPException(
             status_code=503,
-            detail="Administrator access could not be verified. Please retry.",
+            detail="Dashboard server access could not be verified. Please retry.",
         ) from None
 
-    if not _is_guild_admin(guilds, settings.guild_id):
-        raise HTTPException(
-            status_code=403,
-            detail="Administrator access to the configured server is required.",
-        )
+    auth_session.is_admin = _is_guild_admin(guilds, settings.guild_id)
+    auth_session.is_faculty = _is_guild_faculty(
+        member, settings.faculty_role_id
+    )
     auth_session.last_permission_check = now
     return auth_session
 
@@ -639,6 +946,22 @@ def _is_guild_admin(guilds: Any, guild_id: int) -> bool:
             permissions & (MANAGE_GUILD_PERMISSION | ADMINISTRATOR_PERMISSION)
         )
     return False
+
+
+def _is_guild_faculty(member: Any, faculty_role_id: int | None) -> bool:
+    if faculty_role_id is None or not isinstance(member, dict):
+        return False
+    roles = member.get("roles")
+    if not isinstance(roles, list):
+        return False
+    return str(faculty_role_id) in {str(role_id) for role_id in roles}
+
+
+def _is_guild_member(guilds: Any, guild_id: int) -> bool:
+    return isinstance(guilds, list) and any(
+        isinstance(guild, dict) and str(guild.get("id")) == str(guild_id)
+        for guild in guilds
+    )
 
 
 async def _revoke_oauth_token(

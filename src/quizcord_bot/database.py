@@ -324,6 +324,17 @@ class Database:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS faculty_student_assignments (
+                    guild_id TEXT NOT NULL,
+                    faculty_discord_id TEXT NOT NULL,
+                    usn TEXT NOT NULL COLLATE NOCASE,
+                    assigned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (guild_id, faculty_discord_id, usn)
+                )
+                """
+            )
             eligibility_columns = {
                 row[1]
                 for row in connection.execute(
@@ -1190,6 +1201,58 @@ class Database:
             )
             for account_name, global_name, server_nickname, usn, student_name in rows
         )
+
+    def get_faculty_student_usns(
+        self, guild_id: int, faculty_discord_id: int
+    ) -> tuple[str, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT usn
+                FROM faculty_student_assignments
+                WHERE guild_id = ? AND faculty_discord_id = ?
+                ORDER BY usn COLLATE NOCASE
+                """,
+                (str(guild_id), str(faculty_discord_id)),
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
+    def add_faculty_student(
+        self, guild_id: int, faculty_discord_id: int, usn: str
+    ) -> bool:
+        normalized_usn = usn.strip().upper()
+        eligible_usns = {
+            user.usn.casefold()
+            for user in self.get_dashboard_users(guild_id)
+            if user.usn is not None
+        }
+        if normalized_usn.casefold() not in eligible_usns:
+            return False
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO faculty_student_assignments (
+                    guild_id, faculty_discord_id, usn
+                )
+                VALUES (?, ?, ?)
+                """,
+                (str(guild_id), str(faculty_discord_id), normalized_usn),
+            )
+        return cursor.rowcount > 0
+
+    def remove_faculty_student(
+        self, guild_id: int, faculty_discord_id: int, usn: str
+    ) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM faculty_student_assignments
+                WHERE guild_id = ? AND faculty_discord_id = ?
+                  AND usn = ? COLLATE NOCASE
+                """,
+                (str(guild_id), str(faculty_discord_id), usn.strip()),
+            )
+        return cursor.rowcount > 0
 
     def claim_global_name_reminder(
         self, session_id: str, discord_id: int

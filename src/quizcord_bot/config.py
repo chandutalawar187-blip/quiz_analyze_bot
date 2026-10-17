@@ -20,6 +20,7 @@ class Settings:
     dashboard_public_url: str | None
     discord_oauth_client_id: str | None
     discord_oauth_client_secret: str | None
+    faculty_role_id: int | None
     dashboard_session_secret: str | None
     dashboard_host: str
     dashboard_port: int
@@ -43,6 +44,7 @@ class Settings:
         dashboard_public_url = os.getenv("DASHBOARD_PUBLIC_URL", "").strip().rstrip("/")
         oauth_client_id = os.getenv("DISCORD_OAUTH_CLIENT_ID", "").strip()
         oauth_client_secret = os.getenv("DISCORD_OAUTH_CLIENT_SECRET", "").strip()
+        faculty_role_id = _optional_discord_id("FACULTY_ROLE_ID")
         session_secret = os.getenv("DASHBOARD_SESSION_SECRET", "").strip()
         dashboard_settings = (
             dashboard_public_url,
@@ -87,6 +89,7 @@ class Settings:
             dashboard_public_url=dashboard_public_url or None,
             discord_oauth_client_id=oauth_client_id or None,
             discord_oauth_client_secret=oauth_client_secret or None,
+            faculty_role_id=faculty_role_id,
             dashboard_session_secret=session_secret or None,
             dashboard_host=dashboard_host,
             dashboard_port=dashboard_port,

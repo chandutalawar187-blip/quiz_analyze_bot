@@ -29,6 +29,7 @@ class SettingsTests(unittest.TestCase):
                 "QUIZCORD_BOT_ID": "12345",
                 "BOT_GUILD_ID": "67890",
                 "BOT_DATABASE_PATH": "test-results.db",
+                "FACULTY_ROLE_ID": "54321",
             },
             clear=True,
         ):
@@ -38,6 +39,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.quizcord_bot_id, 12345)
         self.assertEqual(settings.guild_id, 67890)
         self.assertEqual(settings.database_path.name, "test-results.db")
+        self.assertEqual(settings.faculty_role_id, 54321)
 
     def test_quizcord_bot_id_can_be_omitted_for_automatic_detection(self) -> None:
         with patch("quizcord_bot.config.load_dotenv"), patch.dict(
