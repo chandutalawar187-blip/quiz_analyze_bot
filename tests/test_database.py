@@ -496,6 +496,40 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertEqual(self.database.get_faculty_student_usns(67890, 111), ())
 
+    def test_faculty_temporary_password_requires_change_and_locks_after_failures(
+        self,
+    ) -> None:
+        self.database.set_faculty_temporary_password(67890, 111, "temporary-secret")
+
+        self.assertTrue(self.database.has_faculty_password(67890, 111))
+        self.assertEqual(
+            self.database.verify_faculty_password(
+                67890, 111, "temporary-secret"
+            ),
+            (True, True),
+        )
+        self.assertEqual(
+            self.database.verify_faculty_password(67890, 111, "wrong-password"),
+            (False, False),
+        )
+        self.database.change_faculty_password(
+            67890, 111, "a-new-long-faculty-password"
+        )
+        self.assertEqual(
+            self.database.verify_faculty_password(
+                67890, 111, "a-new-long-faculty-password"
+            ),
+            (True, False),
+        )
+
+        self.database.set_faculty_temporary_password(67890, 222, "temp-secret")
+        for _ in range(5):
+            self.database.verify_faculty_password(67890, 222, "wrong-password")
+        self.assertEqual(
+            self.database.verify_faculty_password(67890, 222, "temp-secret"),
+            (False, False),
+        )
+
     def test_unmapped_privileged_mention_uses_cached_name_and_is_counted(
         self,
     ) -> None:

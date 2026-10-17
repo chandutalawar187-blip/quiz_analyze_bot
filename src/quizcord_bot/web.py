@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
@@ -99,6 +99,8 @@ class _OAuthSession:
     last_permission_check: float
     is_admin: bool
     is_faculty: bool
+    faculty_password_verified: bool
+    must_change_faculty_password: bool
     permission_check_lock: asyncio.Lock
 
 
@@ -123,7 +125,7 @@ HTML_PAGE = r"""<!doctype html>
   </style>
 </head>
 <body>
-  <header class="top"><div class="brand">Quizcord <span>Analytics</span></div><div class="account"><a id="back-link" href="/" hidden>← Dashboard</a><span id="account-name"></span><a href="/auth/logout">Sign out</a></div></header>
+  <header class="top"><div class="brand">Quizcord <span>Analytics</span></div><div class="account"><a id="back-link" href="/" hidden>← Dashboard</a><a id="faculty-password-link" href="/admin/faculty-passwords" hidden>Faculty passwords</a><span id="account-name"></span><a href="/auth/logout">Sign out</a></div></header>
   <main>
     <nav class="dashboard-tabs" id="dashboard-tabs" aria-label="Dashboard sections">
       <button type="button" data-view="sessions" aria-selected="true">Quiz sessions</button>
@@ -279,17 +281,93 @@ HTML_PAGE = r"""<!doctype html>
     }
     dashboardTabs.addEventListener("click",event=>{const button=event.target.closest("button[data-view]");if(button)switchView(button.dataset.view);});
     select.addEventListener("change",()=>{activeSession=select.value;refresh();});
-    fetch("/api/me").then(response=>{if(!response.ok)throw new Error("Sign-in expired.");return response.json();}).then(user=>{document.getElementById("account-name").textContent=user.username;}).catch(()=>location.replace("/"));
+    fetch("/api/me").then(response=>{if(!response.ok)throw new Error("Sign-in expired.");return response.json();}).then(user=>{document.getElementById("account-name").textContent=user.username;document.getElementById("faculty-password-link").hidden=user.role!=="admin";}).catch(()=>location.replace("/"));
     if(studentUSN){
       dashboardTabs.hidden=true;
       select.hidden=true;
-      async function refreshStudent(){try{const endpoint=facultyStudentPath?"/api/faculty/students/":"/api/students/";const response=await fetch(endpoint+encodeURIComponent(studentUSN),{cache:"no-store"});if(response.status===401){location.replace(facultyStudentPath?"/login?destination=faculty":"/");return;}if(!response.ok)throw new Error("Could not load student analytics.");renderStudent(await response.json());}catch(error){content.replaceChildren(el("div","empty error",error.message));}}
+      async function refreshStudent(){try{const endpoint=facultyStudentPath?"/api/faculty/students/":"/api/students/";const response=await fetch(endpoint+encodeURIComponent(studentUSN),{cache:"no-store"});if(response.status===401){location.replace(facultyStudentPath?"/faculty/login":"/");return;}if(!response.ok)throw new Error("Could not load student analytics.");renderStudent(await response.json());}catch(error){content.replaceChildren(el("div","empty error",error.message));}}
       refreshStudent();setInterval(refreshStudent,10000);
     }else{refresh();setInterval(()=>{if(activeView==="users")refreshUsers();else refresh();},3000);}
   </script>
 </body>
 </html>
 """
+
+FACULTY_LOGIN_PAGE = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark"><title>Faculty sign in · Quizcord</title>
+<style>
+:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#f2f3f5;background:#313338}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(ellipse at 50% 35%,#3b3d78 0,#313338 62%)}
+main{width:min(460px,calc(100% - 32px));padding:36px;border-radius:12px;background:#2b2d31;box-shadow:0 18px 50px #11131888}
+.brand{font-weight:750;letter-spacing:.5px;text-transform:uppercase;color:#b5bac1}.brand span{color:#a6a9ff}
+.eyebrow{margin-top:38px;color:#a6a9ff;font-size:12px;letter-spacing:1.4px;font-weight:700;text-transform:uppercase}
+h1{font-size:28px;margin:9px 0}.description{color:#b5bac1;line-height:1.6;margin:0 0 24px}
+a{display:block;text-align:center;padding:13px 16px;border-radius:5px;background:#5865f2;color:white;text-decoration:none;font-weight:700}
+a:hover{background:#4752c4}.note{color:#949ba4;font-size:12px;line-height:1.5;margin-top:19px;text-align:center}.back{margin-top:16px;background:transparent;color:#c4c9ce;border:1px solid #4e5058}
+</style></head><body><main>
+<div class="brand">Quizcord <span>Faculty</span></div><div class="eyebrow">Faculty portal</div>
+<h1>Sign in to your faculty account</h1>
+<p class="description">Verify your Discord account and Faculty role, then enter the separate faculty password provided by your administrator.</p>
+<a href="/auth/login?destination=faculty">Continue with Discord</a>
+<p class="note">This portal never asks for or stores your Discord password. Faculty access also requires the server's Faculty role.</p>
+<a class="back" href="/login">Administrator dashboard sign in</a>
+</main></body></html>"""
+
+FACULTY_PASSWORD_PAGE = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark"><title>Faculty password · Quizcord</title>
+<style>
+:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#f2f3f5;background:#313338}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(ellipse at 50% 35%,#3b3d78 0,#313338 62%)}
+main{width:min(460px,calc(100% - 32px));padding:36px;border-radius:12px;background:#2b2d31;box-shadow:0 18px 50px #11131888}
+.brand{font-weight:750;letter-spacing:.5px;text-transform:uppercase;color:#b5bac1}.brand span{color:#a6a9ff}.eyebrow{margin-top:32px;color:#a6a9ff;font-size:12px;letter-spacing:1.4px;font-weight:700;text-transform:uppercase}
+h1{font-size:26px;margin:8px 0 10px}.description{color:#b5bac1;line-height:1.55;margin:0 0 22px}
+label{display:block;font-size:13px;color:#dbdee1;margin:14px 0 7px}input{width:100%;padding:12px;background:#1e1f22;border:1px solid #4e5058;border-radius:5px;color:#f2f3f5;font:inherit}
+button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:5px;background:#5865f2;color:white;font:inherit;font-weight:700;cursor:pointer}button:hover{background:#4752c4}
+.muted{color:#949ba4;font-size:12px;line-height:1.5}.message{min-height:20px;margin-top:12px;color:#ff9e9e;font-size:13px}.hidden{display:none!important}a{color:#c4c9ce;font-size:13px}
+</style></head><body><main>
+<div class="brand">Quizcord <span>Faculty</span></div><div class="eyebrow">Second step</div>
+<h1 id="title">Faculty password</h1>
+<p class="description" id="description">Enter the temporary faculty password provided by your administrator.</p>
+<form id="password-form"><label for="password">Faculty password</label><input id="password" type="password" autocomplete="current-password" required>
+<div id="new-password-fields" class="hidden"><label for="new-password">New password</label><input id="new-password" type="password" autocomplete="new-password" minlength="12"><label for="confirm-password">Confirm new password</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="12"><p class="muted">Use at least 12 characters. This is an app password, not your Discord password.</p></div>
+<button id="submit" type="submit">Continue</button><div class="message" id="message" role="alert"></div></form>
+<p class="muted">Forgot your faculty password? Ask an administrator to issue a new temporary password.</p><a href="/auth/logout">Sign out</a>
+<script>
+const form=document.getElementById("password-form"),password=document.getElementById("password"),fields=document.getElementById("new-password-fields"),message=document.getElementById("message"),button=document.getElementById("submit");
+let mustChange=false;
+async function send(path,data){const response=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data),cache:"no-store"});const body=await response.json().catch(()=>({detail:"Request failed."}));if(response.status===401&&body.detail==="Please sign in again."){location.replace("/faculty/login");throw new Error(body.detail);}if(!response.ok)throw new Error(body.detail||"Could not verify your password.");return body;}
+form.addEventListener("submit",async event=>{event.preventDefault();message.textContent="";button.disabled=true;
+try{if(!mustChange){const result=await send("/api/faculty/password/verify",{password:password.value});mustChange=result.must_change;if(mustChange){fields.classList.remove("hidden");password.value="";password.autocomplete="new-password";document.getElementById("title").textContent="Set a new password";document.getElementById("description").textContent="Your temporary password was accepted. Choose a new password to finish signing in.";button.textContent="Update password";return;}location.replace("/faculty");return;}
+const next=document.getElementById("new-password").value,confirm=document.getElementById("confirm-password").value;if(next.length<12)throw new Error("Use at least 12 characters.");if(next!==confirm)throw new Error("The new passwords do not match.");await send("/api/faculty/password/change",{current_password:password.value,new_password:next});location.replace("/faculty");
+}catch(error){message.textContent=error.message;}finally{button.disabled=false;}});
+</script></main></body></html>"""
+
+FACULTY_ADMIN_PAGE = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark"><title>Faculty passwords · Quizcord</title>
+<style>
+:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#e7edf8;background:#0b1020}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 10% 0%,#17264a 0,transparent 42%),#0b1020}
+header{padding:22px max(24px,calc((100vw - 900px)/2));border-bottom:1px solid #26314b;font-weight:750}header span{color:#8fa7ff}
+main{max-width:900px;margin:44px auto;padding:0 24px}.panel{background:#11182b;border:1px solid #26334e;border-radius:16px;padding:24px}
+.eyebrow{color:#91a6ff;font-size:12px;letter-spacing:1.4px;text-transform:uppercase;font-weight:700}h1{margin:8px 0 10px}.description,.note{color:#aebbd2;line-height:1.6}
+label{display:block;margin:22px 0 8px;font-size:13px}input{width:min(100%,460px);padding:12px;background:#0b1020;color:#e7edf8;border:1px solid #33415e;border-radius:9px}
+button{margin-top:16px;padding:11px 16px;border:0;border-radius:8px;background:#5865f2;color:white;font:inherit;font-weight:700;cursor:pointer}button:disabled{opacity:.6}
+.secret{margin-top:22px;padding:16px;border:1px solid #425681;border-radius:10px;background:#182540}.secret code{display:block;margin:12px 0;word-break:break-all;font-size:17px;color:#fff}.error{color:#ff9e9e}.back{display:inline-block;margin:0 0 18px;color:#aebbd2;text-decoration:none}
+</style></head><body><header>Quizcord <span>Admin</span></header><main>
+<a class="back" href="/">← Admin dashboard</a><section class="panel"><div class="eyebrow">Faculty access</div><h1>Issue a temporary password</h1>
+<p class="description">Enter the faculty member's Discord user ID. A new one-time password is generated and shown only once; the faculty member must change it after signing in.</p>
+<form id="provision-form"><label for="discord-id">Faculty Discord user ID</label><input id="discord-id" inputmode="numeric" pattern="[0-9]+" required><br><button id="submit" type="submit">Generate temporary password</button><div id="error" class="error" role="alert"></div></form>
+<div id="secret" class="secret" hidden><strong>Copy this password and send it securely to the faculty member. It will not be shown again.</strong><code id="temporary-password"></code><button id="copy" type="button">Copy password</button></div>
+<p class="note">The account must currently have the configured Faculty role. Resetting a password invalidates the previous one.</p>
+</section>
+<script>
+const form=document.getElementById("provision-form"),id=document.getElementById("discord-id"),error=document.getElementById("error"),secret=document.getElementById("secret"),temporary=document.getElementById("temporary-password"),submit=document.getElementById("submit");
+form.addEventListener("submit",async event=>{event.preventDefault();error.textContent="";secret.hidden=true;submit.disabled=true;try{const response=await fetch("/api/admin/faculty-passwords/"+encodeURIComponent(id.value.trim()),{method:"POST",cache:"no-store"});const body=await response.json();if(response.status===401){location.replace("/");return;}if(!response.ok)throw new Error(body.detail||"Could not provision faculty password.");temporary.textContent=body.temporary_password;secret.hidden=false;}catch(exception){error.textContent=exception.message;}finally{submit.disabled=false;}});
+document.getElementById("copy").addEventListener("click",async()=>{await navigator.clipboard.writeText(temporary.textContent);document.getElementById("copy").textContent="Copied";});
+</script></main></body></html>"""
 
 FACULTY_PAGE = r"""<!doctype html>
 <html lang="en">
@@ -327,7 +405,7 @@ FACULTY_PAGE = r"""<!doctype html>
     let assignedUSNs=new Set(),searchTimer;
     async function api(path,options={}){
       const response=await fetch(path,{cache:"no-store",...options});
-      if(response.status===401){location.replace("/login?destination=faculty");throw new Error("Sign-in expired.");}
+      if(response.status===401){location.replace("/faculty/login");throw new Error("Sign-in expired.");}
       return response;
     }
     async function loadAssigned(){
@@ -343,7 +421,8 @@ FACULTY_PAGE = r"""<!doctype html>
           const link=el("a","student-link",student.student_name);link.href="/faculty/students/"+encodeURIComponent(student.usn);
           nameCell.append(link,el("div","usn muted",student.usn));
           const remove=el("button","button remove","Remove");remove.type="button";remove.addEventListener("click",()=>removeStudent(student.usn,remove));
-          row.append(nameCell,el("td","row-metrics",student.quizzes_attended+" / "+student.completed_quizzes),el("td","row-metrics",Number(student.attendance_percentage).toFixed(1)+"%"),el("td","row-metrics",String(student.total_points)),el("td","",remove));body.append(row);
+          const removeCell=el("td","");removeCell.appendChild(remove);
+          row.append(nameCell,el("td","row-metrics",student.quizzes_attended+" / "+student.completed_quizzes),el("td","row-metrics",Number(student.attendance_percentage).toFixed(1)+"%"),el("td","row-metrics",String(student.total_points)),removeCell);body.append(row);
         });
         table.append(body);wrap.append(table);assigned.replaceChildren(wrap);
       }catch(error){assigned.replaceChildren(el("div","empty error",error.message));}
@@ -387,7 +466,7 @@ FACULTY_PAGE = r"""<!doctype html>
       }catch(error){assigned.prepend(el("div","notice error",error.message));button.disabled=false;}
     }
     search.addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(loadCandidates,200);});
-    api("/api/me").then(response=>{if(!response.ok)throw new Error();return response.json();}).then(user=>{document.getElementById("account-name").textContent=user.username;}).catch(()=>location.replace("/login?destination=faculty"));
+    api("/api/me").then(response=>{if(!response.ok)throw new Error();return response.json();}).then(user=>{document.getElementById("account-name").textContent=user.username;}).catch(()=>location.replace("/faculty/login"));
     loadAssigned();loadCandidates();
   </script>
 </body>
@@ -522,6 +601,14 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 status_code=403,
                 detail="The configured Faculty role is required.",
             )
+        if auth_session.is_faculty and (
+            not auth_session.faculty_password_verified
+            or auth_session.must_change_faculty_password
+        ):
+            raise HTTPException(
+                status_code=428,
+                detail="Complete faculty password verification before continuing.",
+            )
         return auth_session
 
     @app.get("/auth/login")
@@ -543,7 +630,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         request.session.clear()
         request.session["oauth_state"] = state
         if destination == "faculty":
-            request.session["return_to"] = "/faculty"
+            request.session["return_to"] = "/faculty/password"
         elif session and len(session) == 32 and all(
             character in "0123456789abcdef" for character in session.casefold()
         ):
@@ -654,6 +741,8 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             last_permission_check=now,
             is_admin=is_admin,
             is_faculty=is_faculty,
+            faculty_password_verified=False,
+            must_change_faculty_password=False,
             permission_check_lock=asyncio.Lock(),
         )
         request.session.clear()
@@ -701,9 +790,41 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             await current_faculty(request)
         except HTTPException as error:
             if error.status_code == 401:
-                return RedirectResponse("/login?destination=faculty", status_code=302)
+                return RedirectResponse("/faculty/login", status_code=302)
+            if error.status_code == 428:
+                return RedirectResponse("/faculty/password", status_code=302)
             raise
         return HTMLResponse(FACULTY_PAGE)
+
+    @app.get("/faculty/login", response_class=HTMLResponse)
+    async def faculty_login_page() -> HTMLResponse:
+        require_oauth_config()
+        return HTMLResponse(FACULTY_LOGIN_PAGE)
+
+    @app.get(
+        "/faculty/password",
+        response_class=HTMLResponse,
+        response_model=None,
+    )
+    async def faculty_password_page(request: Request) -> HTMLResponse | RedirectResponse:
+        try:
+            auth_session = await current_authenticated(request)
+        except HTTPException as error:
+            if error.status_code == 401:
+                return RedirectResponse("/faculty/login", status_code=302)
+            raise
+        if not auth_session.is_faculty and not auth_session.is_admin:
+            raise HTTPException(
+                status_code=403, detail="The configured Faculty role is required."
+            )
+        if auth_session.is_admin and not auth_session.is_faculty:
+            return RedirectResponse("/faculty", status_code=302)
+        return HTMLResponse(FACULTY_PASSWORD_PAGE)
+
+    @app.get("/admin/faculty-passwords", response_class=HTMLResponse)
+    async def faculty_password_admin_page(request: Request) -> HTMLResponse:
+        await current_admin(request)
+        return HTMLResponse(FACULTY_ADMIN_PAGE)
 
     @app.get("/students/{usn}", response_class=HTMLResponse)
     async def student_page(usn: str, request: Request) -> HTMLResponse:
@@ -739,7 +860,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         return HTMLResponse(
             """<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
             <title>Quizcord Analytics · Sign in</title><style>body{margin:0;background:#0b1020;color:#e7edf8;font:16px system-ui;min-height:100vh;display:grid;place-items:center}.card{max-width:440px;padding:38px;border:1px solid #26334e;border-radius:18px;background:#141d32}p{color:#aebbd2;line-height:1.6}a{display:inline-block;padding:12px 18px;border-radius:9px;background:#5865f2;color:white;text-decoration:none;font-weight:650}.faculty-link{display:block;margin-top:14px;padding:0;background:transparent;color:#aebbd2;font-size:14px;font-weight:500}</style>
-            <main class="card"><h1>Quizcord Analytics</h1><p>Sign in with Discord. Access is limited to administrators or members with the Faculty role.</p><a href="/auth/login">Continue with Discord</a><a class="faculty-link" href="/faculty">Faculty? Open the faculty portal.</a></main></html>""".replace(
+            <main class="card"><h1>Quizcord Analytics</h1><p>Sign in with Discord. Access is limited to administrators or members with the Faculty role.</p><a href="/auth/login">Continue with Discord</a><a class="faculty-link" href="/faculty/login">Faculty? Open the faculty portal.</a></main></html>""".replace(
                 'href="/auth/login"', f'href="/auth/login{query}"'
             )
         )
@@ -805,6 +926,98 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 }
             )
         return students
+
+    @app.post("/api/faculty/password/verify")
+    async def verify_faculty_password(
+        request: Request, payload: dict[str, str] = Body(...)
+    ) -> dict[str, bool]:
+        auth_session = await current_authenticated(request)
+        if not auth_session.is_faculty:
+            raise HTTPException(
+                status_code=403, detail="The configured Faculty role is required."
+            )
+        password = payload.get("password", "")
+        if not password or len(password) > 256:
+            raise HTTPException(status_code=422, detail="Enter your faculty password.")
+        valid, must_change = database.verify_faculty_password(
+            settings.guild_id, auth_session.user_id, password
+        )
+        if not valid:
+            raise HTTPException(
+                status_code=401,
+                detail="Faculty password is incorrect, not provisioned, or temporarily locked. Contact an administrator if you need a reset.",
+            )
+        auth_session.faculty_password_verified = True
+        auth_session.must_change_faculty_password = must_change
+        return {"must_change": must_change}
+
+    @app.post("/api/faculty/password/change")
+    async def change_faculty_password(
+        request: Request, payload: dict[str, str] = Body(...)
+    ) -> dict[str, bool]:
+        auth_session = await current_authenticated(request)
+        if not auth_session.is_faculty:
+            raise HTTPException(
+                status_code=403, detail="The configured Faculty role is required."
+            )
+        current_password = payload.get("current_password", "")
+        new_password = payload.get("new_password", "")
+        if len(new_password) < 12 or len(new_password) > 128:
+            raise HTTPException(
+                status_code=422,
+                detail="Your new faculty password must be between 12 and 128 characters.",
+            )
+        valid, _ = database.verify_faculty_password(
+            settings.guild_id, auth_session.user_id, current_password
+        )
+        if not valid:
+            raise HTTPException(
+                status_code=401, detail="The current faculty password is incorrect."
+            )
+        if secrets.compare_digest(current_password, new_password):
+            raise HTTPException(
+                status_code=422,
+                detail="Choose a new password different from the temporary password.",
+            )
+        database.change_faculty_password(
+            settings.guild_id, auth_session.user_id, new_password
+        )
+        auth_session.faculty_password_verified = True
+        auth_session.must_change_faculty_password = False
+        return {"changed": True}
+
+    @app.post("/api/admin/faculty-passwords/{discord_id}")
+    async def provision_faculty_password(
+        discord_id: int, request: Request
+    ) -> dict[str, str]:
+        await current_admin(request)
+        if settings.faculty_role_id is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Set FACULTY_ROLE_ID before provisioning faculty passwords.",
+            )
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                member = await _get_guild_member(client, settings, discord_id)
+        except httpx.HTTPError:
+            LOGGER.exception("Could not verify faculty during password provisioning.")
+            raise HTTPException(
+                status_code=503,
+                detail="Could not verify this Discord member. Please retry.",
+            ) from None
+        if not _is_guild_faculty(member, settings.faculty_role_id):
+            raise HTTPException(
+                status_code=404,
+                detail="No current member with the configured Faculty role was found for that Discord ID.",
+            )
+        temporary_password = secrets.token_urlsafe(18)
+        database.set_faculty_temporary_password(
+            settings.guild_id, discord_id, temporary_password
+        )
+        return {
+            "discord_id": str(discord_id),
+            "temporary_password": temporary_password,
+        }
 
     @app.get("/api/faculty/candidates")
     async def faculty_candidates(

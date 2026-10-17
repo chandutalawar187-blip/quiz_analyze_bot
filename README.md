@@ -81,7 +81,10 @@ checks their current server role through OAuth and requires the configured
 role. The application checks the member's current roles through Discord's
 server API using the configured bot token; no additional member OAuth scope is
 required. The bot must remain a member of the configured server. Administrators
-retain access to the existing admin dashboard.
+retain access to the existing admin dashboard. Faculty use a separate branded
+sign-in page at `/faculty/login`: they authenticate with Discord first, then
+enter an app-managed faculty password. The application never requests or stores
+a Discord account password.
 Register `https://<your-dashboard-domain>/auth/callback` as an exact OAuth2
 redirect URI in the same Discord application configured by
 `DISCORD_OAUTH_CLIENT_ID` and `DISCORD_OAUTH_CLIENT_SECRET`. If the callback
@@ -95,6 +98,15 @@ students. A student is available for assignment when their saved USN exists or
 their global display name matches an accepted USN format. Faculty can see
 attendance and performance only for students in their own list; assignments
 are isolated by faculty account and server.
+
+Administrators can open **Faculty passwords** from the admin dashboard or visit
+`/admin/faculty-passwords` to issue or reset a faculty member's app password.
+The member must have the configured Faculty role. The temporary password is
+shown only once; share it securely. On first use, faculty must replace it with
+a password of at least 12 characters. Passwords are stored as salted PBKDF2
+hashes, and five consecutive failed attempts lock password verification for
+15 minutes. To reset a forgotten password, an administrator issues a new
+temporary password.
 
 ### Enable the web dashboard
 

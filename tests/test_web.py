@@ -130,16 +130,40 @@ class DashboardWebTests(unittest.TestCase):
             ("get", "/api/faculty/students/4GM22CS001"),
             ("post", "/api/faculty/students/4GM22CS001"),
             ("delete", "/api/faculty/students/4GM22CS001"),
+            ("post", "/api/faculty/password/verify"),
+            ("post", "/api/faculty/password/change"),
         ):
             with self.subTest(method=method, path=path):
-                response = getattr(self.client, method)(path)
+                options = {"json": {}} if method == "post" else {}
+                response = getattr(self.client, method)(path, **options)
                 self.assertEqual(response.status_code, 401)
 
     def test_faculty_page_redirects_to_faculty_discord_login(self) -> None:
         response = self.client.get("/faculty", follow_redirects=False)
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["location"], "/login?destination=faculty")
+        self.assertEqual(response.headers["location"], "/faculty/login")
+
+    def test_faculty_login_pages_are_separate_and_admin_reset_is_protected(self) -> None:
+        login_page = self.client.get("/faculty/login")
+        self.assertEqual(login_page.status_code, 200)
+        self.assertIn("Faculty portal", login_page.text)
+        self.assertIn("Continue with Discord", login_page.text)
+        self.assertNotIn('type="password"', login_page.text)
+
+        password_page = self.client.get(
+            "/faculty/password", follow_redirects=False
+        )
+        self.assertEqual(password_page.status_code, 302)
+        self.assertEqual(password_page.headers["location"], "/faculty/login")
+        self.assertEqual(
+            self.client.get("/admin/faculty-passwords").status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.post("/api/admin/faculty-passwords/123456").status_code,
+            401,
+        )
 
     def test_faculty_can_only_monitor_students_they_added(self) -> None:
         member = SimpleNamespace(
@@ -153,6 +177,9 @@ class DashboardWebTests(unittest.TestCase):
             guild_permissions=SimpleNamespace(),
         )
         self.database.sync_member(member)
+        self.database.set_faculty_temporary_password(
+            67890, 123456, "Temporary!FacultyPassword"
+        )
         member_without_usn = SimpleNamespace(
             id=98766,
             name="student_without_usn",
@@ -220,7 +247,7 @@ class DashboardWebTests(unittest.TestCase):
             )
 
         self.assertEqual(callback.status_code, 302)
-        self.assertEqual(callback.headers["location"], "/faculty")
+        self.assertEqual(callback.headers["location"], "/faculty/password")
         member_request = discord_client.get.await_args_list[2]
         self.assertEqual(
             member_request.args[0],
@@ -230,6 +257,31 @@ class DashboardWebTests(unittest.TestCase):
             member_request.kwargs["headers"]["Authorization"],
             "Bot test-token",
         )
+        password_page = self.client.get("/faculty/password")
+        self.assertEqual(password_page.status_code, 200)
+        self.assertIn("Faculty password", password_page.text)
+        self.assertEqual(self.client.get("/faculty").status_code, 200)
+        self.assertEqual(
+            self.client.get("/api/faculty/students").status_code, 428
+        )
+        verification = self.client.post(
+            "/api/faculty/password/verify",
+            json={"password": "Temporary!FacultyPassword"},
+        )
+        self.assertEqual(verification.status_code, 200)
+        self.assertTrue(verification.json()["must_change"])
+        self.assertEqual(
+            self.client.get("/api/faculty/students").status_code, 428
+        )
+        change = self.client.post(
+            "/api/faculty/password/change",
+            json={
+                "current_password": "Temporary!FacultyPassword",
+                "new_password": "MyNewFacultyPassword123",
+            },
+        )
+        self.assertEqual(change.status_code, 200)
+        self.assertTrue(change.json()["changed"])
         self.assertEqual(self.client.get("/faculty").status_code, 200)
         candidates = self.client.get("/api/faculty/candidates").json()
         self.assertEqual(len(candidates), 3)

@@ -2,6 +2,9 @@
 
 import sqlite3
 import re
+import hashlib
+import hmac
+import secrets
 import unicodedata
 import uuid
 from collections.abc import Iterable, Iterator
@@ -10,12 +13,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
+import time
 
 if TYPE_CHECKING:
     from discord import Member
 
 
 POINTS_PATTERN = re.compile(r"^\s*(?P<points>\d+)(?:\s+Points?)?\s*$", re.IGNORECASE)
+FACULTY_PASSWORD_ITERATIONS = 310_000
+FACULTY_PASSWORD_MAX_ATTEMPTS = 5
+FACULTY_PASSWORD_LOCK_SECONDS = 900
 USER_MENTION_PATTERN = re.compile(r"^<@!?(\d+)>$")
 USER_MENTION_IDS_PATTERN = re.compile(r"<@!?(\d+)>")
 USN_FORMAT_PATTERN = re.compile(
@@ -332,6 +339,21 @@ class Database:
                     usn TEXT NOT NULL COLLATE NOCASE,
                     assigned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (guild_id, faculty_discord_id, usn)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS faculty_credentials (
+                    guild_id TEXT NOT NULL,
+                    discord_id TEXT NOT NULL,
+                    password_salt TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    must_change_password INTEGER NOT NULL DEFAULT 1,
+                    failed_attempts INTEGER NOT NULL DEFAULT 0,
+                    locked_until REAL NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (guild_id, discord_id)
                 )
                 """
             )
@@ -1262,6 +1284,124 @@ class Database:
                 (str(guild_id), str(faculty_discord_id), usn.strip()),
             )
         return cursor.rowcount > 0
+
+    @staticmethod
+    def _faculty_password_hash(password: str, salt: str) -> str:
+        return hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            bytes.fromhex(salt),
+            FACULTY_PASSWORD_ITERATIONS,
+        ).hex()
+
+    def set_faculty_temporary_password(
+        self, guild_id: int, faculty_discord_id: int, password: str
+    ) -> None:
+        salt = secrets.token_hex(16)
+        password_hash = self._faculty_password_hash(password, salt)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO faculty_credentials (
+                    guild_id, discord_id, password_salt, password_hash,
+                    must_change_password, failed_attempts, locked_until,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, 1, 0, 0, CURRENT_TIMESTAMP)
+                ON CONFLICT(guild_id, discord_id) DO UPDATE SET
+                    password_salt = excluded.password_salt,
+                    password_hash = excluded.password_hash,
+                    must_change_password = 1,
+                    failed_attempts = 0,
+                    locked_until = 0,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    str(guild_id),
+                    str(faculty_discord_id),
+                    salt,
+                    password_hash,
+                ),
+            )
+
+    def has_faculty_password(self, guild_id: int, faculty_discord_id: int) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM faculty_credentials
+                WHERE guild_id = ? AND discord_id = ?
+                """,
+                (str(guild_id), str(faculty_discord_id)),
+            ).fetchone()
+        return row is not None
+
+    def verify_faculty_password(
+        self, guild_id: int, faculty_discord_id: int, password: str
+    ) -> tuple[bool, bool]:
+        now = time.time()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT password_salt, password_hash, must_change_password,
+                       failed_attempts, locked_until
+                FROM faculty_credentials
+                WHERE guild_id = ? AND discord_id = ?
+                """,
+                (str(guild_id), str(faculty_discord_id)),
+            ).fetchone()
+            if row is None or float(row[4]) > now:
+                return False, False
+            password_salt, password_hash, must_change, attempts, _ = row
+            submitted_hash = self._faculty_password_hash(password, password_salt)
+            if not hmac.compare_digest(submitted_hash, password_hash):
+                attempts = int(attempts) + 1
+                lock_until = (
+                    now + FACULTY_PASSWORD_LOCK_SECONDS
+                    if attempts >= FACULTY_PASSWORD_MAX_ATTEMPTS
+                    else 0
+                )
+                connection.execute(
+                    """
+                    UPDATE faculty_credentials
+                    SET failed_attempts = ?, locked_until = ?
+                    WHERE guild_id = ? AND discord_id = ?
+                    """,
+                    (attempts, lock_until, str(guild_id), str(faculty_discord_id)),
+                )
+                return False, False
+            connection.execute(
+                """
+                UPDATE faculty_credentials
+                SET failed_attempts = 0, locked_until = 0
+                WHERE guild_id = ? AND discord_id = ?
+                """,
+                (str(guild_id), str(faculty_discord_id)),
+            )
+            return True, bool(must_change)
+
+    def change_faculty_password(
+        self, guild_id: int, faculty_discord_id: int, password: str
+    ) -> None:
+        salt = secrets.token_hex(16)
+        password_hash = self._faculty_password_hash(password, salt)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE faculty_credentials
+                SET password_salt = ?, password_hash = ?,
+                    must_change_password = 0, failed_attempts = 0,
+                    locked_until = 0, updated_at = CURRENT_TIMESTAMP
+                WHERE guild_id = ? AND discord_id = ?
+                """,
+                (
+                    salt,
+                    password_hash,
+                    str(guild_id),
+                    str(faculty_discord_id),
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise LookupError("Faculty password has not been provisioned.")
 
     def claim_global_name_reminder(
         self, session_id: str, discord_id: int
