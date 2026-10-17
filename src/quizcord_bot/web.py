@@ -1,6 +1,7 @@
 """Authenticated live web dashboard for Quizcord sessions."""
 
 import asyncio
+import html
 import logging
 import secrets
 import time
@@ -10,7 +11,8 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
 from quizcord_bot.config import Settings
@@ -30,6 +32,60 @@ MANAGE_GUILD_PERMISSION = 1 << 5
 ADMINISTRATOR_PERMISSION = 1 << 3
 OAUTH_SESSION_TTL_SECONDS = 3600
 PERMISSION_CACHE_SECONDS = 60
+
+
+def _error_page(status_code: int, detail: Any) -> str:
+    titles = {
+        400: "That request didn't work",
+        401: "You need to sign in",
+        403: "You don't have permission",
+        404: "This page is missing",
+        405: "That action isn't available",
+        409: "This request conflicts with the current state",
+        422: "Check the information and try again",
+        502: "Discord couldn't complete the request",
+        503: "This service is temporarily unavailable",
+    }
+    title = titles.get(status_code, "Something went wrong")
+    message = html.escape(str(detail), quote=True)
+    destination = "/login" if status_code == 401 else "/"
+    link_label = "Sign in with Discord" if status_code == 401 else "Back to dashboard"
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>{status_code} · Quizcord Analytics</title>
+  <style>
+    :root{{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#f2f3f5;background:#313338}}
+    *{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(ellipse at 50% 40%,#3b3d78 0,#313338 60%)}}
+    main{{width:min(520px,calc(100% - 32px));padding:38px;border-radius:12px;background:#2b2d31;box-shadow:0 18px 50px #11131888;text-align:center}}
+    .brand{{font-size:13px;font-weight:750;letter-spacing:.5px;color:#b5bac1;text-transform:uppercase}}.brand span{{color:#a6a9ff}}
+    .code{{font-size:72px;line-height:1;font-weight:800;letter-spacing:-4px;color:#8c8fff;margin:32px 0 12px}}
+    h1{{font-size:24px;margin:0 0 12px}}p{{color:#b5bac1;line-height:1.6;margin:0 auto 24px;overflow-wrap:anywhere}}
+    a{{display:inline-block;padding:11px 17px;border-radius:5px;background:#5865f2;color:white;text-decoration:none;font-size:14px;font-weight:650}}
+    a:hover{{background:#4752c4}}.hint{{font-size:12px;color:#949ba4;margin-top:22px}}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand">Quizcord <span>Analytics</span></div>
+    <div class="code">{status_code}</div>
+    <h1>{title}</h1>
+    <p>{message}</p>
+    <a href="{destination}">{link_label}</a>
+    <div class="hint">If this keeps happening, contact your server administrator.</div>
+  </main>
+</body>
+</html>"""
+
+
+def _wants_json_error(request: Request) -> bool:
+    if request.url.path.startswith("/api/"):
+        return True
+    accept = request.headers.get("accept", "").casefold()
+    return "application/json" in accept and "text/html" not in accept
 
 
 @dataclass
@@ -376,6 +432,32 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             "connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"
         )
         return response
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error_handler(
+        request: Request, error: StarletteHTTPException
+    ) -> Response:
+        if _wants_json_error(request):
+            return JSONResponse(
+                {"detail": error.detail},
+                status_code=error.status_code,
+                headers=error.headers,
+            )
+        return HTMLResponse(
+            _error_page(error.status_code, error.detail),
+            status_code=error.status_code,
+            headers=error.headers,
+        )
+
+    @app.exception_handler(Exception)
+    async def unexpected_error_handler(
+        request: Request, error: Exception
+    ) -> Response:
+        LOGGER.exception("Unhandled dashboard request failure.")
+        detail = "An unexpected server error occurred. Please try again."
+        if _wants_json_error(request):
+            return JSONResponse({"detail": detail}, status_code=500)
+        return HTMLResponse(_error_page(500, detail), status_code=500)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

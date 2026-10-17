@@ -96,6 +96,27 @@ class DashboardWebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["detail"], "Please sign in again.")
 
+    def test_browser_http_errors_use_discord_style_html_pages(self) -> None:
+        missing_page = self.client.get("/missing-page")
+
+        self.assertEqual(missing_page.status_code, 404)
+        self.assertIn("text/html", missing_page.headers["content-type"])
+        self.assertIn("404", missing_page.text)
+        self.assertIn("This page is missing", missing_page.text)
+        self.assertIn("Quizcord", missing_page.text)
+
+        unauthorized_page = self.client.get("/students/ABC123")
+
+        self.assertEqual(unauthorized_page.status_code, 401)
+        self.assertIn("text/html", unauthorized_page.headers["content-type"])
+        self.assertIn("Sign in with Discord", unauthorized_page.text)
+
+    def test_api_http_errors_remain_json(self) -> None:
+        response = self.client.get("/api/not-found")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json(), {"detail": "Not Found"})
+
     def test_user_directory_requires_discord_sign_in(self) -> None:
         response = self.client.get("/api/users")
 
@@ -311,7 +332,8 @@ class DashboardWebTests(unittest.TestCase):
         )
 
         self.assertEqual(callback.status_code, 400)
-        self.assertEqual(callback.json()["detail"], "Invalid sign-in state.")
+        self.assertIn("text/html", callback.headers["content-type"])
+        self.assertIn("Invalid sign-in state.", callback.text)
 
     def test_private_dashboard_link_preserves_selected_session_through_login(self) -> None:
         session_id = "a" * 32
