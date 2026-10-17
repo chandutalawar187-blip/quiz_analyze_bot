@@ -467,7 +467,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             "client_id": client_id,
             "redirect_uri": f"{public_url}/auth/callback",
             "response_type": "code",
-            "scope": "identify guilds guilds.members.read",
+            "scope": "identify guilds",
             "state": state,
         }
         return RedirectResponse(
@@ -527,12 +527,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                     guilds, settings.guild_id
                 ):
                     oauth_stage = "Faculty role lookup"
-                    member_response = await client.get(
-                        f"{DISCORD_API}/users/@me/guilds/{settings.guild_id}/member",
-                        headers={"Authorization": f"******"},
+                    member = await _get_guild_member(
+                        client, settings, int(user["id"])
                     )
-                    member_response.raise_for_status()
-                    member = member_response.json()
         except (httpx.HTTPError, KeyError, ValueError) as error:
             status_code = (
                 error.response.status_code
@@ -919,15 +916,13 @@ async def _verify_current_guild_access(
             )
             response.raise_for_status()
             guilds = response.json()
-            if settings.faculty_role_id is not None and _is_guild_member(
+            auth_session.is_admin = _is_guild_admin(
                 guilds, settings.guild_id
-            ):
-                member_response = await client.get(
-                    f"{DISCORD_API}/users/@me/guilds/{settings.guild_id}/member",
-                    headers={"Authorization": f"Bearer {auth_session.access_token}"},
+            )
+            if settings.faculty_role_id is not None and not auth_session.is_admin:
+                member = await _get_guild_member(
+                    client, settings, auth_session.user_id
                 )
-                member_response.raise_for_status()
-                member = member_response.json()
     except (httpx.HTTPError, ValueError):
         LOGGER.exception("Could not verify dashboard server roles.")
         raise HTTPException(
@@ -935,7 +930,6 @@ async def _verify_current_guild_access(
             detail="Dashboard server access could not be verified. Please retry.",
         ) from None
 
-    auth_session.is_admin = _is_guild_admin(guilds, settings.guild_id)
     auth_session.is_faculty = _is_guild_faculty(
         member, settings.faculty_role_id
     )
@@ -970,6 +964,34 @@ def _is_guild_faculty(member: Any, faculty_role_id: int | None) -> bool:
     return str(faculty_role_id) in {str(role_id) for role_id in roles}
 
 
+async def _get_guild_member(
+    client: httpx.AsyncClient, settings: Settings, user_id: int
+) -> dict[str, Any] | None:
+    response = await client.get(
+        f"{DISCORD_API}/guilds/{settings.guild_id}/members/{user_id}",
+        headers={"Authorization": f"Bot {settings.token}"},
+    )
+    if response.status_code == 404:
+        return None
+    if response.status_code == 401:
+        LOGGER.error("Discord rejected the bot token during faculty role lookup.")
+        raise HTTPException(
+            status_code=503,
+            detail="Faculty role verification failed because Discord rejected the bot token. Check DISCORD_BOT_TOKEN in the service configuration.",
+        )
+    if response.status_code == 403:
+        LOGGER.error("The bot cannot access the configured server member endpoint.")
+        raise HTTPException(
+            status_code=503,
+            detail="Faculty role verification failed because the bot cannot access the configured server. Confirm the bot is still a member of that server.",
+        )
+    response.raise_for_status()
+    member = response.json()
+    if not isinstance(member, dict):
+        raise ValueError("Discord returned an invalid guild member response.")
+    return member
+
+
 def _is_guild_member(guilds: Any, guild_id: int) -> bool:
     return isinstance(guilds, list) and any(
         isinstance(guild, dict) and str(guild.get("id")) == str(guild_id)
@@ -990,8 +1012,8 @@ def _oauth_failure_detail(stage: str, status_code: int | None) -> str:
     if stage == "Faculty role lookup":
         return (
             "Discord could not verify the Faculty role"
-            f"{status}. Confirm the OAuth application has the guilds.members.read "
-            "scope and try signing in again to grant it."
+            f"{status}. Confirm the bot can access the configured server and "
+            "try signing in again."
         )
     return (
         f"Discord sign-in failed during {stage}{status}. "

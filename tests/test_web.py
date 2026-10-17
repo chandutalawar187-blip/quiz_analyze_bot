@@ -87,7 +87,7 @@ class DashboardWebTests(unittest.TestCase):
         self.assertIn("HTTP 400", token_error)
 
         faculty_error = _oauth_failure_detail("Faculty role lookup", 403)
-        self.assertIn("guilds.members.read", faculty_error)
+        self.assertIn("Faculty role", faculty_error)
         self.assertIn("HTTP 403", faculty_error)
 
     def test_dashboard_data_requires_discord_sign_in(self) -> None:
@@ -173,6 +173,15 @@ class DashboardWebTests(unittest.TestCase):
 
         self.assertEqual(callback.status_code, 302)
         self.assertEqual(callback.headers["location"], "/faculty")
+        member_request = discord_client.get.await_args_list[2]
+        self.assertEqual(
+            member_request.args[0],
+            "https://discord.com/api/v10/guilds/67890/members/123456",
+        )
+        self.assertEqual(
+            member_request.kwargs["headers"]["Authorization"],
+            "Bot test-token",
+        )
         self.assertEqual(self.client.get("/faculty").status_code, 200)
         candidates = self.client.get("/api/faculty/candidates").json()
         self.assertEqual([row["usn"] for row in candidates], ["4GM22CS001"])
@@ -245,10 +254,7 @@ class DashboardWebTests(unittest.TestCase):
     def test_oauth_callback_rejects_invalid_state(self) -> None:
         login = self.client.get("/auth/login", follow_redirects=False)
         self.assertEqual(login.status_code, 302)
-        self.assertIn(
-            "scope=identify+guilds+guilds.members.read",
-            login.headers["location"],
-        )
+        self.assertIn("scope=identify+guilds", login.headers["location"])
 
         callback = self.client.get(
             "/auth/callback?code=not-a-real-code&state=invalid",

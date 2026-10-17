@@ -78,8 +78,10 @@ Create a dedicated `Faculty` role in the configured Discord server and assign
 it only to faculty members. Enable Discord Developer Mode, copy the role ID,
 and set it as `FACULTY_ROLE_ID`. Faculty sign in with Discord; the dashboard
 checks their current server role through OAuth and requires the configured
-role. The OAuth sign-in requests the `guilds.members.read` scope to verify role
-membership. Administrators retain access to the existing admin dashboard.
+role. The application checks the member's current roles through Discord's
+server API using the configured bot token; no additional member OAuth scope is
+required. The bot must remain a member of the configured server. Administrators
+retain access to the existing admin dashboard.
 Register `https://<your-dashboard-domain>/auth/callback` as an exact OAuth2
 redirect URI in the same Discord application configured by
 `DISCORD_OAUTH_CLIENT_ID` and `DISCORD_OAUTH_CLIENT_SECRET`. If the callback
