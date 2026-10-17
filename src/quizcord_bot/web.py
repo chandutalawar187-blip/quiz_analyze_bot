@@ -1,0 +1,728 @@
+"""Authenticated live web dashboard for Quizcord sessions."""
+
+import asyncio
+import logging
+import secrets
+import time
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlencode
+
+import httpx
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from starlette.middleware.sessions import SessionMiddleware
+
+from quizcord_bot.config import Settings
+from quizcord_bot.database import (
+    Database,
+    DashboardUser,
+    QuizSessionSummary,
+    StudentQuizAnalytics,
+)
+from quizcord_bot.exports import quiz_session_workbook, student_analytics_workbook
+
+
+LOGGER = logging.getLogger("quizcord_analytics.dashboard")
+DISCORD_API = "https://discord.com/api/v10"
+MANAGE_GUILD_PERMISSION = 1 << 5
+ADMINISTRATOR_PERMISSION = 1 << 3
+OAUTH_SESSION_TTL_SECONDS = 3600
+PERMISSION_CACHE_SECONDS = 60
+
+
+@dataclass
+class _OAuthSession:
+    user_id: int
+    username: str
+    access_token: str
+    refresh_token: str
+    access_token_expires_at: float
+    expires_at: float
+    last_permission_check: float
+    permission_check_lock: asyncio.Lock
+
+
+HTML_PAGE = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Quizcord Analytics</title>
+  <style>
+    :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#e7edf8;background:#0b1020;font-synthesis:none}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 10% 0%,#17264a 0,transparent 42%),#0b1020}
+    button,a{font:inherit}.top{height:72px;display:flex;align-items:center;justify-content:space-between;padding:0 max(24px,calc((100vw - 1280px)/2));border-bottom:1px solid #26314b;background:#0b1020cc;position:sticky;top:0;backdrop-filter:blur(14px);z-index:2}
+    .brand{font-weight:750;letter-spacing:.2px}.brand span{color:#8fa7ff}.account{display:flex;gap:16px;align-items:center;color:#aebbd2;font-size:14px}.account a{color:#aebbd2;text-decoration:none}
+    main{max-width:1280px;margin:38px auto;padding:0 24px}.heading{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:24px}.eyebrow{color:#91a6ff;font-size:12px;text-transform:uppercase;letter-spacing:1.4px;font-weight:700}
+    .dashboard-tabs{display:flex;gap:8px;margin-bottom:24px;border-bottom:1px solid #26314b}.dashboard-tabs button{padding:11px 16px;border:0;border-bottom:2px solid transparent;background:transparent;color:#91a0ba;font-weight:650;cursor:pointer}.dashboard-tabs button[aria-selected="true"]{color:#dce5f8;border-bottom-color:#8197ff}.directory-tools{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:16px 20px;color:#95a4bd;font-size:13px}.directory-search{max-width:360px;width:100%;padding:10px 12px;background:#0b1020;color:#e7edf8;border:1px solid #33415e;border-radius:9px}.directory-table{width:100%;min-width:720px}.directory-warning{color:#ffbd59;font-size:11px;font-weight:650}
+    h1{font-size:30px;margin:8px 0 0}select{color:#e7edf8;background:#141d32;border:1px solid #33415e;padding:11px 38px 11px 13px;border-radius:10px;min-width:240px}
+    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}.card{background:linear-gradient(145deg,#151f35,#11182b);border:1px solid #26334e;border-radius:16px;padding:20px;box-shadow:0 12px 32px #05081433}.metric-label{font-size:13px;color:#9baac3}.metric{font-size:28px;font-weight:750;margin-top:12px;letter-spacing:-.5px}.status{display:inline-flex;align-items:center;gap:8px;color:#b7c5dc;font-size:13px}.dot{width:8px;height:8px;border-radius:50%;background:#53d6a2;box-shadow:0 0 12px #53d6a277}.dot.complete{background:#7b91ff;box-shadow:0 0 12px #7b91ff77}.dot.interrupted{background:#ffbd59;box-shadow:0 0 12px #ffbd5977}
+    .main-grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(280px,1fr);gap:16px;margin-top:16px}.panel{background:#11182b;border:1px solid #26334e;border-radius:16px;overflow:hidden}.panel-head{padding:19px 21px;border-bottom:1px solid #26314b;display:flex;justify-content:space-between;align-items:center}.panel h2{font-size:16px;margin:0}.panel-sub{font-size:12px;color:#8291ac;margin-top:5px}.table-wrap{overflow:auto;max-height:520px}table{border-collapse:collapse;width:100%;text-align:left}th,td{padding:13px 20px;border-bottom:1px solid #202b42;font-size:13px}th{color:#8797b3;font-size:11px;text-transform:uppercase;letter-spacing:.7px;position:sticky;top:0;background:#11182b}td.points{text-align:right;font-variant-numeric:tabular-nums;color:#dce5f8}.rank{color:#91a6ff;font-weight:700}.usn{font-weight:650;letter-spacing:.2px}.student-link{color:#dce5f8;text-decoration:none}.student-link:hover{color:#91a6ff;text-decoration:underline}.name-warning{color:#ffbd59;font-size:11px;line-height:1.3;margin-top:4px}.ring-wrap{display:grid;place-items:center;padding:26px}.ring{width:156px;height:156px;position:relative;display:grid;place-items:center}.ring svg{position:absolute;inset:0;transform:rotate(-90deg)}.ring circle{fill:none;stroke-width:9}.ring .track{stroke:#283653}.ring .value{stroke:#8197ff;stroke-linecap:round;stroke-dasharray:326.7;stroke-dashoffset:326.7;transition:stroke-dashoffset .5s}.ring.complete .value{stroke-dashoffset:0}.ring-center{text-align:center;position:relative;z-index:1;max-width:100%;padding:0 12px}.ring-number{font-size:32px;font-weight:750}.ring-caption{font-size:11px;color:#95a4bd;margin-top:3px;white-space:nowrap}.summary-list{padding:0 20px 18px}.summary-row{padding:12px 0;border-bottom:1px solid #202b42;display:flex;justify-content:space-between;gap:16px;font-size:13px}.summary-row:last-child{border:0}.summary-row span:first-child{color:#91a0ba}.summary-row strong{text-align:right;font-variant-numeric:tabular-nums}.note{color:#7f8da7;font-size:12px;line-height:1.6;padding:0 20px 20px}    .empty{color:#8797b3;text-align:center;padding:46px 20px;font-size:14px}.error{color:#ff9e9e}.refresh{color:#71809b;font-size:12px}.profile-heading{margin-bottom:24px;display:flex;justify-content:space-between;align-items:center;gap:18px}.export-link{display:inline-block;background:#26365b;color:#dce5ff;text-decoration:none;padding:11px 16px;border:1px solid #3b4d77;border-radius:9px;font-size:13px;font-weight:650;white-space:nowrap}.export-link:hover{background:#344875}.profile-grid{display:grid;grid-template-columns:minmax(240px,.7fr) minmax(0,1.8fr);gap:16px;margin-top:16px}.profile-ring{display:grid;place-items:center;padding:20px}.profile-ring .ring{width:190px;height:190px}.profile-ring .ring-number{font-size:36px}.profile-bars{padding:4px 20px 18px}.bar-row{display:grid;grid-template-columns:100px 1fr 64px;align-items:center;gap:12px;margin:13px 0;font-size:12px;color:#9baac3}.bar-track{height:9px;border-radius:8px;background:#26334e;overflow:hidden}.bar-track span{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#5865f2,#55d6b0)}.back-link{color:#91a6ff;text-decoration:none;font-size:13px}.back-link:hover{text-decoration:underline}.empty{color:#8797b3;text-align:center;padding:46px 20px;font-size:14px}.error{color:#ff9e9e}.refresh{color:#71809b;font-size:12px}.login{max-width:500px;margin:12vh auto;padding:20px}.login .card{padding:34px}.login a.button{display:inline-block;background:#5865f2;color:white;text-decoration:none;padding:12px 18px;border-radius:10px;font-weight:650;margin-top:18px}
+    @media(max-width:860px){.grid{grid-template-columns:repeat(2,1fr)}.main-grid{grid-template-columns:1fr}}@media(max-width:520px){.top{padding:0 16px}.account{gap:8px;font-size:12px}main{margin:24px auto;padding:0 16px}.heading{align-items:start;flex-direction:column}select{width:100%}.grid{gap:10px}.card{padding:16px}.metric{font-size:24px}th,td{padding:12px 14px}}
+  </style>
+</head>
+<body>
+  <header class="top"><div class="brand">Quizcord <span>Analytics</span></div><div class="account"><a id="back-link" href="/" hidden>← Dashboard</a><span id="account-name"></span><a href="/auth/logout">Sign out</a></div></header>
+  <main>
+    <nav class="dashboard-tabs" id="dashboard-tabs" aria-label="Dashboard sections">
+      <button type="button" data-view="sessions" aria-selected="true">Quiz sessions</button>
+      <button type="button" data-view="users" aria-selected="false">All users</button>
+    </nav>
+    <section class="heading" id="session-heading"><div><div class="eyebrow">Live monitoring</div><h1>Quiz dashboard</h1></div><select id="session-select" aria-label="Select quiz session"></select></section>
+    <div id="content"><div class="empty">Loading quiz sessions…</div></div>
+  </main>
+  <script>
+    const select = document.getElementById("session-select");
+    const content = document.getElementById("content");
+    const dashboardTabs = document.getElementById("dashboard-tabs");
+    const sessionHeading = document.getElementById("session-heading");
+    const initialSession = new URLSearchParams(location.search).get("session");
+    const studentPath = location.pathname.startsWith("/students/") ? location.pathname.slice("/students/".length) : null;
+    const studentUSN = studentPath ? decodeURIComponent(studentPath) : null;
+    const safe = value => String(value ?? "");
+    const el = (tag, className, text) => { const node=document.createElement(tag); if(className)node.className=className; if(text!==undefined)node.textContent=text; return node; };
+    let activeSession = initialSession;
+    let activeView = "sessions";
+    let pollBusy = false;
+    function metric(label,value){const card=el("div","card");card.append(el("div","metric-label",label),el("div","metric",value));return card;}
+    function statusLabel(status){return status==="completed"?"Complete":status==="interrupted"?"Interrupted":"Live";}
+    function dateLabel(value,withTime=false){if(!value)return"Date unavailable";if(/^\d{4}-\d{2}-\d{2}$/.test(value)){const [year,month,day]=value.split("-").map(Number);return new Date(year,month-1,day).toLocaleDateString();}return new Date(value).toLocaleString(undefined,withTime?{}:{dateStyle:"short"});}
+    function render(summary){
+      const session=summary.session;
+      const complete=session.status==="completed";
+      const participants=summary.participants||[];
+      const grid=el("section","grid");
+      const statusCard=el("div","card");
+      statusCard.append(el("div","metric-label","Session status"));
+      const state=el("div","metric status");
+      const dot=el("span","dot"+(complete?" complete":session.status==="interrupted"?" interrupted":""));
+      state.append(dot,document.createTextNode(statusLabel(session.status)));
+      statusCard.append(state);grid.append(statusCard);
+      const attendanceCount=summary.attendance_count||0;
+      const eligibleCount=summary.eligible_student_count;
+      const attendanceRate=summary.attendance_percentage;
+      grid.append(metric(complete?"Students attended":"Students attending",attendanceCount+" / "+(eligibleCount??"—")),metric("Attendance rate",attendanceRate===null?"—":Number(attendanceRate).toFixed(1)+"%"),metric("Leaderboard updates",summary.question_count),metric("Quiz ID",session.quizcord_quiz_id||"Pending"));
+      const layout=el("section","main-grid");
+      const roster=el("article","panel");
+      const header=el("div","panel-head");
+      const title=el("div");title.append(el("h2","", "Participant leaderboard"),el("div","panel-sub",complete?"Final leaderboard snapshot":"Latest leaderboard snapshot"));
+      header.append(title,el("span","refresh","Updates automatically"));roster.append(header);
+      if(!participants.length){roster.append(el("div","empty","No participant rows have arrived yet."));}
+      else{
+        const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),tr=el("tr");
+        ["Rank","Student USN","Quizcord points"].forEach(label=>tr.append(el("th","",label)));
+        thead.append(tr);table.append(thead);const tbody=el("tbody");
+        participants.forEach(person=>{const row=el("tr"),link=document.createElement("a");link.className="student-link";link.href="/students/"+encodeURIComponent(person.usn);link.textContent=person.usn;row.append(el("td","rank","#"+safe(person.rank)));const studentCell=el("td","usn");studentCell.append(link);if(person.name_matches_usn_format===false)studentCell.append(el("div","name-warning","Name not updated to USN"));row.append(studentCell,el("td","points",safe(person.points)));tbody.append(row);});
+        table.append(tbody);wrap.append(table);roster.append(wrap);
+      }
+      const side=el("article","panel");const sideHead=el("div","panel-head");sideHead.append(el("h2","","Student attendance"));side.append(sideHead);
+      const ringWrap=el("div","ring-wrap"),ring=el("div","ring"+(complete?" complete":""));
+      ring.innerHTML='<svg viewBox="0 0 120 120" aria-hidden="true"><circle class="track" cx="60" cy="60" r="52"></circle><circle class="value" cx="60" cy="60" r="52"></circle></svg>';
+      const ringValue=ring.querySelector(".value");
+      if(ringValue&&attendanceRate!==null)ringValue.style.strokeDashoffset=String(326.7*(1-Math.min(100,attendanceRate)/100));
+      const center=el("div","ring-center");center.append(el("div","ring-number",attendanceRate===null?"—":Number(attendanceRate).toFixed(1)+"%"),el("div","ring-caption",eligibleCount===null?"Member count unavailable":attendanceCount+" / "+eligibleCount+" attended"));ring.append(center);ringWrap.append(ring);side.append(ringWrap);
+      const rows=el("div","summary-list");
+      [["Human server members",eligibleCount??"Unavailable"],["Started",new Date(session.started_at).toLocaleString()]].forEach(([label,value])=>{const row=el("div","summary-row");row.append(el("span","",label),el("strong","",safe(value)));rows.append(row);});
+      side.append(rows,el("div","note","Attendance includes human members regardless of server permissions. Bot accounts are excluded."));
+      if(complete){const link=document.createElement("a");link.href="/api/sessions/"+encodeURIComponent(session.session_id)+"/export.xlsx";link.textContent="Download Excel";link.style.cssText="display:block;margin:0 20px 20px;text-align:center;padding:11px;border-radius:9px;background:#26365b;color:#dce5ff;text-decoration:none;font-size:13px;font-weight:650";side.append(link);}
+      layout.append(roster,side);content.replaceChildren(grid,layout);
+    }
+    function renderUsers(users){
+      const heading=el("section","heading"),title=el("div","");
+      title.append(el("div","eyebrow","Server directory"),el("h1","","All users"));
+      heading.append(title,el("div","panel-sub",users.length+" human members"));
+      const panel=el("article","panel"),tools=el("div","directory-tools");
+      const search=document.createElement("input");search.className="directory-search";search.type="search";search.placeholder="Search names or USN";search.setAttribute("aria-label","Search users");
+      tools.append(el("span","","Names marked below need a USN-format global display name."),search);panel.append(tools);
+      const wrap=el("div","table-wrap"),table=el("table","directory-table"),thead=el("thead"),headRow=el("tr");
+      ["Global display name","Account username","Server nickname","Student name","USN"].forEach(label=>headRow.append(el("th","",label)));
+      thead.append(headRow);table.append(thead);const body=el("tbody");
+      const rows=[];
+      users.forEach(user=>{const row=el("tr"),globalCell=el("td","");
+        globalCell.append(el("span","",user.global_name||"Not set"));
+        if(!user.name_matches_usn_format)globalCell.append(el("div","directory-warning","Name not updated to USN"));
+        row.append(globalCell,el("td","",user.account_name),el("td","",user.server_nickname||"—"),el("td","",user.student_name||"Not mapped"),el("td","usn",user.usn||"—"));
+        row.dataset.search=[user.global_name,user.account_name,user.server_nickname,user.student_name,user.usn].filter(Boolean).join(" ").toLocaleLowerCase();
+        rows.push(row);body.append(row);
+      });
+      table.append(body);wrap.append(table);panel.append(wrap);
+      if(!users.length)panel.append(el("div","empty","No synchronized human members found."));
+      search.addEventListener("input",()=>{const query=search.value.trim().toLocaleLowerCase();rows.forEach(row=>{row.hidden=!row.dataset.search.includes(query);});});
+      content.replaceChildren(heading,panel);
+    }
+    function renderStudent(student){
+      document.getElementById("back-link").hidden=false;
+      select.hidden=true;
+      document.querySelector(".eyebrow").textContent="Student analytics";
+      document.querySelector("h1").textContent=student.student_name;
+      const heading=el("div","profile-heading");
+      const headingDetails=el("div","");
+      headingDetails.append(el("div","eyebrow",student.usn),el("div","panel-sub","Quiz attendance and performance across completed quizzes tracked by this bot."));
+      const exportLink=document.createElement("a");exportLink.className="export-link";exportLink.href="/api/students/"+encodeURIComponent(student.usn)+"/export.xlsx";exportLink.textContent="Download Excel";heading.append(headingDetails,exportLink);
+      const grid=el("section","grid");
+      grid.append(metric("Quizzes attended",student.quizzes_attended),metric("Completed quizzes tracked",student.completed_quizzes),metric("Attendance",student.attendance_percentage.toFixed(1)+"%"),metric("Total Quizcord points",student.total_points),metric("Average points per attended quiz",student.average_points===null?"—":Number(student.average_points).toFixed(1)));
+      const profile=el("section","profile-grid");
+      const attendance=el("article","panel");
+      const attendanceHead=el("div","panel-head");attendanceHead.append(el("h2","","Attendance rate"));attendance.append(attendanceHead);
+      const ringWrap=el("div","profile-ring"),ring=el("div","ring"),svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
+      svg.setAttribute("viewBox","0 0 120 120");svg.setAttribute("aria-hidden","true");
+      for(const className of ["track","value"]){const circle=document.createElementNS("http://www.w3.org/2000/svg","circle");circle.setAttribute("class",className);circle.setAttribute("cx","60");circle.setAttribute("cy","60");circle.setAttribute("r","52");svg.append(circle);if(className==="value")circle.style.strokeDashoffset=String(326.7*(1-Math.min(100,student.attendance_percentage)/100));}
+      const center=el("div","ring-center");center.append(el("div","ring-number",student.attendance_percentage.toFixed(1)+"%"),el("div","ring-caption",student.quizzes_attended+" of "+student.completed_quizzes+" quizzes"));ring.append(svg,center);ringWrap.append(ring);attendance.append(ringWrap,el("div","note","Attendance percentage includes tracked quiz sessions and manual imports. Imports without a saved date remain marked Date unavailable."));
+      const performance=el("article","panel"),performanceHead=el("div","panel-head");performanceHead.append(el("h2","","Points by quiz"));performance.append(performanceHead);
+      const completedHistory=student.history.filter(item=>item.status==="completed"||item.status==="historical");
+      if(completedHistory.length){const bars=el("div","profile-bars"),maxPoints=Math.max(1,...completedHistory.map(item=>item.points));completedHistory.slice().reverse().forEach(item=>{const row=el("div","bar-row");row.append(el("span","",dateLabel(item.started_at)));const track=el("div","bar-track"),bar=el("span");bar.style.width=(item.points/maxPoints*100)+"%";track.append(bar);row.append(track,el("strong","",String(item.points)));bars.append(row);});performance.append(bars);}else{performance.append(el("div","empty","No completed quiz scores recorded yet."));}
+      profile.append(attendance,performance);
+      const historyPanel=el("article","panel"),historyHead=el("div","panel-head");historyHead.append(el("div","","Date-wise attendance and results"));historyPanel.append(historyHead);
+      if(!student.history.length){historyPanel.append(el("div","empty","No quiz attendance has been recorded for this student."));}
+      else{const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),headRow=el("tr");["Date","Quiz ID","Status","Rank","Points"].forEach(label=>headRow.append(el("th","",label)));thead.append(headRow);table.append(thead);const body=el("tbody");student.history.forEach(item=>{const row=el("tr"),date=dateLabel(item.started_at,true),status=item.status==="completed"?"Complete":item.status==="active"?"Live":item.status==="historical"?"Historical import":"Interrupted";row.append(el("td","",date),el("td","",item.quizcord_quiz_id||"Not provided"),el("td","",status),el("td","rank",item.rank?"#"+safe(item.rank):"—"),el("td","points",safe(item.points)));body.append(row);});table.append(body);wrap.append(table);historyPanel.append(wrap);}
+      content.replaceChildren(heading,grid,profile,historyPanel);
+    }
+    async function refresh(){
+      if(pollBusy||activeView!=="sessions")return;pollBusy=true;
+      try{
+        const response=await fetch("/api/sessions",{cache:"no-store"});
+        if(response.status===401){location.replace("/");return;}
+        if(!response.ok)throw new Error("Could not load quiz sessions.");
+        const sessions=await response.json();
+        const old=activeSession||select.value;
+        select.replaceChildren();
+        sessions.forEach(session=>{const option=document.createElement("option");option.value=session.session_id;option.textContent=(session.quizcord_quiz_id||"Quiz session")+" · "+statusLabel(session.status)+" · "+new Date(session.started_at).toLocaleString();select.append(option);});
+        if(!sessions.length){content.replaceChildren(el("div","empty","No quiz sessions have been recorded yet. Start a Quizcord quiz to see its live dashboard."));return;}
+        activeSession=sessions.some(s=>s.session_id===old)?old:sessions[0].session_id;select.value=activeSession;
+        const detail=await fetch("/api/sessions/"+encodeURIComponent(activeSession),{cache:"no-store"});
+        if(!detail.ok)throw new Error("Could not load the selected quiz.");
+        const summary=await detail.json();
+        if(activeView==="sessions")render(summary);
+      }catch(error){content.replaceChildren(el("div","empty error",error.message));}
+      finally{pollBusy=false;}
+    }
+    async function refreshUsers(){
+      if(pollBusy||activeView!=="users")return;pollBusy=true;
+      try{
+        const response=await fetch("/api/users",{cache:"no-store"});
+        if(response.status===401){location.replace("/");return;}
+        if(!response.ok)throw new Error("Could not load server users.");
+        const users=await response.json();
+        if(activeView==="users")renderUsers(users);
+      }catch(error){content.replaceChildren(el("div","empty error",error.message));}
+      finally{pollBusy=false;}
+    }
+    function switchView(view){
+      activeView=view;
+      dashboardTabs.querySelectorAll("button").forEach(button=>button.setAttribute("aria-selected",String(button.dataset.view===view)));
+      sessionHeading.hidden=view!=="sessions";
+      select.hidden=view!=="sessions";
+      if(view==="users")refreshUsers();else refresh();
+    }
+    dashboardTabs.addEventListener("click",event=>{const button=event.target.closest("button[data-view]");if(button)switchView(button.dataset.view);});
+    select.addEventListener("change",()=>{activeSession=select.value;refresh();});
+    fetch("/api/me").then(response=>{if(!response.ok)throw new Error("Sign-in expired.");return response.json();}).then(user=>{document.getElementById("account-name").textContent=user.username;}).catch(()=>location.replace("/"));
+    if(studentUSN){
+      dashboardTabs.hidden=true;
+      select.hidden=true;
+      async function refreshStudent(){try{const response=await fetch("/api/students/"+encodeURIComponent(studentUSN),{cache:"no-store"});if(response.status===401){location.replace("/");return;}if(!response.ok)throw new Error("Could not load student analytics.");renderStudent(await response.json());}catch(error){content.replaceChildren(el("div","empty error",error.message));}}
+      refreshStudent();setInterval(refreshStudent,10000);
+    }else{refresh();setInterval(()=>{if(activeView==="users")refreshUsers();else refresh();},3000);}
+  </script>
+</body>
+</html>
+"""
+
+
+def _dashboard_user(user: DashboardUser) -> dict[str, Any]:
+    return {
+        "account_name": user.account_name,
+        "global_name": user.global_name,
+        "server_nickname": user.server_nickname,
+        "usn": user.usn,
+        "student_name": user.student_name,
+        "name_matches_usn_format": user.name_matches_usn_format,
+    }
+
+
+def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
+    app = FastAPI(title="Quizcord Analytics", docs_url=None, redoc_url=None)
+    if settings.dashboard_session_secret:
+        app.add_middleware(
+            SessionMiddleware,
+            secret_key=settings.dashboard_session_secret,
+            session_cookie="quizcord_dashboard",
+            max_age=OAUTH_SESSION_TTL_SECONDS,
+            same_site="lax",
+            https_only=True,
+        )
+    oauth_sessions: dict[str, _OAuthSession] = {}
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"
+        )
+        return response
+
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    def require_oauth_config() -> tuple[str, str, str]:
+        if (
+            settings.dashboard_public_url is None
+            or settings.discord_oauth_client_id is None
+            or settings.discord_oauth_client_secret is None
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="The web dashboard is not configured.",
+            )
+        return (
+            settings.dashboard_public_url,
+            settings.discord_oauth_client_id,
+            settings.discord_oauth_client_secret,
+        )
+
+    async def current_admin(request: Request) -> _OAuthSession:
+        require_oauth_config()
+        session_key = request.session.get("dashboard_session")
+        auth_session = oauth_sessions.get(session_key) if session_key else None
+        if auth_session is None or auth_session.expires_at <= time.time():
+            request.session.clear()
+            raise HTTPException(status_code=401, detail="Please sign in again.")
+
+        async with auth_session.permission_check_lock:
+            now = time.time()
+            if now - auth_session.last_permission_check >= PERMISSION_CACHE_SECONDS:
+                auth_session = await _verify_current_guild_admin(
+                    auth_session, settings
+                )
+                oauth_sessions[session_key] = auth_session
+        return auth_session
+
+    @app.get("/auth/login")
+    async def login(
+        request: Request, session: str | None = None
+    ) -> RedirectResponse:
+        public_url, client_id, _ = require_oauth_config()
+        now = time.time()
+        expired_sessions = [
+            key
+            for key, auth_session in oauth_sessions.items()
+            if auth_session.expires_at <= now
+        ]
+        for key in expired_sessions:
+            del oauth_sessions[key]
+        state = secrets.token_urlsafe(32)
+        request.session.clear()
+        request.session["oauth_state"] = state
+        if session and len(session) == 32 and all(
+            character in "0123456789abcdef" for character in session.casefold()
+        ):
+            request.session["return_to"] = f"/?session={session}"
+        params = {
+            "client_id": client_id,
+            "redirect_uri": f"{public_url}/auth/callback",
+            "response_type": "code",
+            "scope": "identify guilds",
+            "state": state,
+        }
+        return RedirectResponse(
+            f"https://discord.com/oauth2/authorize?{urlencode(params)}",
+            status_code=302,
+        )
+
+    @app.get("/auth/callback")
+    async def callback(
+        request: Request, code: str | None = None, state: str | None = None
+    ) -> RedirectResponse:
+        public_url, client_id, client_secret = require_oauth_config()
+        expected_state = request.session.pop("oauth_state", None)
+        if (
+            not code
+            or not state
+            or not expected_state
+            or not secrets.compare_digest(state, expected_state)
+        ):
+            request.session.clear()
+            raise HTTPException(status_code=400, detail="Invalid sign-in state.")
+
+        redirect_uri = f"{public_url}/auth/callback"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                token_response = await client.post(
+                    f"{DISCORD_API}/oauth2/token",
+                    data={
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "redirect_uri": redirect_uri,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                token_response.raise_for_status()
+                token = token_response.json()
+                access_token = token["access_token"]
+                user_response = await client.get(
+                    f"{DISCORD_API}/users/@me",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+                user_response.raise_for_status()
+                user = user_response.json()
+                guilds_response = await client.get(
+                    f"{DISCORD_API}/users/@me/guilds",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+                guilds_response.raise_for_status()
+                guilds = guilds_response.json()
+        except (httpx.HTTPError, KeyError, ValueError):
+            LOGGER.exception("Discord OAuth sign-in failed.")
+            raise HTTPException(
+                status_code=502,
+                detail="Discord sign-in could not be completed. Please try again.",
+            ) from None
+
+        if not _is_guild_admin(guilds, settings.guild_id):
+            await _revoke_oauth_token(
+                access_token, client_id, client_secret
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="This Discord account is not an administrator in the configured server.",
+            )
+        return_to = request.session.get("return_to", "/")
+        session_key = secrets.token_urlsafe(32)
+        now = time.time()
+        oauth_sessions[session_key] = _OAuthSession(
+            user_id=int(user["id"]),
+            username=str(user.get("global_name") or user.get("username") or "Admin"),
+            access_token=access_token,
+            refresh_token=str(token.get("refresh_token") or ""),
+            access_token_expires_at=now + int(token.get("expires_in", 3600)),
+            expires_at=now + OAUTH_SESSION_TTL_SECONDS,
+            last_permission_check=now,
+            permission_check_lock=asyncio.Lock(),
+        )
+        request.session.clear()
+        request.session["dashboard_session"] = session_key
+        return RedirectResponse(return_to, status_code=302)
+
+    @app.get("/auth/logout")
+    async def logout(request: Request) -> RedirectResponse:
+        _, client_id, client_secret = require_oauth_config()
+        session_key = request.session.pop("dashboard_session", None)
+        if session_key:
+            auth_session = oauth_sessions.pop(session_key, None)
+            if auth_session:
+                await _revoke_oauth_token(
+                    auth_session.access_token, client_id, client_secret
+                )
+        request.session.clear()
+        return RedirectResponse("/", status_code=302)
+
+    @app.get("/", response_class=HTMLResponse, response_model=None)
+    async def index(request: Request) -> HTMLResponse | RedirectResponse:
+        require_oauth_config()
+        try:
+            await current_admin(request)
+        except HTTPException as error:
+            if error.status_code == 401:
+                requested_session = request.query_params.get("session", "")
+                suffix = (
+                    f"?session={requested_session}"
+                    if len(requested_session) == 32
+                    and all(
+                        character in "0123456789abcdef"
+                        for character in requested_session.casefold()
+                    )
+                    else ""
+                )
+                return RedirectResponse(f"/login{suffix}", status_code=302)
+            raise
+        return HTMLResponse(HTML_PAGE)
+
+    @app.get("/students/{usn}", response_class=HTMLResponse)
+    async def student_page(usn: str, request: Request) -> HTMLResponse:
+        await current_admin(request)
+        if not usn.strip() or len(usn) > 100:
+            raise HTTPException(status_code=404, detail="Student not found.")
+        return HTMLResponse(HTML_PAGE)
+
+    @app.get("/login", response_class=HTMLResponse)
+    async def login_page(session: str | None = None) -> HTMLResponse:
+        require_oauth_config()
+        query = (
+            f"?session={session}"
+            if session
+            and len(session) == 32
+            and all(
+                character in "0123456789abcdef" for character in session.casefold()
+            )
+            else ""
+        )
+        return HTMLResponse(
+            """<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+            <title>Quizcord Analytics · Sign in</title><style>body{margin:0;background:#0b1020;color:#e7edf8;font:16px system-ui;min-height:100vh;display:grid;place-items:center}.card{max-width:440px;padding:38px;border:1px solid #26334e;border-radius:18px;background:#141d32}p{color:#aebbd2;line-height:1.6}a{display:inline-block;padding:12px 18px;border-radius:9px;background:#5865f2;color:white;text-decoration:none;font-weight:650}</style>
+            <main class="card"><h1>Quizcord Analytics</h1><p>Sign in with Discord. Access is limited to administrators of the configured server.</p><a href="/auth/login">Continue with Discord</a></main></html>""".replace(
+                'href="/auth/login"', f'href="/auth/login{query}"'
+            )
+        )
+
+    @app.get("/api/me")
+    async def me(request: Request) -> dict[str, str]:
+        auth_session = await current_admin(request)
+        return {"id": str(auth_session.user_id), "username": auth_session.username}
+
+    @app.get("/api/sessions")
+    async def sessions(request: Request) -> list[dict[str, Any]]:
+        await current_admin(request)
+        return [
+            _summary_overview(summary)
+            for summary in database.get_quiz_session_summaries(
+                settings.guild_id, limit=50
+            )
+        ]
+
+    @app.get("/api/users")
+    async def users(request: Request) -> list[dict[str, Any]]:
+        await current_admin(request)
+        return [
+            _dashboard_user(user)
+            for user in database.get_dashboard_users(settings.guild_id)
+        ]
+
+    @app.get("/api/students/{usn}")
+    async def student_analytics(usn: str, request: Request) -> dict[str, Any]:
+        await current_admin(request)
+        if not usn.strip() or len(usn) > 100:
+            raise HTTPException(status_code=404, detail="Student not found.")
+        return _student_analytics(
+            database.get_student_quiz_analytics(settings.guild_id, usn)
+        )
+
+    @app.get("/api/students/{usn}/export.xlsx")
+    async def export_student_analytics(usn: str, request: Request) -> Response:
+        await current_admin(request)
+        if not usn.strip() or len(usn) > 100:
+            raise HTTPException(status_code=404, detail="Student not found.")
+        analytics = database.get_student_quiz_analytics(settings.guild_id, usn)
+        safe_usn = "".join(
+            character
+            for character in analytics.usn
+            if character.isascii() and (character.isalnum() or character in "-_")
+        )[:80]
+        return Response(
+            content=student_analytics_workbook(analytics),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="quizcord-student-{safe_usn or "report"}.xlsx"'
+                )
+            },
+        )
+
+    @app.get("/api/sessions/{session_id}")
+    async def session_detail(
+        session_id: str, request: Request
+    ) -> dict[str, Any]:
+        await current_admin(request)
+        summary = database.get_quiz_session(session_id)
+        if summary is None or summary.guild_id != settings.guild_id:
+            raise HTTPException(status_code=404, detail="Quiz session not found.")
+        return _summary_detail(database.get_quiz_session_summary(session_id))
+
+    @app.get("/api/sessions/{session_id}/export.xlsx")
+    async def export_session(session_id: str, request: Request) -> Response:
+        await current_admin(request)
+        session = database.get_quiz_session(session_id)
+        if session is None or session.guild_id != settings.guild_id:
+            raise HTTPException(status_code=404, detail="Quiz session not found.")
+        summary = database.get_quiz_session_summary(session_id)
+        if summary.session.status != "completed":
+            raise HTTPException(
+                status_code=409,
+                detail="The quiz export is available after the quiz completes.",
+            )
+        quiz_id = summary.session.quizcord_quiz_id or summary.session.session_id
+        safe_quiz_id = "".join(
+            character for character in quiz_id if character.isalnum() or character in "-_"
+        )[:80]
+        return Response(
+            content=quiz_session_workbook(summary),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f'attachment; filename="quizcord-{safe_quiz_id}.xlsx"'
+            },
+        )
+
+    return app
+
+
+async def _verify_current_guild_admin(
+    auth_session: _OAuthSession, settings: Settings
+) -> _OAuthSession:
+    now = time.time()
+    if auth_session.access_token_expires_at <= now:
+        if not auth_session.refresh_token:
+            raise HTTPException(status_code=401, detail="Please sign in again.")
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.post(
+                    f"{DISCORD_API}/oauth2/token",
+                    data={
+                        "client_id": settings.discord_oauth_client_id,
+                        "client_secret": settings.discord_oauth_client_secret,
+                        "grant_type": "refresh_token",
+                        "refresh_token": auth_session.refresh_token,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                response.raise_for_status()
+                token = response.json()
+        except (httpx.HTTPError, ValueError, KeyError):
+            LOGGER.exception("Could not refresh a dashboard OAuth session.")
+            raise HTTPException(
+                status_code=401, detail="Please sign in again."
+            ) from None
+        auth_session.access_token = token["access_token"]
+        auth_session.refresh_token = str(
+            token.get("refresh_token") or auth_session.refresh_token
+        )
+        auth_session.access_token_expires_at = now + int(
+            token.get("expires_in", 3600)
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                f"{DISCORD_API}/users/@me/guilds",
+                headers={"Authorization": f"Bearer {auth_session.access_token}"},
+            )
+            response.raise_for_status()
+            guilds = response.json()
+    except (httpx.HTTPError, ValueError):
+        LOGGER.exception("Could not verify dashboard administrator permissions.")
+        raise HTTPException(
+            status_code=503,
+            detail="Administrator access could not be verified. Please retry.",
+        ) from None
+
+    if not _is_guild_admin(guilds, settings.guild_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Administrator access to the configured server is required.",
+        )
+    auth_session.last_permission_check = now
+    return auth_session
+
+
+def _is_guild_admin(guilds: Any, guild_id: int) -> bool:
+    if not isinstance(guilds, list):
+        return False
+    for guild in guilds:
+        if not isinstance(guild, dict) or str(guild.get("id")) != str(guild_id):
+            continue
+        if guild.get("owner") is True:
+            return True
+        try:
+            permissions = int(guild.get("permissions", "0"))
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            permissions & (MANAGE_GUILD_PERMISSION | ADMINISTRATOR_PERMISSION)
+        )
+    return False
+
+
+async def _revoke_oauth_token(
+    access_token: str, client_id: str, client_secret: str
+) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.post(
+                f"{DISCORD_API}/oauth2/token/revoke",
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "token": access_token,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            response.raise_for_status()
+    except httpx.HTTPError:
+        LOGGER.warning("Could not revoke a dashboard OAuth token.")
+
+
+def _summary_overview(summary: QuizSessionSummary) -> dict[str, Any]:
+    session = summary.session
+    return {
+        "session_id": session.session_id,
+        "status": session.status,
+        "started_at": session.started_at,
+        "completed_at": session.completed_at,
+        "quizcord_quiz_id": session.quizcord_quiz_id,
+        "question_count": summary.question_count,
+        "participant_count": len(summary.participants),
+        "attendance_count": summary.attendance_count,
+        "eligible_student_count": session.eligible_student_count,
+        "attendance_percentage": summary.attendance_percentage,
+        "total_points": summary.total_points,
+        "average_points": summary.average_points,
+    }
+
+
+def _summary_detail(summary: QuizSessionSummary) -> dict[str, Any]:
+    session = summary.session
+    return {
+        "session": {
+            "session_id": session.session_id,
+            "status": session.status,
+            "started_at": session.started_at,
+            "completed_at": session.completed_at,
+            "quizcord_quiz_id": session.quizcord_quiz_id,
+        },
+        "question_count": summary.question_count,
+        "attendance_count": summary.attendance_count,
+        "eligible_student_count": session.eligible_student_count,
+        "attendance_percentage": summary.attendance_percentage,
+        "total_points": summary.total_points,
+        "average_points": summary.average_points,
+        "participants": [
+            {
+                "usn": participant.usn,
+                "rank": participant.rank,
+                "points": participant.points,
+                "name_matches_usn_format": participant.name_matches_usn_format,
+            }
+            for participant in summary.participants
+        ],
+    }
+
+
+def _student_analytics(analytics: StudentQuizAnalytics) -> dict[str, Any]:
+    return {
+        "usn": analytics.usn,
+        "student_name": analytics.student_name,
+        "quizzes_attended": analytics.quizzes_attended,
+        "completed_quizzes": analytics.completed_quizzes,
+        "attendance_percentage": analytics.attendance_percentage,
+        "total_points": analytics.total_points,
+        "average_points": analytics.average_points,
+        "history": [
+            {
+                "quizcord_quiz_id": record.quizcord_quiz_id,
+                "status": record.status,
+                "started_at": record.started_at,
+                "rank": record.rank,
+                "points": record.points,
+            }
+            for record in analytics.history
+        ],
+    }
