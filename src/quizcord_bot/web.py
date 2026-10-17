@@ -350,18 +350,32 @@ FACULTY_ADMIN_PAGE = r"""<!doctype html>
 <style>
 :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#e7edf8;background:#0b1020}
 *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 10% 0%,#17264a 0,transparent 42%),#0b1020}
-header{padding:22px max(24px,calc((100vw - 900px)/2));border-bottom:1px solid #26314b;font-weight:750}header span{color:#8fa7ff}
-main{max-width:900px;margin:44px auto;padding:0 24px}.panel{background:#11182b;border:1px solid #26334e;border-radius:16px;padding:24px}
-.eyebrow{color:#91a6ff;font-size:12px;letter-spacing:1.4px;text-transform:uppercase;font-weight:700}h1{margin:8px 0 10px}.description,.note{color:#aebbd2;line-height:1.6}
-label{display:block;margin:22px 0 8px;font-size:13px}input{width:min(100%,460px);padding:12px;background:#0b1020;color:#e7edf8;border:1px solid #33415e;border-radius:9px}
-button{margin-top:16px;padding:11px 16px;border:0;border-radius:8px;background:#5865f2;color:white;font:inherit;font-weight:700;cursor:pointer}button:disabled{opacity:.6}
-.secret{margin-top:22px;padding:16px;border:1px solid #425681;border-radius:10px;background:#182540}.secret code{display:block;margin:12px 0;word-break:break-all;font-size:17px;color:#fff}.error{color:#ff9e9e}.back{display:inline-block;margin:0 0 18px;color:#aebbd2;text-decoration:none}
-</style></head><body><header>Quizcord <span>Admin</span></header><main>
-<a class="back" href="/">← Admin dashboard</a><section class="panel"><div class="eyebrow">Faculty access</div><h1>Issue a temporary password</h1>
-<p class="description">Enter the faculty member's Discord user ID. A new one-time password is generated and shown only once; the faculty member must change it after signing in.</p>
-<form id="provision-form"><label for="discord-id">Faculty Discord user ID</label><input id="discord-id" inputmode="numeric" pattern="[0-9]+" required><br><button id="submit" type="submit">Generate temporary password</button><div id="error" class="error" role="alert"></div></form>
+header{border-bottom:1px solid #26314b;background:#0e1528cc}
+.header-inner{max-width:980px;margin:auto;padding:18px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+.brand{font-size:16px;font-weight:800;letter-spacing:.3px}.brand span{color:#8fa7ff}
+.admin-badge{display:inline-flex;align-items:center;gap:8px;padding:7px 11px;border:1px solid #40528a;border-radius:999px;background:#18264a;color:#c9d5ff;font-size:11px;font-weight:800;letter-spacing:1px}
+.admin-badge::before{content:"";width:8px;height:8px;border-radius:50%;background:#91a6ff;box-shadow:0 0 12px #91a6ff88}
+main{max-width:980px;margin:40px auto;padding:0 24px}.back{display:inline-flex;align-items:center;gap:8px;margin:0 0 20px;color:#aebbd2;text-decoration:none;font-size:14px}.back:hover{color:#fff}
+.panel{background:linear-gradient(145deg,#131d34,#101729 70%);border:1px solid #2d3c60;border-radius:18px;padding:clamp(24px,5vw,42px);box-shadow:0 24px 70px #05091466}
+.eyebrow{display:flex;align-items:center;gap:9px;color:#9db0ff;font-size:12px;letter-spacing:1.5px;text-transform:uppercase;font-weight:800}
+.eyebrow::before{content:"";width:24px;height:1px;background:#7188ed}
+h1{font-size:clamp(28px,4vw,38px);letter-spacing:-.7px;margin:12px 0 10px}
+.description,.note{color:#aebbd2;line-height:1.65}.description{max-width:720px;margin:0}
+.form-card{margin-top:30px;padding:22px;border:1px solid #273655;border-radius:13px;background:#0d1425}
+label{display:block;margin:0 0 9px;font-size:13px;font-weight:650;color:#dce4f8}
+input{width:min(100%,520px);padding:13px 14px;background:#090f1e;color:#e7edf8;border:1px solid #3a4969;border-radius:9px;font:inherit;transition:border-color .15s,box-shadow .15s}
+input:focus{outline:none;border-color:#8296ff;box-shadow:0 0 0 3px #5865f233}
+button{margin-top:16px;padding:12px 17px;border:0;border-radius:9px;background:linear-gradient(135deg,#6878ff,#5262e8);color:white;font:inherit;font-weight:750;cursor:pointer;box-shadow:0 7px 20px #4659ed33}
+button:hover:not(:disabled){filter:brightness(1.1)}button:disabled{opacity:.6;cursor:wait}
+.secret{margin-top:22px;padding:18px;border:1px solid #425681;border-radius:12px;background:#182540}.secret code{display:block;margin:12px 0;word-break:break-all;font-size:17px;color:#fff}
+.error{margin-top:10px;color:#ff9e9e;font-size:14px}.note{margin:22px 0 0;font-size:13px}.note strong{color:#d8e0f4}
+@media(max-width:560px){.header-inner{padding:16px}.header-inner .admin-badge{font-size:10px;padding:6px 9px}main{margin:24px auto;padding:0 16px}.panel{padding:24px 18px}.form-card{padding:17px}button{width:100%}}
+</style></head><body><header><div class="header-inner"><div class="brand">Quizcord <span>Analytics</span></div><div class="admin-badge">ADMIN CONSOLE</div></div></header><main>
+<a class="back" href="/">← <span>Back to admin dashboard</span></a><section class="panel"><div class="eyebrow">Administrator tools · Faculty accounts</div><h1>Faculty password management</h1>
+<p class="description">Issue or reset a faculty member's app password. Enter their Discord user ID; a one-time password will be generated and shown only once. They must change it after signing in.</p>
+<div class="form-card"><form id="provision-form"><label for="discord-id">Faculty member's Discord user ID</label><input id="discord-id" inputmode="numeric" pattern="[0-9]+" autocomplete="off" placeholder="Example: 123456789012345678" required><br><button id="submit" type="submit">Generate temporary password</button><div id="error" class="error" role="alert"></div></form></div>
 <div id="secret" class="secret" hidden><strong>Copy this password and send it securely to the faculty member. It will not be shown again.</strong><code id="temporary-password"></code><button id="copy" type="button">Copy password</button></div>
-<p class="note">The account must currently have the configured Faculty role. Resetting a password invalidates the previous one.</p>
+<p class="note"><strong>Access requirement:</strong> The member must be in the configured server and have the configured Faculty role. Resetting a password invalidates the previous one.</p>
 </section>
 <script>
 const form=document.getElementById("provision-form"),id=document.getElementById("discord-id"),error=document.getElementById("error"),secret=document.getElementById("secret"),temporary=document.getElementById("temporary-password"),submit=document.getElementById("submit");
