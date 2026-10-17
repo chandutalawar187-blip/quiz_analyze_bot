@@ -144,6 +144,17 @@ class DashboardWebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers["location"], "/faculty/login")
 
+    def test_admin_sign_in_page_is_distinct_and_preserves_private_session(self) -> None:
+        session_id = "0123456789abcdef0123456789abcdef"
+        response = self.client.get(f"/login?session={session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Administrator workspace", response.text)
+        self.assertIn("Admin sign in", response.text)
+        self.assertIn("Only administrators of the configured server", response.text)
+        self.assertIn("Go to the faculty portal", response.text)
+        self.assertIn(f'href="/auth/login?session={session_id}"', response.text)
+
     def test_faculty_login_pages_are_separate_and_admin_reset_is_protected(self) -> None:
         login_page = self.client.get("/faculty/login")
         self.assertEqual(login_page.status_code, 200)
