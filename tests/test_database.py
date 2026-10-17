@@ -463,8 +463,23 @@ class DatabaseTests(unittest.TestCase):
             guild_permissions=SimpleNamespace(),
         )
         self.database.sync_member(member)
+        member_with_invalid_global_name = SimpleNamespace(
+            id=54322,
+            name="invalid_global_name",
+            display_name="Student Display",
+            global_name="Student Name",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.map_student(
+            member_with_invalid_global_name, "4GM22CS002", "Student Two"
+        )
+        self.database.sync_member(member_with_invalid_global_name)
 
         self.assertTrue(self.database.add_faculty_student(67890, 111, "4gm22cs001"))
+        self.assertFalse(self.database.add_faculty_student(67890, 111, "4GM22CS002"))
         self.assertFalse(self.database.add_faculty_student(67890, 111, "4GM22CS001"))
         self.assertEqual(
             self.database.get_faculty_student_usns(67890, 111),

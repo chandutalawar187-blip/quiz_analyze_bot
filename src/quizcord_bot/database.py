@@ -1221,12 +1221,21 @@ class Database:
         self, guild_id: int, faculty_discord_id: int, usn: str
     ) -> bool:
         normalized_usn = usn.strip().upper()
-        eligible_usns = {
-            user.usn.casefold()
-            for user in self.get_dashboard_users(guild_id)
-            if user.usn is not None
-        }
-        if normalized_usn.casefold() not in eligible_usns:
+        candidate = next(
+            (
+                user
+                for user in self.get_dashboard_users(guild_id)
+                if user.usn is not None
+                and user.usn.casefold() == normalized_usn.casefold()
+            ),
+            None,
+        )
+        if (
+            candidate is None
+            or not matches_usn_format(candidate.global_name or "")
+            or normalized_usn.casefold()
+            != (candidate.global_name or "").strip().casefold()
+        ):
             return False
         with self._connect() as connection:
             cursor = connection.execute(

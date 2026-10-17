@@ -132,6 +132,33 @@ class DashboardWebTests(unittest.TestCase):
             guild_permissions=SimpleNamespace(),
         )
         self.database.sync_member(member)
+        member_without_usn = SimpleNamespace(
+            id=98766,
+            name="student_without_usn",
+            display_name="Student Without USN",
+            global_name="Student Without USN",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=SimpleNamespace(id=67890),
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.sync_member(member_without_usn)
+        member_with_usn_but_invalid_name = SimpleNamespace(
+            id=98767,
+            name="mapped_student",
+            display_name="Mapped Student",
+            global_name="Mapped Student",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=SimpleNamespace(id=67890),
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.map_student(
+            member_with_usn_but_invalid_name,
+            "4GM22CS009",
+            "Mapped Student",
+        )
+        self.database.sync_member(member_with_usn_but_invalid_name)
 
         login = self.client.get(
             "/auth/login?destination=faculty", follow_redirects=False
@@ -184,7 +211,29 @@ class DashboardWebTests(unittest.TestCase):
         )
         self.assertEqual(self.client.get("/faculty").status_code, 200)
         candidates = self.client.get("/api/faculty/candidates").json()
-        self.assertEqual([row["usn"] for row in candidates], ["4GM22CS001"])
+        self.assertEqual(len(candidates), 3)
+        candidate_with_usn = next(row for row in candidates if row["usn"])
+        candidate_without_usn = next(
+            row for row in candidates if row["usn"] is None
+        )
+        mapped_but_invalid = next(
+            row for row in candidates if row["usn"] == "4GM22CS009"
+        )
+        self.assertTrue(candidate_with_usn["can_assign"])
+        self.assertEqual(candidate_without_usn["student_name"], "Student Without USN")
+        self.assertFalse(candidate_without_usn["can_assign"])
+        self.assertFalse(mapped_but_invalid["can_assign"])
+        self.assertFalse(mapped_but_invalid["name_matches_usn_format"])
+        searched_candidates = self.client.get(
+            "/api/faculty/candidates?search=4GM22"
+        ).json()
+        self.assertEqual(
+            {row["usn"] for row in searched_candidates},
+            {"4GM22CS001", "4GM22CS009"},
+        )
+        rejected_add = self.client.post("/api/faculty/students/4GM22CS009")
+        self.assertEqual(rejected_add.status_code, 422)
+        self.assertIn("Ask them to update", rejected_add.json()["detail"])
         added = self.client.post("/api/faculty/students/4GM22CS001")
         self.assertEqual(added.status_code, 204)
         students = self.client.get("/api/faculty/students").json()

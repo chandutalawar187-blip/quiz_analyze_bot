@@ -19,6 +19,7 @@ from quizcord_bot.database import (
     DashboardUser,
     QuizSessionSummary,
     StudentQuizAnalytics,
+    matches_usn_format,
 )
 from quizcord_bot.exports import quiz_session_workbook, student_analytics_workbook
 
@@ -249,7 +250,7 @@ FACULTY_PAGE = r"""<!doctype html>
     main{max-width:1100px;margin:38px auto;padding:0 24px}.eyebrow{color:#91a6ff;font-size:12px;text-transform:uppercase;letter-spacing:1.4px;font-weight:700}h1{font-size:30px;margin:8px 0}.intro{color:#aebbd2;margin:0 0 26px}
     .panel{background:#11182b;border:1px solid #26334e;border-radius:16px;overflow:hidden;margin:18px 0}.panel-head{padding:19px 21px;border-bottom:1px solid #26314b}.panel h2{font-size:16px;margin:0}.panel-sub{font-size:12px;color:#8291ac;margin-top:5px}.table-wrap{overflow:auto;max-height:520px}table{border-collapse:collapse;width:100%;text-align:left}th,td{padding:13px 18px;border-bottom:1px solid #202b42;font-size:13px}th{color:#8797b3;font-size:11px;text-transform:uppercase;letter-spacing:.7px;position:sticky;top:0;background:#11182b}
     .usn{font-weight:700;letter-spacing:.2px}.student-link{color:#dce5f8;text-decoration:none}.student-link:hover{color:#91a6ff;text-decoration:underline}.muted{color:#91a0ba}.button{border:1px solid #425681;border-radius:8px;background:#26365b;color:#e7edf8;padding:8px 12px;cursor:pointer;font-size:12px;font-weight:650}.button:hover{background:#344875}.button.remove{background:#2c2030;border-color:#654052}.button:disabled{opacity:.55;cursor:wait}
-    .search-tools{display:flex;gap:12px;padding:16px 18px}.search{flex:1;min-width:0;padding:11px 12px;background:#0b1020;color:#e7edf8;border:1px solid #33415e;border-radius:9px}.empty{color:#8797b3;text-align:center;padding:36px 20px;font-size:14px}.error{color:#ff9e9e}.notice{padding:12px 18px;color:#95a4bd;font-size:13px}.row-metrics{white-space:nowrap;color:#aebbd2}
+    .search-tools{display:flex;gap:12px;padding:16px 18px}.search{flex:1;min-width:0;padding:11px 12px;background:#0b1020;color:#e7edf8;border:1px solid #33415e;border-radius:9px}.empty{color:#8797b3;text-align:center;padding:36px 20px;font-size:14px}.error{color:#ff9e9e}.notice{padding:12px 18px;color:#95a4bd;font-size:13px}.row-metrics{white-space:nowrap;color:#aebbd2}.candidate-warning{margin-top:5px;color:#ffbd59;font-size:11px;line-height:1.4;max-width:460px}
     @media(max-width:600px){.top{padding:0 16px}.account{gap:8px}main{margin:24px auto;padding:0 16px}.search-tools{flex-direction:column}th,td{padding:12px}}
   </style>
 </head>
@@ -302,10 +303,12 @@ FACULTY_PAGE = r"""<!doctype html>
         ["Student","USN",""].forEach(label=>head.append(el("th","",label)));
         thead.append(head);table.append(thead);const body=el("tbody");
         users.forEach(user=>{const row=el("tr");
-          row.append(el("td","",user.student_name),el("td","usn",user.usn));
-          const button=el("button","button",user.assigned?"Added":"+ Add");button.type="button";button.disabled=user.assigned;
-          if(!button.disabled)button.addEventListener("click",()=>addStudent(user.usn,button));
-          row.append(el("td","",button));body.append(row);
+          const studentCell=el("td","");studentCell.append(el("div","",user.student_name));
+          if(!user.name_matches_usn_format)studentCell.append(el("div","candidate-warning","Ask this student to update their Discord global display name to their USN format before adding them."));
+          row.append(studentCell,el("td","usn",user.usn||"USN not available"));
+          const button=el("button","button",user.assigned?"Added":user.can_assign?"+ Add":"USN required");button.type="button";button.disabled=user.assigned||!user.can_assign;
+          if(user.can_assign&&!user.assigned)button.addEventListener("click",()=>addStudent(user.usn,button));
+          const actionCell=el("td","");actionCell.appendChild(button);row.append(actionCell);body.append(row);
         });
         table.append(body);wrap.append(table);candidates.replaceChildren(wrap);
       }catch(error){candidates.replaceChildren(el("div","empty error",error.message));}
@@ -737,7 +740,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         }
         candidates = []
         for user in database.get_dashboard_users(settings.guild_id):
-            if user.usn is None or query not in user.usn.upper():
+            if query and (
+                user.usn is None or query not in user.usn.upper()
+            ):
                 continue
             candidates.append(
                 {
@@ -747,8 +752,20 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                         or user.global_name
                         or user.server_nickname
                         or user.usn
+                        or user.account_name
                     ),
-                    "assigned": user.usn.casefold() in assigned_usns,
+                    "can_assign": (
+                        user.usn is not None
+                        and matches_usn_format(user.global_name or "")
+                        and user.usn.casefold()
+                        == (user.global_name or "").strip().casefold()
+                    ),
+                    "name_matches_usn_format": user.name_matches_usn_format,
+                    "assigned": (
+                        user.usn.casefold() in assigned_usns
+                        if user.usn is not None
+                        else False
+                    ),
                 }
             )
         return candidates
@@ -760,20 +777,33 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         auth_session = await current_faculty(request)
         if not usn.strip() or len(usn) > 100:
             raise HTTPException(status_code=404, detail="Student not found.")
+        matching_user = next(
+            (
+                user
+                for user in database.get_dashboard_users(settings.guild_id)
+                if user.usn is not None
+                and user.usn.casefold() == usn.casefold()
+            ),
+            None,
+        )
+        if matching_user is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No current server member has this USN.",
+            )
+        if (
+            not matches_usn_format(matching_user.global_name or "")
+            or usn.casefold()
+            != (matching_user.global_name or "").strip().casefold()
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="This student cannot be added until their Discord global display name matches their USN format. Ask them to update it and try again.",
+            )
         added = database.add_faculty_student(
             settings.guild_id, auth_session.user_id, usn
         )
         if not added:
-            available_usns = {
-                user.usn.casefold()
-                for user in database.get_dashboard_users(settings.guild_id)
-                if user.usn is not None
-            }
-            if usn.casefold() not in available_usns:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No current server member has this USN.",
-                )
             raise HTTPException(
                 status_code=409, detail="This student is already in your list."
             )
