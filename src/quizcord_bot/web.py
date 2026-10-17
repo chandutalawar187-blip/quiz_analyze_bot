@@ -491,6 +491,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid sign-in state.")
 
         redirect_uri = f"{public_url}/auth/callback"
+        oauth_stage = "authorization-code exchange"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 token_response = await client.post(
@@ -507,12 +508,14 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 token_response.raise_for_status()
                 token = token_response.json()
                 access_token = token["access_token"]
+                oauth_stage = "Discord identity lookup"
                 user_response = await client.get(
                     f"{DISCORD_API}/users/@me",
                     headers={"Authorization": f"Bearer {access_token}"},
                 )
                 user_response.raise_for_status()
                 user = user_response.json()
+                oauth_stage = "Discord server-membership lookup"
                 guilds_response = await client.get(
                     f"{DISCORD_API}/users/@me/guilds",
                     headers={"Authorization": f"Bearer {access_token}"},
@@ -523,17 +526,27 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 if settings.faculty_role_id is not None and _is_guild_member(
                     guilds, settings.guild_id
                 ):
+                    oauth_stage = "Faculty role lookup"
                     member_response = await client.get(
                         f"{DISCORD_API}/users/@me/guilds/{settings.guild_id}/member",
                         headers={"Authorization": f"******"},
                     )
                     member_response.raise_for_status()
                     member = member_response.json()
-        except (httpx.HTTPError, KeyError, ValueError):
-            LOGGER.exception("Discord OAuth sign-in failed.")
+        except (httpx.HTTPError, KeyError, ValueError) as error:
+            status_code = (
+                error.response.status_code
+                if isinstance(error, httpx.HTTPStatusError)
+                else None
+            )
+            LOGGER.exception(
+                "Discord OAuth failed during %s (HTTP %s).",
+                oauth_stage,
+                status_code or "transport/response parsing",
+            )
             raise HTTPException(
                 status_code=502,
-                detail="Discord sign-in could not be completed. Please try again.",
+                detail=_oauth_failure_detail(oauth_stage, status_code),
             ) from None
 
         is_admin = _is_guild_admin(guilds, settings.guild_id)
@@ -961,6 +974,28 @@ def _is_guild_member(guilds: Any, guild_id: int) -> bool:
     return isinstance(guilds, list) and any(
         isinstance(guild, dict) and str(guild.get("id")) == str(guild_id)
         for guild in guilds
+    )
+
+
+def _oauth_failure_detail(stage: str, status_code: int | None) -> str:
+    status = f" (HTTP {status_code})" if status_code is not None else ""
+    if stage == "authorization-code exchange":
+        return (
+            "Discord rejected the OAuth authorization code"
+            f"{status}. Check that DASHBOARD_PUBLIC_URL matches the Discord "
+            "OAuth redirect URL exactly, including /auth/callback, and that "
+            "the OAuth client ID and secret belong to that same Discord application. "
+            "Restart sign-in to use a fresh authorization code."
+        )
+    if stage == "Faculty role lookup":
+        return (
+            "Discord could not verify the Faculty role"
+            f"{status}. Confirm the OAuth application has the guilds.members.read "
+            "scope and try signing in again to grant it."
+        )
+    return (
+        f"Discord sign-in failed during {stage}{status}. "
+        "Check the application logs and try again."
     )
 
 

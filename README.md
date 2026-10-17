@@ -80,6 +80,12 @@ and set it as `FACULTY_ROLE_ID`. Faculty sign in with Discord; the dashboard
 checks their current server role through OAuth and requires the configured
 role. The OAuth sign-in requests the `guilds.members.read` scope to verify role
 membership. Administrators retain access to the existing admin dashboard.
+Register `https://<your-dashboard-domain>/auth/callback` as an exact OAuth2
+redirect URI in the same Discord application configured by
+`DISCORD_OAUTH_CLIENT_ID` and `DISCORD_OAUTH_CLIENT_SECRET`. If the callback
+reports an authorization-code exchange failure, verify that URI, the dashboard
+public URL, and the application credentials match; restart sign-in after
+correcting configuration so Discord issues a fresh authorization code.
 
 Each faculty account manages its own student list on `/faculty`. Faculty can
 search the synchronized human-member directory by USN and add or remove
@@ -112,10 +118,12 @@ supported single-service deployment:
    - Push this project to GitHub on the `main` branch. The workflow at
      `.github/workflows/deploy-railway.yml` deploys each push to Railway and
      can also be started manually from the repository's **Actions** tab.
-   - Create a Railway project token for the project/environment being deployed.
-     Add it as a GitHub repository secret named `RAILWAY_TOKEN` under
-     **Settings → Secrets and variables → Actions**. Never put the token in
-     source code or `.env`.
+   - In Railway, create a **project token** for the project/environment that
+     hosts this bot. In the GitHub repository, open **Settings → Secrets and
+     variables → Actions → New repository secret**, name it exactly
+     `RAILWAY_TOKEN`, and paste the project token as its value. Do not put the
+     Railway token in source code, `.env`, or a GitHub Actions variable.
+     The workflow checks that this secret is present before invoking Railway.
    - If your deployment branch is not `main`, update the workflow's branch
      filter to match it. The automated workflow requires the repository to be
      pushed to GitHub and this project to be linked/configured in Railway.

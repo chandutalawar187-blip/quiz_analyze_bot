@@ -22,6 +22,7 @@ from quizcord_bot.database import (
 from quizcord_bot.web import (
     _is_guild_admin,
     _is_guild_faculty,
+    _oauth_failure_detail,
     _summary_detail,
     _student_analytics,
     create_dashboard_app,
@@ -78,6 +79,16 @@ class DashboardWebTests(unittest.TestCase):
         self.assertFalse(_is_guild_faculty({"roles": ["12345"]}, 33333))
         self.assertFalse(_is_guild_faculty({"roles": "33333"}, 33333))
         self.assertFalse(_is_guild_faculty({"roles": ["33333"]}, None))
+
+    def test_oauth_failure_detail_identifies_configuration_stage(self) -> None:
+        token_error = _oauth_failure_detail("authorization-code exchange", 400)
+        self.assertIn("DASHBOARD_PUBLIC_URL", token_error)
+        self.assertIn("/auth/callback", token_error)
+        self.assertIn("HTTP 400", token_error)
+
+        faculty_error = _oauth_failure_detail("Faculty role lookup", 403)
+        self.assertIn("guilds.members.read", faculty_error)
+        self.assertIn("HTTP 403", faculty_error)
 
     def test_dashboard_data_requires_discord_sign_in(self) -> None:
         response = self.client.get("/api/sessions")
