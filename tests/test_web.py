@@ -158,8 +158,13 @@ class DashboardWebTests(unittest.TestCase):
     def test_faculty_login_pages_are_separate_and_admin_reset_is_protected(self) -> None:
         login_page = self.client.get("/faculty/login")
         self.assertEqual(login_page.status_code, 200)
-        self.assertIn("Faculty portal", login_page.text)
+        self.assertIn("FACULTY PORTAL", login_page.text)
         self.assertIn("Continue with Discord", login_page.text)
+        self.assertIn('href="/auth/login?destination=faculty"', login_page.text)
+        self.assertIn('href="/login"', login_page.text)
+        self.assertIn("A clearer view of every learner", login_page.text)
+        self.assertIn("Quizcord never asks for or stores your Discord password", login_page.text)
+        self.assertIn("Your administrator provides this app password separately", login_page.text)
         self.assertNotIn('type="password"', login_page.text)
 
         password_page = self.client.get(
