@@ -20,9 +20,9 @@ if TYPE_CHECKING:
 
 
 POINTS_PATTERN = re.compile(r"^\s*(?P<points>\d+)(?:\s+Points?)?\s*$", re.IGNORECASE)
-FACULTY_PASSWORD_ITERATIONS = 310_000
-FACULTY_PASSWORD_MAX_ATTEMPTS = 5
-FACULTY_PASSWORD_LOCK_SECONDS = 900
+APP_PASSWORD_HASH_ITERATIONS = 310_000
+APP_PASSWORD_MAX_ATTEMPTS = 5
+APP_PASSWORD_LOCK_SECONDS = 900
 USER_MENTION_PATTERN = re.compile(r"^<@!?(\d+)>$")
 USER_MENTION_IDS_PATTERN = re.compile(r"<@!?(\d+)>")
 USN_FORMAT_PATTERN = re.compile(
@@ -350,6 +350,20 @@ class Database:
                     password_salt TEXT NOT NULL,
                     password_hash TEXT NOT NULL,
                     must_change_password INTEGER NOT NULL DEFAULT 1,
+                    failed_attempts INTEGER NOT NULL DEFAULT 0,
+                    locked_until REAL NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (guild_id, discord_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS admin_credentials (
+                    guild_id TEXT NOT NULL,
+                    discord_id TEXT NOT NULL,
+                    password_salt TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
                     failed_attempts INTEGER NOT NULL DEFAULT 0,
                     locked_until REAL NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1286,19 +1300,19 @@ class Database:
         return cursor.rowcount > 0
 
     @staticmethod
-    def _faculty_password_hash(password: str, salt: str) -> str:
+    def _password_hash(password: str, salt: str) -> str:
         return hashlib.pbkdf2_hmac(
             "sha256",
             password.encode("utf-8"),
             bytes.fromhex(salt),
-            FACULTY_PASSWORD_ITERATIONS,
+            APP_PASSWORD_HASH_ITERATIONS,
         ).hex()
 
     def set_faculty_temporary_password(
         self, guild_id: int, faculty_discord_id: int, password: str
     ) -> None:
         salt = secrets.token_hex(16)
-        password_hash = self._faculty_password_hash(password, salt)
+        password_hash = self._password_hash(password, salt)
         with self._connect() as connection:
             connection.execute(
                 """
@@ -1365,12 +1379,12 @@ class Database:
             if row is None or float(row[4]) > now:
                 return False, False
             password_salt, password_hash, must_change, attempts, _ = row
-            submitted_hash = self._faculty_password_hash(password, password_salt)
+            submitted_hash = self._password_hash(password, password_salt)
             if not hmac.compare_digest(submitted_hash, password_hash):
                 attempts = int(attempts) + 1
                 lock_until = (
-                    now + FACULTY_PASSWORD_LOCK_SECONDS
-                    if attempts >= FACULTY_PASSWORD_MAX_ATTEMPTS
+                    now + APP_PASSWORD_LOCK_SECONDS
+                    if attempts >= APP_PASSWORD_MAX_ATTEMPTS
                     else 0
                 )
                 connection.execute(
@@ -1396,7 +1410,7 @@ class Database:
         self, guild_id: int, faculty_discord_id: int, password: str
     ) -> None:
         salt = secrets.token_hex(16)
-        password_hash = self._faculty_password_hash(password, salt)
+        password_hash = self._password_hash(password, salt)
         with self._connect() as connection:
             cursor = connection.execute(
                 """
@@ -1415,6 +1429,89 @@ class Database:
             )
             if cursor.rowcount == 0:
                 raise LookupError("Faculty password has not been provisioned.")
+
+    def has_admin_password(self, guild_id: int, admin_discord_id: int) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM admin_credentials
+                WHERE guild_id = ? AND discord_id = ?
+                """,
+                (str(guild_id), str(admin_discord_id)),
+            ).fetchone()
+        return row is not None
+
+    def set_admin_password_if_absent(
+        self, guild_id: int, admin_discord_id: int, password: str
+    ) -> bool:
+        salt = secrets.token_hex(16)
+        password_hash = self._password_hash(password, salt)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO admin_credentials (
+                    guild_id, discord_id, password_salt, password_hash
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (str(guild_id), str(admin_discord_id), salt, password_hash),
+            )
+        return cursor.rowcount > 0
+
+    def get_admin_password_failed_attempts(
+        self, guild_id: int, admin_discord_id: int
+    ) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT failed_attempts FROM admin_credentials
+                WHERE guild_id = ? AND discord_id = ?
+                """,
+                (str(guild_id), str(admin_discord_id)),
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def verify_admin_password(
+        self, guild_id: int, admin_discord_id: int, password: str
+    ) -> bool:
+        now = time.time()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT password_salt, password_hash, failed_attempts, locked_until
+                FROM admin_credentials
+                WHERE guild_id = ? AND discord_id = ?
+                """,
+                (str(guild_id), str(admin_discord_id)),
+            ).fetchone()
+            if row is None or float(row[3]) > now:
+                return False
+            password_salt, password_hash, attempts, _ = row
+            submitted_hash = self._password_hash(password, password_salt)
+            if not hmac.compare_digest(submitted_hash, password_hash):
+                attempts = int(attempts) + 1
+                lock_until = (
+                    now + APP_PASSWORD_LOCK_SECONDS
+                    if attempts >= APP_PASSWORD_MAX_ATTEMPTS
+                    else 0
+                )
+                connection.execute(
+                    """
+                    UPDATE admin_credentials
+                    SET failed_attempts = ?, locked_until = ?
+                    WHERE guild_id = ? AND discord_id = ?
+                    """,
+                    (attempts, lock_until, str(guild_id), str(admin_discord_id)),
+                )
+                return False
+            connection.execute(
+                """
+                UPDATE admin_credentials
+                SET failed_attempts = 0, locked_until = 0
+                WHERE guild_id = ? AND discord_id = ?
+                """,
+                (str(guild_id), str(admin_discord_id)),
+            )
+            return True
 
     def claim_global_name_reminder(
         self, session_id: str, discord_id: int

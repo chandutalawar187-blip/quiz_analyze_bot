@@ -105,8 +105,20 @@ The member must have the configured Faculty role. The temporary password is
 shown only once; share it securely. On first use, faculty must replace it with
 a password of at least 12 characters. Passwords are stored as salted PBKDF2
 hashes, and five consecutive failed attempts lock password verification for
-15 minutes. To reset a forgotten password, an administrator issues a new
-temporary password.
+15 minutes. HOD/faculty passwords may use any characters, must be 12–128
+characters long, and do not require a specific character mix. To reset a
+forgotten faculty password, an administrator issues a new temporary password.
+
+Admin dashboard access also requires an app password after Discord confirms
+the account has server-management permission. Each administrator creates this
+password after their first successful Discord sign-in and enters it after
+subsequent sign-ins. Admin passwords must be 12–128 characters and contain an
+uppercase letter, a lowercase letter, a number, and a symbol. They are stored
+as salted PBKDF2 hashes; five consecutive incorrect attempts lock verification
+for 15 minutes. If an administrator forgets their password, an operator can
+remove only that administrator's row from the `admin_credentials` table in the
+configured SQLite database; after a fresh Discord sign-in, that admin can set
+a replacement. Back up the database before making a manual change.
 
 The faculty password page requires Cloudflare Turnstile after two consecutive
 incorrect password attempts. Create a Managed Turnstile widget for the
@@ -122,7 +134,8 @@ verification fails closed until the configuration or service is restored.
 The dashboard also applies per-client sliding-window limits: 300 requests per
 minute overall (except health checks); 12 OAuth sign-in starts and 20 OAuth
 callbacks per minute; 10 faculty password verifications and 10 password
-changes per 15 minutes; 10 faculty password provisions per minute; 30
+changes per 15 minutes; 10 admin password verifications and 5 initial admin
+password setups per 15 minutes; 10 faculty password provisions per minute; 30
 faculty-directory searches per minute; and 120 API requests per minute
 overall. Limited requests return HTTP 429 with a `Retry-After` header. These
 counters are held in the web process memory, are bounded, and reset when the

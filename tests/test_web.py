@@ -26,6 +26,7 @@ from quizcord_bot.web import (
     _oauth_failure_detail,
     _summary_detail,
     _student_analytics,
+    _valid_admin_password,
     create_dashboard_app,
 )
 
@@ -206,6 +207,98 @@ class DashboardWebTests(unittest.TestCase):
         self.assertIn("Go to the faculty portal", response.text)
         self.assertIn(f'href="/auth/login?session={session_id}"', response.text)
 
+    def test_admin_app_password_setup_and_verification_follow_discord_role_check(
+        self,
+    ) -> None:
+        def complete_admin_oauth(code: str) -> None:
+            login = self.client.get(
+                "/auth/login", follow_redirects=False
+            )
+            state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
+            token_response = Mock()
+            token_response.json.return_value = {
+                "access_token": "admin-access-token",
+                "refresh_token": "admin-refresh-token",
+                "expires_in": 3600,
+            }
+            user_response = Mock()
+            user_response.json.return_value = {
+                "id": "987654",
+                "global_name": "Server Admin",
+            }
+            guilds_response = Mock()
+            guilds_response.json.return_value = [
+                {"id": "67890", "permissions": str(1 << 5)}
+            ]
+            member_response = Mock()
+            member_response.json.return_value = {"roles": []}
+            discord_client = Mock()
+            discord_client.post = AsyncMock(return_value=token_response)
+            discord_client.get = AsyncMock(
+                side_effect=[user_response, guilds_response, member_response]
+            )
+            client_context = Mock()
+            client_context.__aenter__ = AsyncMock(return_value=discord_client)
+            client_context.__aexit__ = AsyncMock(return_value=False)
+            with patch(
+                "quizcord_bot.web.httpx.AsyncClient",
+                return_value=client_context,
+            ):
+                callback = self.client.get(
+                    f"/auth/callback?code={code}&state={state}",
+                    follow_redirects=False,
+                )
+            self.assertEqual(callback.status_code, 302)
+
+        self.assertTrue(_valid_admin_password("StrongAdmin!Pass123"))
+        self.assertFalse(_valid_admin_password("short!A1"))
+        self.assertFalse(_valid_admin_password("lowercase!pass123"))
+        self.assertFalse(_valid_admin_password("NoSymbolPassword123"))
+        self.assertFalse(_valid_admin_password("NoSymbol Password123"))
+        complete_admin_oauth("admin-first-login")
+
+        dashboard = self.client.get("/", follow_redirects=False)
+        self.assertEqual(dashboard.status_code, 302)
+        self.assertEqual(dashboard.headers["location"], "/admin/password")
+        setup_page = self.client.get("/admin/password")
+        self.assertEqual(setup_page.status_code, 200)
+        self.assertIn('const mode="setup"', setup_page.text)
+        self.assertIn("uppercase and lowercase letters", setup_page.text)
+
+        weak_password = self.client.post(
+            "/api/admin/password/setup",
+            json={"new_password": "lowercase!pass123"},
+        )
+        self.assertEqual(weak_password.status_code, 422)
+        setup_password = self.client.post(
+            "/api/admin/password/setup",
+            json={"new_password": "StrongAdmin!Pass123"},
+        )
+        self.assertEqual(setup_password.status_code, 200)
+        self.assertEqual(self.client.get("/api/sessions").status_code, 200)
+
+        with patch(
+            "quizcord_bot.web._revoke_oauth_token", new=AsyncMock()
+        ):
+            self.client.get("/auth/logout")
+        complete_admin_oauth("admin-second-login")
+        dashboard = self.client.get("/", follow_redirects=False)
+        self.assertEqual(dashboard.headers["location"], "/admin/password")
+        verify_page = self.client.get("/admin/password")
+        self.assertIn('const mode="verify"', verify_page.text)
+        rejected = self.client.post(
+            "/api/admin/password/verify",
+            json={"password": "WrongAdmin!Pass123"},
+        )
+        self.assertEqual(rejected.status_code, 401)
+        verified = self.client.post(
+            "/api/admin/password/verify",
+            json={"password": "StrongAdmin!Pass123"},
+        )
+        self.assertEqual(verified.status_code, 200)
+        self.assertTrue(verified.json()["verified"])
+        self.assertEqual(self.client.get("/api/sessions").status_code, 200)
+
     def test_faculty_login_pages_are_separate_and_admin_reset_is_protected(self) -> None:
         login_page = self.client.get("/faculty/login")
         self.assertEqual(login_page.status_code, 200)
@@ -327,6 +420,7 @@ class DashboardWebTests(unittest.TestCase):
         password_page = self.client.get("/faculty/password")
         self.assertEqual(password_page.status_code, 200)
         self.assertIn("Faculty password", password_page.text)
+        self.assertIn("Use 12–128 characters", password_page.text)
         self.assertIn('data-sitekey="turnstile-site-key"', password_page.text)
         self.assertEqual(self.client.get("/faculty").status_code, 200)
         self.assertEqual(

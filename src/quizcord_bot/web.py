@@ -37,6 +37,8 @@ RATE_LIMIT_MAX_BUCKETS = 10_000
 RATE_LIMIT_RULES = {
     "/auth/login": (12, 60),
     "/auth/callback": (20, 60),
+    "/api/admin/password/verify": (10, 900),
+    "/api/admin/password/setup": (5, 900),
     "/api/faculty/password/verify": (10, 900),
     "/api/faculty/password/change": (10, 900),
     "/api/admin/faculty-passwords": (10, 60),
@@ -115,6 +117,7 @@ class _OAuthSession:
     is_faculty: bool
     faculty_password_verified: bool
     must_change_faculty_password: bool
+    admin_password_verified: bool
     permission_check_lock: asyncio.Lock
 
 
@@ -448,7 +451,7 @@ button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:5px;backgr
 <p class="description" id="description">Enter the temporary faculty password provided by your administrator.</p>
 <form id="password-form"><label for="password">Faculty password</label><input id="password" type="password" autocomplete="current-password" required>
 <div id="captcha-container" class="hidden"><p class="muted">Complete this security check before trying again.</p><div id="turnstile-widget" data-sitekey="__TURNSTILE_SITE_KEY__"></div></div>
-<div id="new-password-fields" class="hidden"><label for="new-password">New password</label><input id="new-password" type="password" autocomplete="new-password" minlength="12"><label for="confirm-password">Confirm new password</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="12"><p class="muted">Use at least 12 characters. This is an app password, not your Discord password.</p></div>
+<div id="new-password-fields" class="hidden"><label for="new-password">New password</label><input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="128"><label for="confirm-password">Confirm new password</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="128"><p class="muted">Use 12–128 characters. No character-mix rules are required. This is an app password, not your Discord password.</p></div>
 <button id="submit" type="submit">Continue</button><div class="message" id="message" role="alert"></div></form>
 <p class="muted">Forgot your faculty password? Ask an administrator to issue a new temporary password.</p><a href="/auth/logout">Sign out</a>
 <script>
@@ -461,6 +464,34 @@ form.addEventListener("submit",async event=>{event.preventDefault();message.text
 try{if(!mustChange){const result=await send("/api/faculty/password/verify",{password:password.value,turnstile_token:captchaToken});mustChange=result.must_change;if(mustChange){fields.classList.remove("hidden");password.value="";password.autocomplete="new-password";document.getElementById("title").textContent="Set a new password";document.getElementById("description").textContent="Your temporary password was accepted. Choose a new password to finish signing in.";button.textContent="Update password";return;}location.replace("/faculty");return;}
 const next=document.getElementById("new-password").value,confirm=document.getElementById("confirm-password").value;if(next.length<12)throw new Error("Use at least 12 characters.");if(next!==confirm)throw new Error("The new passwords do not match.");await send("/api/faculty/password/change",{current_password:password.value,new_password:next});location.replace("/faculty");
 }catch(error){message.textContent=error.message;if(error.body&&error.body.captcha_required){try{await showCaptcha();if(captchaToken)resetCaptcha();}catch(loadError){message.textContent=loadError.message;}}else if(captchaToken)resetCaptcha();}finally{button.disabled=false;}});
+</script></main></body></html>"""
+
+ADMIN_PASSWORD_PAGE = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark"><title>Admin password · Quizcord</title>
+<style>
+:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#f2f3f5;background:#151a2b}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(ellipse at 50% 35%,#303f70 0,#151a2b 65%)}
+main{width:min(480px,calc(100% - 32px));padding:36px;border:1px solid #ffffff18;border-radius:16px;background:#202638;box-shadow:0 22px 64px #080b1480}
+.brand{font-size:13px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#bdcaff}.eyebrow{margin-top:32px;color:#91a6ff;font-size:11px;letter-spacing:.16em;font-weight:800;text-transform:uppercase}
+h1{font-size:27px;margin:9px 0 10px;letter-spacing:-.03em}.description{color:#b4bfd5;line-height:1.6;margin:0 0 22px}
+label{display:block;font-size:13px;color:#e0e6f3;margin:14px 0 7px}input{width:100%;padding:12px;background:#141a29;border:1px solid #4b5670;border-radius:7px;color:#f2f3f5;font:inherit}
+button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:7px;background:#647df3;color:white;font:inherit;font-weight:750;cursor:pointer}button:hover{background:#536be0}
+.muted{color:#9daac0;font-size:12px;line-height:1.55}.message{min-height:20px;margin-top:12px;color:#ffaaaa;font-size:13px}.hidden{display:none!important}a{color:#c2cdfd;font-size:13px}
+</style></head><body><main>
+<div class="brand">Quizcord · Administrator</div><div class="eyebrow">Additional sign-in step</div>
+<h1 id="title">Admin app password</h1><p class="description" id="description"></p>
+<form id="admin-password-form"><label for="password" id="password-label">Admin password</label>
+<input id="password" type="password" autocomplete="current-password" minlength="12" maxlength="128" required>
+<div id="confirmation" class="hidden"><label for="confirm-password">Confirm admin password</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="128" disabled></div>
+<p id="policy" class="muted hidden">Use 12–128 characters, including uppercase and lowercase letters, a number, and a symbol. Do not reuse your Discord password.</p>
+<button id="submit" type="submit">Continue</button><div class="message" id="message" role="alert"></div></form>
+<p class="muted">This password is stored as a salted hash. Five incorrect attempts lock verification for 15 minutes. If you forget it, contact your system administrator for a credential reset.</p>
+<a href="/auth/logout">Sign out</a>
+<script>
+const mode="__ADMIN_PASSWORD_MODE__",form=document.getElementById("admin-password-form"),password=document.getElementById("password"),confirmPassword=document.getElementById("confirm-password"),confirmation=document.getElementById("confirmation"),policy=document.getElementById("policy"),message=document.getElementById("message"),button=document.getElementById("submit");
+if(mode==="setup"){document.getElementById("title").textContent="Create your admin password";document.getElementById("description").textContent="Discord verified your administrator role. Set an additional password to protect the admin dashboard.";document.getElementById("password-label").textContent="New admin password";password.autocomplete="new-password";confirmation.classList.remove("hidden");confirmPassword.disabled=false;policy.classList.remove("hidden");button.textContent="Set password";}
+form.addEventListener("submit",async event=>{event.preventDefault();message.textContent="";button.disabled=true;try{let path,data;if(mode==="setup"){if(password.value!==confirmPassword.value)throw new Error("The passwords do not match.");path="/api/admin/password/setup";data={new_password:password.value};}else{path="/api/admin/password/verify";data={password:password.value};}const response=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data),cache:"no-store"});const result=await response.json().catch(()=>({detail:"Request failed."}));if(!response.ok)throw new Error(result.detail||"Could not verify your password.");location.replace("/");}catch(error){message.textContent=error.message;}finally{button.disabled=false;}});
 </script></main></body></html>"""
 
 FACULTY_ADMIN_PAGE = r"""<!doctype html>
@@ -825,6 +856,16 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 status_code=403,
                 detail="Administrator access to the configured server is required.",
             )
+        if not database.has_admin_password(settings.guild_id, auth_session.user_id):
+            raise HTTPException(
+                status_code=428,
+                detail="Set your admin app password before continuing.",
+            )
+        if not auth_session.admin_password_verified:
+            raise HTTPException(
+                status_code=428,
+                detail="Verify your admin app password before continuing.",
+            )
         return auth_session
 
     async def current_faculty(request: Request) -> _OAuthSession:
@@ -981,6 +1022,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             is_faculty=is_faculty,
             faculty_password_verified=False,
             must_change_faculty_password=False,
+            admin_password_verified=False,
             permission_check_lock=asyncio.Lock(),
         )
         request.session.clear()
@@ -1018,8 +1060,98 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                     else ""
                 )
                 return RedirectResponse(f"/login{suffix}", status_code=302)
+            if error.status_code == 428:
+                return RedirectResponse("/admin/password", status_code=302)
             raise
         return HTMLResponse(HTML_PAGE)
+
+    @app.get(
+        "/admin/password",
+        response_class=HTMLResponse,
+        response_model=None,
+    )
+    async def admin_password_page(
+        request: Request,
+    ) -> HTMLResponse | RedirectResponse:
+        try:
+            auth_session = await current_authenticated(request)
+        except HTTPException as error:
+            if error.status_code == 401:
+                return RedirectResponse("/login", status_code=302)
+            raise
+        if not auth_session.is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail="Administrator access to the configured server is required.",
+            )
+        if (
+            auth_session.admin_password_verified
+            and database.has_admin_password(settings.guild_id, auth_session.user_id)
+        ):
+            return RedirectResponse("/", status_code=302)
+        mode = (
+            "verify"
+            if database.has_admin_password(settings.guild_id, auth_session.user_id)
+            else "setup"
+        )
+        return HTMLResponse(
+            ADMIN_PASSWORD_PAGE.replace("__ADMIN_PASSWORD_MODE__", mode)
+        )
+
+    @app.post("/api/admin/password/setup")
+    async def setup_admin_password(
+        request: Request, payload: dict[str, str] = Body(...)
+    ) -> dict[str, bool]:
+        auth_session = await current_authenticated(request)
+        if not auth_session.is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail="Administrator access to the configured server is required.",
+            )
+        new_password = payload.get("new_password", "")
+        if not _valid_admin_password(new_password):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Use 12–128 characters, including uppercase and lowercase "
+                    "letters, a number, and a symbol."
+                ),
+            )
+        if not database.set_admin_password_if_absent(
+            settings.guild_id, auth_session.user_id, new_password
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="An admin password already exists. Sign in with that password.",
+            )
+        auth_session.admin_password_verified = True
+        return {"configured": True}
+
+    @app.post("/api/admin/password/verify")
+    async def verify_admin_password(
+        request: Request, payload: dict[str, str] = Body(...)
+    ) -> dict[str, bool]:
+        auth_session = await current_authenticated(request)
+        if not auth_session.is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail="Administrator access to the configured server is required.",
+            )
+        password = payload.get("password", "")
+        if not password or len(password) > 128:
+            raise HTTPException(status_code=422, detail="Enter your admin password.")
+        if not database.verify_admin_password(
+            settings.guild_id, auth_session.user_id, password
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Admin password is incorrect or temporarily locked. "
+                    "Contact your system administrator if you need a reset."
+                ),
+            )
+        auth_session.admin_password_verified = True
+        return {"verified": True}
 
     @app.get("/faculty", response_class=HTMLResponse, response_model=None)
     async def faculty_page(request: Request) -> HTMLResponse | RedirectResponse:
@@ -1169,7 +1301,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
       <div class="mobile-brand"><span class="brand-mark" aria-hidden="true">Q</span><span>Quizcord Analytics</span></div>
       <div class="eyebrow">Admin sign in</div>
       <h2>Welcome back</h2>
-      <p class="intro">Sign in with your Discord administrator account to open the server analytics dashboard.</p>
+      <p class="intro">Verify your administrator role with Discord, then use your Quizcord admin app password to open the dashboard.</p>
       <a class="discord-button" href="/auth/login">
         <svg class="discord-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.7 5.3a18.4 18.4 0 0 0-4.6-1.4l-.6 1.2a16.7 16.7 0 0 0-5 0l-.6-1.2a18.4 18.4 0 0 0-4.6 1.4C1.4 9.5.6 13.6 1 17.6a18.5 18.5 0 0 0 5.7 2.9l1.2-2a11.8 11.8 0 0 1-1.9-.9l.5-.4a13.1 13.1 0 0 0 11 0l.5.4a11.8 11.8 0 0 1-1.9.9l1.2 2a18.5 18.5 0 0 0 5.7-2.9c.5-4.7-.8-8.8-3.3-12.3ZM8.8 14.9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2Zm6.4 0c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2Z"/></svg>
         Continue with Discord
@@ -1632,6 +1764,19 @@ def _is_guild_admin(guilds: Any, guild_id: int) -> bool:
             permissions & (MANAGE_GUILD_PERMISSION | ADMINISTRATOR_PERMISSION)
         )
     return False
+
+
+def _valid_admin_password(password: str) -> bool:
+    return (
+        12 <= len(password) <= 128
+        and any(character.isupper() for character in password)
+        and any(character.islower() for character in password)
+        and any(character.isdigit() for character in password)
+        and any(
+            not character.isalnum() and not character.isspace()
+            for character in password
+        )
+    )
 
 
 def _is_guild_faculty(member: Any, faculty_role_id: int | None) -> bool:

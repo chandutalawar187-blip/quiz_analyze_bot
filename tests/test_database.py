@@ -536,6 +536,50 @@ class DatabaseTests(unittest.TestCase):
             (False, False),
         )
 
+    def test_admin_password_is_hashed_and_locks_after_failures(self) -> None:
+        self.assertFalse(self.database.has_admin_password(67890, 111))
+        self.assertTrue(
+            self.database.set_admin_password_if_absent(
+                67890, 111, "StrongAdmin!Pass123"
+            )
+        )
+        self.assertFalse(
+            self.database.set_admin_password_if_absent(
+                67890, 111, "AnotherStrong!Pass123"
+            )
+        )
+        self.assertTrue(self.database.has_admin_password(67890, 111))
+        self.assertEqual(
+            self.database.get_admin_password_failed_attempts(67890, 111), 0
+        )
+        self.assertFalse(
+            self.database.verify_admin_password(67890, 111, "wrong-password")
+        )
+        self.assertEqual(
+            self.database.get_admin_password_failed_attempts(67890, 111), 1
+        )
+        self.assertTrue(
+            self.database.verify_admin_password(
+                67890, 111, "StrongAdmin!Pass123"
+            )
+        )
+        self.assertEqual(
+            self.database.get_admin_password_failed_attempts(67890, 111), 0
+        )
+
+        self.assertTrue(
+            self.database.set_admin_password_if_absent(
+                67890, 222, "StrongAdmin!Pass123"
+            )
+        )
+        for _ in range(5):
+            self.database.verify_admin_password(67890, 222, "wrong-password")
+        self.assertFalse(
+            self.database.verify_admin_password(
+                67890, 222, "StrongAdmin!Pass123"
+            )
+        )
+
     def test_unmapped_privileged_mention_uses_cached_name_and_is_counted(
         self,
     ) -> None:
