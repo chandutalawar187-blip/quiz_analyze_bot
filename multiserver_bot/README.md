@@ -128,32 +128,38 @@ Developer Portal.
 | `DASHBOARD_PORT` | No | Web server port; defaults to `8765`. |
 | `SENTRY_DSN` | No | Sentry project DSN. Leave blank to disable Sentry. |
 | `SENTRY_TRACES_SAMPLE_RATE` | No | Fraction of dashboard transactions traced, from `0` to `1`; defaults to `0.1` (10%). |
+| `SENTRY_PROFILE_SAMPLE_RATE` | No | Fraction of service profiles sampled while traces are active, from `0` to `1`; defaults to `0.01` (1%). |
 | `SENTRY_ENVIRONMENT` | No | Sentry environment name; the SDK reads this directly. Use `production` in Railway. |
 
 ### Optional Sentry monitoring
 
-The bot can report unhandled errors and sample FastAPI dashboard performance
-traces to Sentry. Create a Python project in Sentry, copy its DSN, and add the
+The bot can report unhandled errors, sanitized warning-and-higher logs, sampled
+FastAPI dashboard performance traces and profiles, plus request-count and
+duration metrics. Create a Python project in Sentry, copy its DSN, and add the
 following service variables in Railway:
 
 ```text
 SENTRY_DSN=<your-project-dsn>
 SENTRY_ENVIRONMENT=production
 SENTRY_TRACES_SAMPLE_RATE=0.1
+SENTRY_PROFILE_SAMPLE_RATE=0.01
 ```
 
 Deploy or restart the service, then make dashboard requests and check the
-project's **Performance/Traces** and **Issues** views. The default trace rate
-records 10% of requests to limit event volume; adjust it from `0` (no traces)
-to `1` (all traces) based on your traffic and Sentry plan. Error reporting
-remains enabled while the DSN is configured. Leaving `SENTRY_DSN` blank
-disables all Sentry reporting.
+project's **Traces**, **Profiles**, **Metrics**, **Logs**, and **Issues** views.
+The default trace rate records 10% of requests and profile sampling records 1%
+of service profile sessions; adjust these rates based on your traffic and Sentry
+plan. Error reporting remains enabled while the DSN is configured. Leaving
+`SENTRY_DSN` blank disables all Sentry reporting.
 
 The integration does not send default PII. Before transmission it removes HTTP
-request details and breadcrumbs from error events and strips request and span
-data from performance traces. Exception messages and stack traces are retained
-for debugging and may still contain information emitted by the application.
-The privacy notice at `/privacy` describes this processing.
+request details and breadcrumbs from error events, strips request and span data
+from traces, replaces log messages with a generic severity label, and removes
+log attributes except safe code/logger metadata. Metrics include only route
+templates, HTTP methods, status codes, and request durations. Exception messages
+and stack traces are retained for debugging and may still contain information
+emitted by the application. The privacy notice at `/privacy` describes this
+processing.
 
 ### Faculty dashboard
 

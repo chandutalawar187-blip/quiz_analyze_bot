@@ -62,6 +62,7 @@ class SettingsTests(unittest.TestCase):
 
         self.assertIsNone(settings.sentry_dsn)
         self.assertEqual(settings.sentry_traces_sample_rate, 0.1)
+        self.assertEqual(settings.sentry_profile_sample_rate, 0.01)
 
         with patch("quizcord_bot.config.load_dotenv"), patch.dict(
             os.environ,
@@ -69,6 +70,7 @@ class SettingsTests(unittest.TestCase):
                 "DISCORD_BOT_TOKEN": "test-token",
                 "SENTRY_DSN": "https://public@example.ingest.sentry.io/123",
                 "SENTRY_TRACES_SAMPLE_RATE": "0.25",
+                "SENTRY_PROFILE_SAMPLE_RATE": "0.05",
             },
             clear=True,
         ):
@@ -79,22 +81,27 @@ class SettingsTests(unittest.TestCase):
             "https://public@example.ingest.sentry.io/123",
         )
         self.assertEqual(settings.sentry_traces_sample_rate, 0.25)
+        self.assertEqual(settings.sentry_profile_sample_rate, 0.05)
 
     def test_sentry_trace_sample_rate_must_be_between_zero_and_one(self) -> None:
-        for value in ("not-a-number", "-0.1", "1.1", "nan", "inf"):
-            with self.subTest(value=value):
-                with patch("quizcord_bot.config.load_dotenv"), patch.dict(
-                    os.environ,
-                    {
-                        "DISCORD_BOT_TOKEN": "test-token",
-                        "SENTRY_TRACES_SAMPLE_RATE": value,
-                    },
-                    clear=True,
-                ):
-                    with self.assertRaisesRegex(
-                        ValueError, "SENTRY_TRACES_SAMPLE_RATE"
+        for variable in (
+            "SENTRY_TRACES_SAMPLE_RATE",
+            "SENTRY_PROFILE_SAMPLE_RATE",
+        ):
+            for value in ("not-a-number", "-0.1", "1.1", "nan", "inf"):
+                with self.subTest(variable=variable, value=value):
+                    with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+                        os.environ,
+                        {
+                            "DISCORD_BOT_TOKEN": "test-token",
+                            variable: value,
+                        },
+                        clear=True,
                     ):
-                        Settings.from_environment()
+                        with self.assertRaisesRegex(
+                            ValueError, variable
+                        ):
+                            Settings.from_environment()
 
     def test_dashboard_is_optional_without_oauth_configuration(self) -> None:
         with patch("quizcord_bot.config.load_dotenv"), patch.dict(

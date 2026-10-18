@@ -25,6 +25,7 @@ from quizcord_bot.database import (
     matches_usn_format,
 )
 from quizcord_bot.exports import quiz_session_workbook, student_analytics_workbook
+from quizcord_bot.telemetry import record_http_request
 
 
 LOGGER = logging.getLogger("quizcord_analytics.dashboard")
@@ -679,7 +680,7 @@ PRIVACY_POLICY_PAGE = """<!doctype html>
   <p>Information is used to collect and display server-specific quiz analytics, match leaderboard participants to student records, provide faculty and administrator access, deliver relevant bot responses, and protect the Service from abuse. Server records are scoped so dashboard users can access only servers where their Discord permissions or configured faculty role authorize them.</p>
 
   <h2>Storage, service providers, and sharing</h2>
-  <p>The Service database is hosted on Railway and stores records separately by Discord server. Discord provides the bot, OAuth, and server data APIs. Cloudflare provides the Turnstile security challenge. If Sentry monitoring is enabled by the Service operator, Sentry receives error reports and sampled performance traces, including technical runtime information, exception messages and stack traces, endpoint operation names, and timing data. The Service removes HTTP request details, request bodies, and breadcrumbs before sending events; exception messages or stack traces may still contain information produced by the application. These providers process information as needed to deliver their services and are subject to their own terms and privacy policies. The Service operator does not sell personal information.</p>
+  <p>The Service database is hosted on Railway and stores records separately by Discord server. Discord provides the bot, OAuth, and server data APIs. Cloudflare provides the Turnstile security challenge. If Sentry monitoring is enabled by the Service operator, Sentry receives error reports, sampled performance traces and profiles, sanitized warning-and-higher logs, and dashboard request-count and duration metrics. This may include technical runtime information, exception messages and stack traces, endpoint operation names, and timing data. The Service removes HTTP request details, request bodies, and breadcrumbs from events; log messages are replaced with generic severity labels, and log attributes are limited to safe code/logger metadata. Metrics use route templates rather than concrete URLs. Exception messages or stack traces may still contain information produced by the application. These providers process information as needed to deliver their services and are subject to their own terms and privacy policies. The Service operator does not sell personal information.</p>
 
   <h2>Retention and deletion</h2>
   <p>Server analytics and configuration are retained in the Service database. When the bot leaves a server, that server is marked inactive; this does <strong>not</strong> automatically delete its stored records. A server owner may request deletion by emailing <a href="mailto:chandutalawar187@gmail.com">chandutalawar187@gmail.com</a> from an address they control and identifying the Discord server. Requests will be reviewed and handled by the Service operator. Some information may remain where required for security, legal, or operational reasons.</p>
@@ -877,6 +878,26 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             "base-uri 'none'; frame-ancestors 'none'"
         )
         return response
+
+    @app.middleware("http")
+    async def collect_http_metrics(request: Request, call_next):
+        if settings.sentry_dsn is None:
+            return await call_next(request)
+        started_at = time.perf_counter()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+        finally:
+            route = request.scope.get("route")
+            route_template = getattr(route, "path", "unmatched")
+            record_http_request(
+                request.method,
+                route_template,
+                status_code,
+                time.perf_counter() - started_at,
+            )
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error_handler(

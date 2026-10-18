@@ -3,6 +3,7 @@
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from types import SimpleNamespace
@@ -609,6 +610,26 @@ class DashboardWebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok"})
 
+    def test_sentry_http_metrics_use_the_matched_route_template(self) -> None:
+        app = create_dashboard_app(
+            replace(
+                self.settings,
+                sentry_dsn="https://public@example.ingest.sentry.io/123",
+            ),
+            self.database,
+        )
+        with patch("quizcord_bot.web.record_http_request") as record_metric:
+            with TestClient(app, base_url="https://testserver") as client:
+                response = client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        record_metric.assert_called_once()
+        method, route, status_code, duration = record_metric.call_args.args
+        self.assertEqual(method, "GET")
+        self.assertEqual(route, "/health")
+        self.assertEqual(status_code, 200)
+        self.assertGreaterEqual(duration, 0)
+
     def test_public_policy_pages_describe_data_and_link_to_each_other(self) -> None:
         privacy = self.client.get("/privacy")
         terms = self.client.get("/terms")
@@ -620,6 +641,8 @@ class DashboardWebTests(unittest.TestCase):
         self.assertIn('href="/terms"', privacy.text)
         self.assertIn("Sentry monitoring", privacy.text)
         self.assertIn("request bodies", privacy.text)
+        self.assertIn("generic severity labels", privacy.text)
+        self.assertIn("route templates", privacy.text)
         self.assertEqual(terms.status_code, 200)
         self.assertIn("Terms of Service", terms.text)
         self.assertIn('href="/privacy"', terms.text)

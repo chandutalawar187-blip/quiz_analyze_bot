@@ -29,6 +29,7 @@ class Settings:
     dashboard_port: int
     sentry_dsn: str | None
     sentry_traces_sample_rate: float
+    sentry_profile_sample_rate: float
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -93,7 +94,12 @@ class Settings:
             raise ValueError("DASHBOARD_HOST cannot be empty.")
         sentry_dsn = os.getenv("SENTRY_DSN", "").strip()
         sentry_traces_sample_rate = _parse_sample_rate(
-            os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1").strip()
+            "SENTRY_TRACES_SAMPLE_RATE",
+            os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1").strip(),
+        )
+        sentry_profile_sample_rate = _parse_sample_rate(
+            "SENTRY_PROFILE_SAMPLE_RATE",
+            os.getenv("SENTRY_PROFILE_SAMPLE_RATE", "0.01").strip(),
         )
 
         return cls(
@@ -112,6 +118,7 @@ class Settings:
             dashboard_port=dashboard_port,
             sentry_dsn=sentry_dsn or None,
             sentry_traces_sample_rate=sentry_traces_sample_rate,
+            sentry_profile_sample_rate=sentry_profile_sample_rate,
         )
 
 
@@ -147,15 +154,15 @@ def _parse_port(value: str) -> int:
     return port
 
 
-def _parse_sample_rate(value: str) -> float:
+def _parse_sample_rate(name: str, value: str) -> float:
     try:
         rate = float(value)
     except ValueError as error:
         raise ValueError(
-            "SENTRY_TRACES_SAMPLE_RATE must be a number between 0 and 1."
+            f"{name} must be a number between 0 and 1."
         ) from error
     if not math.isfinite(rate) or not 0 <= rate <= 1:
         raise ValueError(
-            "SENTRY_TRACES_SAMPLE_RATE must be a number between 0 and 1."
+            f"{name} must be a number between 0 and 1."
         )
     return rate
