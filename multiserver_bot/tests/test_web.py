@@ -213,7 +213,9 @@ class DashboardWebTests(unittest.TestCase):
 
     def test_admin_discord_sign_in_does_not_require_an_app_password(self) -> None:
         self.database.register_guild(98765, "Another server")
-        login = self.client.get("/auth/login", follow_redirects=False)
+        login = self.client.get(
+            "/auth/login?destination=faculty", follow_redirects=False
+        )
         oauth_query = parse_qs(urlsplit(login.headers["location"]).query)
         state = oauth_query["state"][0]
         self.assertEqual(oauth_query["scope"][0], "identify guilds")
@@ -234,9 +236,17 @@ class DashboardWebTests(unittest.TestCase):
             {"id": "67890", "permissions": str(1 << 5)},
             {"id": "98765", "permissions": str(1 << 5)},
         ]
+        faculty_member_response = Mock()
+        faculty_member_response.json.return_value = {"roles": ["33333"]}
         discord_client = Mock()
         discord_client.post = AsyncMock(return_value=token_response)
-        discord_client.get = AsyncMock(side_effect=[user_response, guilds_response])
+        discord_client.get = AsyncMock(
+            side_effect=[
+                user_response,
+                guilds_response,
+                faculty_member_response,
+            ]
+        )
         client_context = Mock()
         client_context.__aenter__ = AsyncMock(return_value=discord_client)
         client_context.__aexit__ = AsyncMock(return_value=False)
@@ -249,6 +259,13 @@ class DashboardWebTests(unittest.TestCase):
             )
 
         self.assertEqual(callback.status_code, 302)
+        self.assertEqual(callback.headers["location"], "/faculty/password")
+        self.assertEqual(self.client.get("/faculty/password").status_code, 200)
+        faculty_dashboard = self.client.get("/faculty", follow_redirects=False)
+        self.assertEqual(faculty_dashboard.status_code, 302)
+        self.assertEqual(
+            faculty_dashboard.headers["location"], "/faculty/password"
+        )
         self.assertEqual(self.client.get("/", follow_redirects=False).status_code, 200)
         self.assertEqual(self.client.get("/api/sessions").status_code, 200)
         available_guilds = self.client.get("/api/guilds")

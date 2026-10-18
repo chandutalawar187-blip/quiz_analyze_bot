@@ -141,8 +141,10 @@ Administrators retain access to the admin dashboard in servers where they have
 **Manage Server** permission. Faculty use a separate branded
 sign-in page at `/faculty/login`: they authenticate with Discord first, then
 enter an app-managed faculty password. The application never requests or stores
-a Discord account password. Administrators authenticate with Discord's
-server-management permission only; there is no separate admin app password.
+a Discord account password. Faculty-role members must enter the app password
+even if they also have **Manage Server** permission; the faculty password
+protects access through the faculty portal. The separate admin dashboard
+requires Discord server-management permission only and has no app password.
 Register `https://<your-dashboard-domain>/auth/callback` as an exact OAuth2
 redirect URI in the same Discord application configured by
 `DISCORD_OAUTH_CLIENT_ID` and `DISCORD_OAUTH_CLIENT_SECRET`. If the callback

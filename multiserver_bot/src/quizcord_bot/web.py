@@ -1126,9 +1126,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 }
                 faculty_guild_ids: set[int] = set()
                 for guild_id, _ in installed_guilds:
-                    if guild_id in admin_guild_ids or not _is_guild_member(
-                        guilds, guild_id
-                    ):
+                    if not _is_guild_member(guilds, guild_id):
                         continue
                     faculty_role_id = database.get_faculty_role_id(guild_id)
                     if faculty_role_id is None:
@@ -1913,10 +1911,7 @@ async def _verify_current_guild_access(
             }
             auth_session.faculty_guild_ids.clear()
             for guild_id, _ in installed_guilds:
-                if (
-                    guild_id in auth_session.admin_guild_ids
-                    or not _is_guild_member(guilds, guild_id)
-                ):
+                if not _is_guild_member(guilds, guild_id):
                     continue
                 faculty_role_id = database.get_faculty_role_id(guild_id)
                 if faculty_role_id is None:
