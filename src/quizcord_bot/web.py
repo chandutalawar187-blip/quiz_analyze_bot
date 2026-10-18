@@ -5,9 +5,10 @@ import html
 import logging
 import secrets
 import time
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from fastapi import Body, FastAPI, HTTPException, Request
@@ -32,6 +33,18 @@ MANAGE_GUILD_PERMISSION = 1 << 5
 ADMINISTRATOR_PERMISSION = 1 << 3
 OAUTH_SESSION_TTL_SECONDS = 3600
 PERMISSION_CACHE_SECONDS = 60
+RATE_LIMIT_MAX_BUCKETS = 10_000
+RATE_LIMIT_RULES = {
+    "/auth/login": (12, 60),
+    "/auth/callback": (20, 60),
+    "/api/faculty/password/verify": (10, 900),
+    "/api/faculty/password/change": (10, 900),
+    "/api/admin/faculty-passwords": (10, 60),
+    "/api/faculty/candidates": (30, 60),
+}
+DEFAULT_REQUEST_RATE_LIMIT = (300, 60)
+DEFAULT_API_RATE_LIMIT = (120, 60)
+FACULTY_PASSWORD_CAPTCHA_THRESHOLD = 2
 
 
 def _error_page(status_code: int, detail: Any) -> str:
@@ -43,6 +56,7 @@ def _error_page(status_code: int, detail: Any) -> str:
         405: "That action isn't available",
         409: "This request conflicts with the current state",
         422: "Check the information and try again",
+        429: "Too many requests",
         502: "Discord couldn't complete the request",
         503: "This service is temporarily unavailable",
     }
@@ -433,17 +447,20 @@ button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:5px;backgr
 <h1 id="title">Faculty password</h1>
 <p class="description" id="description">Enter the temporary faculty password provided by your administrator.</p>
 <form id="password-form"><label for="password">Faculty password</label><input id="password" type="password" autocomplete="current-password" required>
+<div id="captcha-container" class="hidden"><p class="muted">Complete this security check before trying again.</p><div id="turnstile-widget" data-sitekey="__TURNSTILE_SITE_KEY__"></div></div>
 <div id="new-password-fields" class="hidden"><label for="new-password">New password</label><input id="new-password" type="password" autocomplete="new-password" minlength="12"><label for="confirm-password">Confirm new password</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="12"><p class="muted">Use at least 12 characters. This is an app password, not your Discord password.</p></div>
 <button id="submit" type="submit">Continue</button><div class="message" id="message" role="alert"></div></form>
 <p class="muted">Forgot your faculty password? Ask an administrator to issue a new temporary password.</p><a href="/auth/logout">Sign out</a>
 <script>
-const form=document.getElementById("password-form"),password=document.getElementById("password"),fields=document.getElementById("new-password-fields"),message=document.getElementById("message"),button=document.getElementById("submit");
-let mustChange=false;
-async function send(path,data){const response=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data),cache:"no-store"});const body=await response.json().catch(()=>({detail:"Request failed."}));if(response.status===401&&body.detail==="Please sign in again."){location.replace("/faculty/login");throw new Error(body.detail);}if(!response.ok)throw new Error(body.detail||"Could not verify your password.");return body;}
+const form=document.getElementById("password-form"),password=document.getElementById("password"),fields=document.getElementById("new-password-fields"),captchaContainer=document.getElementById("captcha-container"),captchaWidget=document.getElementById("turnstile-widget"),message=document.getElementById("message"),button=document.getElementById("submit");
+let mustChange=false,turnstileWidgetId=null,captchaToken="";
+async function send(path,data){const response=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data),cache:"no-store"});const body=await response.json().catch(()=>({detail:"Request failed."}));if(response.status===401&&body.detail==="Please sign in again."){location.replace("/faculty/login");throw new Error(body.detail);}if(!response.ok){const error=new Error(body.detail||"Could not verify your password.");error.body=body;throw error;}return body;}
+function resetCaptcha(){captchaToken="";if(turnstileWidgetId!==null&&window.turnstile)window.turnstile.reset(turnstileWidgetId);}
+function showCaptcha(){captchaContainer.classList.remove("hidden");if(!captchaWidget.dataset.sitekey)throw new Error("Security check is not configured. Contact an administrator.");if(turnstileWidgetId!==null)return Promise.resolve();return new Promise((resolve,reject)=>{const render=()=>{turnstileWidgetId=window.turnstile.render(captchaWidget,{sitekey:captchaWidget.dataset.sitekey,action:"faculty_password",callback:token=>{captchaToken=token;},"expired-callback":()=>{captchaToken="";},"error-callback":()=>{captchaToken="";message.textContent="Security check failed to load. Please retry.";}});resolve();};if(window.turnstile){render();return;}const script=document.createElement("script");script.src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";script.async=true;script.defer=true;script.onload=render;script.onerror=()=>reject(new Error("Security check failed to load. Please retry."));document.head.appendChild(script);});}
 form.addEventListener("submit",async event=>{event.preventDefault();message.textContent="";button.disabled=true;
-try{if(!mustChange){const result=await send("/api/faculty/password/verify",{password:password.value});mustChange=result.must_change;if(mustChange){fields.classList.remove("hidden");password.value="";password.autocomplete="new-password";document.getElementById("title").textContent="Set a new password";document.getElementById("description").textContent="Your temporary password was accepted. Choose a new password to finish signing in.";button.textContent="Update password";return;}location.replace("/faculty");return;}
+try{if(!mustChange){const result=await send("/api/faculty/password/verify",{password:password.value,turnstile_token:captchaToken});mustChange=result.must_change;if(mustChange){fields.classList.remove("hidden");password.value="";password.autocomplete="new-password";document.getElementById("title").textContent="Set a new password";document.getElementById("description").textContent="Your temporary password was accepted. Choose a new password to finish signing in.";button.textContent="Update password";return;}location.replace("/faculty");return;}
 const next=document.getElementById("new-password").value,confirm=document.getElementById("confirm-password").value;if(next.length<12)throw new Error("Use at least 12 characters.");if(next!==confirm)throw new Error("The new passwords do not match.");await send("/api/faculty/password/change",{current_password:password.value,new_password:next});location.replace("/faculty");
-}catch(error){message.textContent=error.message;}finally{button.disabled=false;}});
+}catch(error){message.textContent=error.message;if(error.body&&error.body.captcha_required){try{await showCaptcha();if(captchaToken)resetCaptcha();}catch(loadError){message.textContent=loadError.message;}}else if(captchaToken)resetCaptcha();}finally{button.disabled=false;}});
 </script></main></body></html>"""
 
 FACULTY_ADMIN_PAGE = r"""<!doctype html>
@@ -613,18 +630,123 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             https_only=True,
         )
     oauth_sessions: dict[str, _OAuthSession] = {}
+    rate_limit_windows: OrderedDict[
+        tuple[str, str], deque[float]
+    ] = OrderedDict()
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
-        response = await call_next(request)
+        path = request.url.path
+        rules: list[tuple[str, int, int]] = []
+        if path != "/health":
+            rules.append(("all-requests", *DEFAULT_REQUEST_RATE_LIMIT))
+        if path.startswith("/api/"):
+            rules.append(("api", *DEFAULT_API_RATE_LIMIT))
+        specific_limit = RATE_LIMIT_RULES.get(path)
+        if specific_limit is None and path.startswith(
+            "/api/admin/faculty-passwords/"
+        ):
+            specific_limit = RATE_LIMIT_RULES["/api/admin/faculty-passwords"]
+        if specific_limit is not None:
+            bucket_name = (
+                "admin-password-provision"
+                if path.startswith("/api/admin/")
+                else path
+            )
+            rules.append((bucket_name, *specific_limit))
+
+        if rules:
+            client_ip = request.headers.get("x-real-ip", "").strip()
+            if not client_ip:
+                client_ip = (
+                    request.client.host
+                    if request.client is not None
+                    else "unknown"
+                )
+            now = time.monotonic()
+            buckets: list[tuple[tuple[str, str], deque[float], int, int]] = []
+            exceeded: tuple[deque[float], int, int] | None = None
+            for bucket_name, limit, window_seconds in rules:
+                key = (client_ip, bucket_name)
+                attempts = rate_limit_windows.get(key)
+                if attempts is None:
+                    attempts = deque()
+                else:
+                    rate_limit_windows.move_to_end(key)
+                cutoff = now - window_seconds
+                while attempts and attempts[0] <= cutoff:
+                    attempts.popleft()
+                buckets.append((key, attempts, limit, window_seconds))
+                if exceeded is None and len(attempts) >= limit:
+                    exceeded = (attempts, limit, window_seconds)
+
+            if exceeded is not None:
+                attempts, limit, window_seconds = exceeded
+                retry_after = max(
+                    1, int(attempts[0] + window_seconds - now + 0.999)
+                )
+                headers = {
+                    "Retry-After": str(retry_after),
+                    "X-RateLimit-Limit": str(limit),
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(int(time.time()) + retry_after),
+                }
+                if path.startswith("/api/"):
+                    response: Response = JSONResponse(
+                        {
+                            "detail": (
+                                "Too many requests. Please wait before trying again."
+                            )
+                        },
+                        status_code=429,
+                        headers=headers,
+                    )
+                else:
+                    headers["Content-Type"] = "text/html; charset=utf-8"
+                    response = HTMLResponse(
+                        _error_page(
+                            429,
+                            "Please wait before trying this sign-in action again.",
+                        ),
+                        status_code=429,
+                        headers=headers,
+                    )
+            else:
+                header_bucket = min(
+                    buckets,
+                    key=lambda bucket: bucket[2] / bucket[3],
+                )
+                for key, attempts, _, _ in buckets:
+                    if key not in rate_limit_windows:
+                        if len(rate_limit_windows) >= RATE_LIMIT_MAX_BUCKETS:
+                            rate_limit_windows.popitem(last=False)
+                        rate_limit_windows[key] = attempts
+                    attempts.append(now)
+                response = await call_next(request)
+                key, attempts, header_limit, header_window = header_bucket
+                reset_after = max(
+                    1, int(attempts[0] + header_window - now + 0.999)
+                )
+                response.headers["X-RateLimit-Limit"] = str(header_limit)
+                response.headers["X-RateLimit-Remaining"] = str(
+                    max(0, header_limit - len(attempts))
+                )
+                response.headers["X-RateLimit-Reset"] = str(
+                    int(time.time()) + reset_after
+                )
+        else:
+            response = await call_next(request)
+
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "default-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; "
             "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-            "connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"
+            "connect-src 'self' https://challenges.cloudflare.com; "
+            "frame-src https://challenges.cloudflare.com; "
+            "base-uri 'none'; frame-ancestors 'none'"
         )
         return response
 
@@ -935,7 +1057,11 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             )
         if auth_session.is_admin and not auth_session.is_faculty:
             return RedirectResponse("/faculty", status_code=302)
-        return HTMLResponse(FACULTY_PASSWORD_PAGE)
+        page = FACULTY_PASSWORD_PAGE.replace(
+            "__TURNSTILE_SITE_KEY__",
+            html.escape(settings.turnstile_site_key or "", quote=True),
+        )
+        return HTMLResponse(page)
 
     @app.get("/admin/faculty-passwords", response_class=HTMLResponse)
     async def faculty_password_admin_page(request: Request) -> HTMLResponse:
@@ -1121,10 +1247,10 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             )
         return students
 
-    @app.post("/api/faculty/password/verify")
+    @app.post("/api/faculty/password/verify", response_model=None)
     async def verify_faculty_password(
         request: Request, payload: dict[str, str] = Body(...)
-    ) -> dict[str, bool]:
+    ) -> dict[str, bool] | JSONResponse:
         auth_session = await current_authenticated(request)
         if not auth_session.is_faculty:
             raise HTTPException(
@@ -1133,13 +1259,47 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         password = payload.get("password", "")
         if not password or len(password) > 256:
             raise HTTPException(status_code=422, detail="Enter your faculty password.")
+        failed_attempts = database.get_faculty_password_failed_attempts(
+            settings.guild_id, auth_session.user_id
+        )
+        if failed_attempts >= FACULTY_PASSWORD_CAPTCHA_THRESHOLD:
+            if not settings.turnstile_secret_key:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Security check is not configured. Contact an administrator.",
+                )
+            token = payload.get("turnstile_token", "")
+            if not token or len(token) > 2048:
+                return JSONResponse(
+                    status_code=428,
+                    content={
+                        "detail": "Complete the security check before trying again.",
+                        "captcha_required": True,
+                    },
+                )
+            if not await _verify_turnstile_token(settings, token):
+                return JSONResponse(
+                    status_code=428,
+                    content={
+                        "detail": "Security check expired or invalid. Please retry it.",
+                        "captcha_required": True,
+                    },
+                )
         valid, must_change = database.verify_faculty_password(
             settings.guild_id, auth_session.user_id, password
         )
         if not valid:
-            raise HTTPException(
+            failed_attempts = database.get_faculty_password_failed_attempts(
+                settings.guild_id, auth_session.user_id
+            )
+            return JSONResponse(
                 status_code=401,
-                detail="Faculty password is incorrect, not provisioned, or temporarily locked. Contact an administrator if you need a reset.",
+                content={
+                    "detail": "Faculty password is incorrect, not provisioned, or temporarily locked. Contact an administrator if you need a reset.",
+                    "captcha_required": (
+                        failed_attempts >= FACULTY_PASSWORD_CAPTCHA_THRESHOLD
+                    ),
+                },
             )
         auth_session.faculty_password_verified = True
         auth_session.must_change_faculty_password = must_change
@@ -1481,6 +1641,38 @@ def _is_guild_faculty(member: Any, faculty_role_id: int | None) -> bool:
     if not isinstance(roles, list):
         return False
     return str(faculty_role_id) in {str(role_id) for role_id in roles}
+
+
+async def _verify_turnstile_token(settings: Settings, token: str) -> bool:
+    hostname = urlsplit(settings.dashboard_public_url or "").hostname
+    if not settings.turnstile_secret_key or not hostname:
+        raise HTTPException(
+            status_code=503,
+            detail="Security check is not configured. Contact an administrator.",
+        )
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.post(
+                "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+                data={
+                    "secret": settings.turnstile_secret_key,
+                    "response": token,
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+    except (httpx.HTTPError, ValueError):
+        LOGGER.error("Cloudflare Turnstile verification request failed.")
+        raise HTTPException(
+            status_code=503,
+            detail="Security check is temporarily unavailable. Please try again.",
+        ) from None
+    return (
+        isinstance(result, dict)
+        and result.get("success") is True
+        and result.get("hostname") == hostname
+        and result.get("action") == "faculty_password"
+    )
 
 
 async def _get_guild_member(

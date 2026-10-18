@@ -22,6 +22,8 @@ class Settings:
     discord_oauth_client_secret: str | None
     faculty_role_id: int | None
     dashboard_session_secret: str | None
+    turnstile_site_key: str | None
+    turnstile_secret_key: str | None
     dashboard_host: str
     dashboard_port: int
 
@@ -46,6 +48,12 @@ class Settings:
         oauth_client_secret = os.getenv("DISCORD_OAUTH_CLIENT_SECRET", "").strip()
         faculty_role_id = _optional_discord_id("FACULTY_ROLE_ID")
         session_secret = os.getenv("DASHBOARD_SESSION_SECRET", "").strip()
+        turnstile_site_key = os.getenv("TURNSTILE_SITE_KEY", "").strip()
+        turnstile_secret_key = os.getenv("TURNSTILE_SECRET_KEY", "").strip()
+        if bool(turnstile_site_key) != bool(turnstile_secret_key):
+            raise ValueError(
+                "Set TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY together."
+            )
         dashboard_settings = (
             dashboard_public_url,
             oauth_client_id,
@@ -91,6 +99,8 @@ class Settings:
             discord_oauth_client_secret=oauth_client_secret or None,
             faculty_role_id=faculty_role_id,
             dashboard_session_secret=session_secret or None,
+            turnstile_site_key=turnstile_site_key or None,
+            turnstile_secret_key=turnstile_secret_key or None,
             dashboard_host=dashboard_host,
             dashboard_port=dashboard_port,
         )

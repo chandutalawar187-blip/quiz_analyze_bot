@@ -108,6 +108,38 @@ hashes, and five consecutive failed attempts lock password verification for
 15 minutes. To reset a forgotten password, an administrator issues a new
 temporary password.
 
+The faculty password page requires Cloudflare Turnstile after two consecutive
+incorrect password attempts. Create a Managed Turnstile widget for the
+dashboard hostname and configure its site key as `TURNSTILE_SITE_KEY` and its
+secret key as `TURNSTILE_SECRET_KEY` in the local `.env` or the deployment
+environment (for Railway, add both as service variables). The keys must be set
+together. Keep the secret key private and never put it in browser code or share
+it in chat. The server validates each challenge with Cloudflare and checks the
+configured hostname and `faculty_password` action. If server-side verification
+is required but the keys are missing or Cloudflare cannot be reached, password
+verification fails closed until the configuration or service is restored.
+
+The dashboard also applies per-client sliding-window limits: 300 requests per
+minute overall (except health checks); 12 OAuth sign-in starts and 20 OAuth
+callbacks per minute; 10 faculty password verifications and 10 password
+changes per 15 minutes; 10 faculty password provisions per minute; 30
+faculty-directory searches per minute; and 120 API requests per minute
+overall. Limited requests return HTTP 429 with a `Retry-After` header. These
+counters are held in the web process memory, are bounded, and reset when the
+process restarts. They are not shared across multiple service replicas.
+
+Application rate limits only reject requests after traffic reaches this
+process; they do not absorb a network-level DDoS or protect the public network
+bandwidth. Because the web dashboard and Discord bot run in the same process,
+a sufficiently large flood can consume service resources and affect both.
+The limiter uses Railway's `X-Real-IP` request header to distinguish clients;
+only do this when traffic reaches the app through Railway's edge, which supplies
+that header. For another host or a direct deployment, configure client IP
+handling to trust headers only from known reverse proxies. Use Railway's
+platform-level protections and, if needed, edge rules or a trusted WAF/CDN for
+volumetric attacks. If deploying multiple app replicas, move rate-limit
+counters to a shared store such as Redis.
+
 ### Enable the web dashboard
 
 The dashboard is served by the same process as the Discord bot. Railway is a

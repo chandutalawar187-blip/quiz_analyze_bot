@@ -509,8 +509,14 @@ class DatabaseTests(unittest.TestCase):
             (True, True),
         )
         self.assertEqual(
+            self.database.get_faculty_password_failed_attempts(67890, 111), 0
+        )
+        self.assertEqual(
             self.database.verify_faculty_password(67890, 111, "wrong-password"),
             (False, False),
+        )
+        self.assertEqual(
+            self.database.get_faculty_password_failed_attempts(67890, 111), 1
         )
         self.database.change_faculty_password(
             67890, 111, "a-new-long-faculty-password"

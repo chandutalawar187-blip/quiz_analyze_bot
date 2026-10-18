@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 from fastapi.testclient import TestClient
 
 from quizcord_bot.config import Settings
@@ -47,6 +48,8 @@ class DashboardWebTests(unittest.TestCase):
                 "DISCORD_OAUTH_CLIENT_SECRET": "oauth-secret",
                 "DASHBOARD_SESSION_SECRET": "s" * 40,
                 "FACULTY_ROLE_ID": "33333",
+                "TURNSTILE_SITE_KEY": "turnstile-site-key",
+                "TURNSTILE_SECRET_KEY": "turnstile-secret-key",
             },
             clear=True,
         ):
@@ -95,6 +98,54 @@ class DashboardWebTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["detail"], "Please sign in again.")
+
+    def test_oauth_login_is_rate_limited(self) -> None:
+        responses = [
+            self.client.get(
+                "/auth/login",
+                follow_redirects=False,
+                headers={"X-Real-IP": "203.0.113.10"},
+            )
+            for _ in range(12)
+        ]
+
+        self.assertTrue(all(response.status_code == 302 for response in responses))
+        limited = self.client.get(
+            "/auth/login",
+            follow_redirects=False,
+            headers={"X-Real-IP": "203.0.113.10"},
+        )
+        self.assertEqual(limited.status_code, 429)
+        self.assertGreaterEqual(int(limited.headers["Retry-After"]), 1)
+        self.assertEqual(limited.headers["X-RateLimit-Limit"], "12")
+        self.assertIn("Too many requests", limited.text)
+        other_client = self.client.get(
+            "/auth/login",
+            follow_redirects=False,
+            headers={"X-Real-IP": "203.0.113.11"},
+        )
+        self.assertEqual(other_client.status_code, 302)
+
+    def test_general_page_requests_are_rate_limited(self) -> None:
+        with patch("quizcord_bot.web.DEFAULT_REQUEST_RATE_LIMIT", (2, 60)):
+            self.assertEqual(self.client.get("/missing-one").status_code, 404)
+            self.assertEqual(self.client.get("/missing-two").status_code, 404)
+            limited = self.client.get("/missing-three")
+
+        self.assertEqual(limited.status_code, 429)
+        self.assertIn("Retry-After", limited.headers)
+
+    def test_faculty_password_provisioning_limit_is_shared_across_user_ids(self) -> None:
+        responses = [
+            self.client.post(f"/api/admin/faculty-passwords/{discord_id}")
+            for discord_id in range(1000, 1010)
+        ]
+
+        self.assertTrue(all(response.status_code == 401 for response in responses))
+        limited = self.client.post("/api/admin/faculty-passwords/2000")
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(limited.json()["detail"], "Too many requests. Please wait before trying again.")
+        self.assertEqual(limited.headers["X-RateLimit-Limit"], "10")
 
     def test_browser_http_errors_use_discord_style_html_pages(self) -> None:
         missing_page = self.client.get("/missing-page")
@@ -276,16 +327,102 @@ class DashboardWebTests(unittest.TestCase):
         password_page = self.client.get("/faculty/password")
         self.assertEqual(password_page.status_code, 200)
         self.assertIn("Faculty password", password_page.text)
+        self.assertIn('data-sitekey="turnstile-site-key"', password_page.text)
         self.assertEqual(self.client.get("/faculty").status_code, 200)
         self.assertEqual(
             self.client.get("/api/faculty/students").status_code, 428
         )
-        verification = self.client.post(
+
+        first_failure = self.client.post(
+            "/api/faculty/password/verify",
+            json={"password": "wrong-password"},
+        )
+        self.assertEqual(first_failure.status_code, 401)
+        self.assertFalse(first_failure.json()["captcha_required"])
+        second_failure = self.client.post(
+            "/api/faculty/password/verify",
+            json={"password": "wrong-password"},
+        )
+        self.assertEqual(second_failure.status_code, 401)
+        self.assertTrue(second_failure.json()["captcha_required"])
+        missing_captcha = self.client.post(
             "/api/faculty/password/verify",
             json={"password": "Temporary!FacultyPassword"},
         )
+        self.assertEqual(missing_captcha.status_code, 428)
+        self.assertTrue(missing_captcha.json()["captcha_required"])
+
+        invalid_response = Mock()
+        invalid_response.json.return_value = {
+            "success": True,
+            "hostname": "untrusted.example.com",
+            "action": "faculty_password",
+        }
+        turnstile_client = Mock()
+        turnstile_client.post = AsyncMock(return_value=invalid_response)
+        turnstile_context = Mock()
+        turnstile_context.__aenter__ = AsyncMock(return_value=turnstile_client)
+        turnstile_context.__aexit__ = AsyncMock(return_value=False)
+        with patch(
+            "quizcord_bot.web.httpx.AsyncClient",
+            return_value=turnstile_context,
+        ):
+            invalid_captcha = self.client.post(
+                "/api/faculty/password/verify",
+                json={
+                    "password": "Temporary!FacultyPassword",
+                    "turnstile_token": "invalid-token",
+                },
+            )
+        self.assertEqual(invalid_captcha.status_code, 428)
+        self.assertTrue(invalid_captcha.json()["captcha_required"])
+
+        turnstile_client.post = AsyncMock(side_effect=httpx.ConnectError("offline"))
+        with self.assertLogs("quizcord_analytics.dashboard", level="ERROR"):
+            with patch(
+                "quizcord_bot.web.httpx.AsyncClient",
+                return_value=turnstile_context,
+            ):
+                unavailable_captcha = self.client.post(
+                    "/api/faculty/password/verify",
+                    json={
+                        "password": "Temporary!FacultyPassword",
+                        "turnstile_token": "valid-token",
+                    },
+                )
+        self.assertEqual(unavailable_captcha.status_code, 503)
+
+        valid_response = Mock()
+        valid_response.json.return_value = {
+            "success": True,
+            "hostname": "analytics.example.com",
+            "action": "faculty_password",
+        }
+        turnstile_client.post = AsyncMock(return_value=valid_response)
+        with patch(
+            "quizcord_bot.web.httpx.AsyncClient",
+            return_value=turnstile_context,
+        ):
+            verification = self.client.post(
+                "/api/faculty/password/verify",
+                json={
+                    "password": "Temporary!FacultyPassword",
+                    "turnstile_token": "valid-token",
+                },
+            )
         self.assertEqual(verification.status_code, 200)
         self.assertTrue(verification.json()["must_change"])
+        self.assertEqual(
+            turnstile_client.post.await_args.args[0],
+            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+        )
+        self.assertEqual(
+            turnstile_client.post.await_args.kwargs["data"],
+            {
+                "secret": "turnstile-secret-key",
+                "response": "valid-token",
+            },
+        )
         self.assertEqual(
             self.client.get("/api/faculty/students").status_code, 428
         )

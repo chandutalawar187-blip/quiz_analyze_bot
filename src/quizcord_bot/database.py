@@ -1335,6 +1335,19 @@ class Database:
             ).fetchone()
         return row is not None
 
+    def get_faculty_password_failed_attempts(
+        self, guild_id: int, faculty_discord_id: int
+    ) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT failed_attempts FROM faculty_credentials
+                WHERE guild_id = ? AND discord_id = ?
+                """,
+                (str(guild_id), str(faculty_discord_id)),
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
     def verify_faculty_password(
         self, guild_id: int, faculty_discord_id: int, password: str
     ) -> tuple[bool, bool]:

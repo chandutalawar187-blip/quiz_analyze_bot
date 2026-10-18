@@ -105,6 +105,27 @@ class SettingsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "at least 32 characters"):
                 Settings.from_environment()
 
+    def test_turnstile_keys_must_be_configured_together(self) -> None:
+        values = {
+            "DISCORD_BOT_TOKEN": "test-token",
+            "BOT_GUILD_ID": "67890",
+            "TURNSTILE_SITE_KEY": "turnstile-site-key",
+        }
+        with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+            os.environ, values, clear=True
+        ):
+            with self.assertRaisesRegex(ValueError, "TURNSTILE_SITE_KEY"):
+                Settings.from_environment()
+
+        values["TURNSTILE_SECRET_KEY"] = "turnstile-secret-key"
+        with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+            os.environ, values, clear=True
+        ):
+            settings = Settings.from_environment()
+
+        self.assertEqual(settings.turnstile_site_key, "turnstile-site-key")
+        self.assertEqual(settings.turnstile_secret_key, "turnstile-secret-key")
+
     def test_railway_port_overrides_local_dashboard_port(self) -> None:
         with patch("quizcord_bot.config.load_dotenv"), patch.dict(
             os.environ,
