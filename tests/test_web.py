@@ -26,7 +26,6 @@ from quizcord_bot.web import (
     _oauth_failure_detail,
     _summary_detail,
     _student_analytics,
-    _valid_admin_password,
     create_dashboard_app,
 )
 
@@ -51,8 +50,6 @@ class DashboardWebTests(unittest.TestCase):
                 "FACULTY_ROLE_ID": "33333",
                 "TURNSTILE_SITE_KEY": "turnstile-site-key",
                 "TURNSTILE_SECRET_KEY": "turnstile-secret-key",
-                "GMAIL_SMTP_USERNAME": "quizcord@gmail.com",
-                "GMAIL_SMTP_APP_PASSWORD": "gmail-test-app-password",
             },
             clear=True,
         ):
@@ -187,7 +184,6 @@ class DashboardWebTests(unittest.TestCase):
             ("delete", "/api/faculty/students/4GM22CS001"),
             ("post", "/api/faculty/password/verify"),
             ("post", "/api/faculty/password/change"),
-            ("post", "/api/password-reset/request"),
         ):
             with self.subTest(method=method, path=path):
                 options = {"json": {}} if method == "post" else {}
@@ -211,168 +207,62 @@ class DashboardWebTests(unittest.TestCase):
         self.assertIn("Go to the faculty portal", response.text)
         self.assertIn(f'href="/auth/login?session={session_id}"', response.text)
 
-    def test_admin_app_password_setup_and_verification_follow_discord_role_check(
-        self,
-    ) -> None:
-        def complete_admin_oauth(code: str) -> None:
-            login = self.client.get(
-                "/auth/login", follow_redirects=False
-            )
-            state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
-            self.assertIn(
-                "email",
-                parse_qs(urlsplit(login.headers["location"]).query)["scope"][0],
-            )
-            token_response = Mock()
-            token_response.json.return_value = {
-                "access_token": "admin-access-token",
-                "refresh_token": "admin-refresh-token",
-                "expires_in": 3600,
-            }
-            user_response = Mock()
-            user_response.json.return_value = {
-                "id": "987654",
-                "global_name": "Server Admin",
-                "email": "admin@example.com",
-                "verified": True,
-            }
-            guilds_response = Mock()
-            guilds_response.json.return_value = [
-                {"id": "67890", "permissions": str(1 << 5)}
-            ]
-            member_response = Mock()
-            member_response.json.return_value = {"roles": []}
-            discord_client = Mock()
-            discord_client.post = AsyncMock(return_value=token_response)
-            discord_client.get = AsyncMock(
-                side_effect=[user_response, guilds_response, member_response]
-            )
-            client_context = Mock()
-            client_context.__aenter__ = AsyncMock(return_value=discord_client)
-            client_context.__aexit__ = AsyncMock(return_value=False)
-            with patch(
-                "quizcord_bot.web.httpx.AsyncClient",
-                return_value=client_context,
-            ):
-                callback = self.client.get(
-                    f"/auth/callback?code={code}&state={state}",
-                    follow_redirects=False,
-                )
-            self.assertEqual(callback.status_code, 302)
+    def test_admin_discord_sign_in_does_not_require_an_app_password(self) -> None:
+        login = self.client.get("/auth/login", follow_redirects=False)
+        oauth_query = parse_qs(urlsplit(login.headers["location"]).query)
+        state = oauth_query["state"][0]
+        self.assertEqual(oauth_query["scope"][0], "identify guilds")
 
-        self.assertTrue(_valid_admin_password("StrongAdmin!Pass123"))
-        self.assertFalse(_valid_admin_password("short!A1"))
-        self.assertFalse(_valid_admin_password("lowercase!pass123"))
-        self.assertFalse(_valid_admin_password("NoSymbolPassword123"))
-        self.assertFalse(_valid_admin_password("NoSymbol Password123"))
-        complete_admin_oauth("admin-first-login")
-
-        dashboard = self.client.get("/", follow_redirects=False)
-        self.assertEqual(dashboard.status_code, 302)
-        self.assertEqual(dashboard.headers["location"], "/admin/password")
-        setup_page = self.client.get("/admin/password")
-        self.assertEqual(setup_page.status_code, 200)
-        self.assertIn('const mode="setup"', setup_page.text)
-        self.assertIn("uppercase and lowercase letters", setup_page.text)
-
-        weak_password = self.client.post(
-            "/api/admin/password/setup",
-            json={"new_password": "lowercase!pass123"},
+        token_response = Mock()
+        token_response.json.return_value = {
+            "access_token": "admin-access-token",
+            "refresh_token": "admin-refresh-token",
+            "expires_in": 3600,
+        }
+        user_response = Mock()
+        user_response.json.return_value = {
+            "id": "987654",
+            "global_name": "Server Admin",
+        }
+        guilds_response = Mock()
+        guilds_response.json.return_value = [
+            {"id": "67890", "permissions": str(1 << 5)}
+        ]
+        member_response = Mock()
+        member_response.json.return_value = {"roles": []}
+        discord_client = Mock()
+        discord_client.post = AsyncMock(return_value=token_response)
+        discord_client.get = AsyncMock(
+            side_effect=[user_response, guilds_response, member_response]
         )
-        self.assertEqual(weak_password.status_code, 422)
-        setup_password = self.client.post(
-            "/api/admin/password/setup",
-            json={"new_password": "StrongAdmin!Pass123"},
-        )
-        self.assertEqual(setup_password.status_code, 200)
+        client_context = Mock()
+        client_context.__aenter__ = AsyncMock(return_value=discord_client)
+        client_context.__aexit__ = AsyncMock(return_value=False)
+        with patch(
+            "quizcord_bot.web.httpx.AsyncClient", return_value=client_context
+        ):
+            callback = self.client.get(
+                f"/auth/callback?code=admin-login&state={state}",
+                follow_redirects=False,
+            )
+
+        self.assertEqual(callback.status_code, 302)
+        self.assertEqual(self.client.get("/", follow_redirects=False).status_code, 200)
         self.assertEqual(self.client.get("/api/sessions").status_code, 200)
+        self.assertEqual(self.client.get("/admin/password").status_code, 404)
+        self.assertEqual(
+            self.client.post("/api/admin/password/setup", json={}).status_code,
+            404,
+        )
+        self.assertEqual(self.client.get("/password/reset").status_code, 404)
         self.assertEqual(
             self.client.post(
-                "/api/password-reset/request",
-                json={"account_type": "faculty"},
+                "/api/password-reset/request", json={"account_type": "admin"}
             ).status_code,
-            403,
+            404,
         )
 
-        smtp_client = Mock()
-        smtp_client.__enter__ = Mock(return_value=smtp_client)
-        smtp_client.__exit__ = Mock(return_value=False)
-        smtp_client.starttls.side_effect = OSError("offline")
-        with self.assertLogs("quizcord_analytics.dashboard", level="ERROR"):
-            with patch(
-                "quizcord_bot.web.smtplib.SMTP",
-                return_value=smtp_client,
-            ):
-                failed_delivery = self.client.post(
-                    "/api/password-reset/request",
-                    json={"account_type": "admin"},
-                )
-        self.assertEqual(failed_delivery.status_code, 503)
-        smtp_client.starttls.side_effect = None
-        with patch(
-            "quizcord_bot.web.smtplib.SMTP", return_value=smtp_client
-        ) as smtp_factory:
-            reset_requested = self.client.post(
-                "/api/password-reset/request",
-                json={"account_type": "admin"},
-            )
-        self.assertEqual(reset_requested.status_code, 202)
-        self.assertTrue(smtp_client.send_message.called)
-        email_message = smtp_client.send_message.call_args.args[0]
-        self.assertEqual(
-            email_message["To"], "admin@example.com"
-        )
-        self.assertEqual(
-            email_message["From"],
-            "Quizcord <quizcord@gmail.com>",
-        )
-        smtp_factory.assert_called_with("smtp.gmail.com", 587, timeout=10)
-        smtp_factory.assert_called_once_with("smtp.gmail.com", 587, timeout=10)
-        self.assertEqual(smtp_client.starttls.call_count, 2)
-        smtp_client.login.assert_called_once_with(
-            "quizcord@gmail.com", "gmail-test-app-password"
-        )
-        email_body = email_message.get_body(preferencelist=("plain",))
-        reset_url = email_body.get_content().splitlines()[3]
-        reset_token = parse_qs(urlsplit(reset_url).fragment)["token"][0]
-        reset_page = self.client.get("/password/reset")
-        self.assertEqual(reset_page.status_code, 200)
-        self.assertIn("location.hash.slice(1)", reset_page.text)
-        self.assertNotIn(reset_token, reset_page.text)
-        reset_complete = self.client.post(
-            "/api/password-reset/complete",
-            json={
-                "token": reset_token,
-                "new_password": "ResetAdmin!Password456",
-            },
-        )
-        self.assertEqual(reset_complete.status_code, 200)
-        self.assertTrue(reset_complete.json()["reset"])
-        self.assertEqual(self.client.get("/api/sessions").status_code, 428)
-
-        with patch(
-            "quizcord_bot.web._revoke_oauth_token", new=AsyncMock()
-        ):
-            self.client.get("/auth/logout")
-        complete_admin_oauth("admin-second-login")
-        dashboard = self.client.get("/", follow_redirects=False)
-        self.assertEqual(dashboard.headers["location"], "/admin/password")
-        verify_page = self.client.get("/admin/password")
-        self.assertIn('const mode="verify"', verify_page.text)
-        rejected = self.client.post(
-            "/api/admin/password/verify",
-            json={"password": "WrongAdmin!Pass123"},
-        )
-        self.assertEqual(rejected.status_code, 401)
-        verified = self.client.post(
-            "/api/admin/password/verify",
-            json={"password": "ResetAdmin!Password456"},
-        )
-        self.assertEqual(verified.status_code, 200)
-        self.assertTrue(verified.json()["verified"])
-        self.assertEqual(self.client.get("/api/sessions").status_code, 200)
-
-    def test_faculty_login_pages_are_separate_and_admin_reset_is_protected(self) -> None:
+    def test_faculty_login_pages_are_separate_and_recovery_is_disabled(self) -> None:
         login_page = self.client.get("/faculty/login")
         self.assertEqual(login_page.status_code, 200)
         self.assertIn("FACULTY PORTAL", login_page.text)
@@ -497,11 +387,20 @@ class DashboardWebTests(unittest.TestCase):
         password_page = self.client.get("/faculty/password")
         self.assertEqual(password_page.status_code, 200)
         self.assertIn("Faculty password", password_page.text)
+        self.assertNotIn("Email me a password reset link", password_page.text)
         self.assertIn("Use 12–128 characters", password_page.text)
         self.assertIn('data-sitekey="turnstile-site-key"', password_page.text)
         self.assertEqual(self.client.get("/faculty").status_code, 200)
         self.assertEqual(
             self.client.get("/api/faculty/students").status_code, 428
+        )
+        self.assertEqual(self.client.get("/password/reset").status_code, 404)
+        self.assertEqual(
+            self.client.post(
+                "/api/password-reset/request",
+                json={"account_type": "faculty"},
+            ).status_code,
+            404,
         )
 
         first_failure = self.client.post(
@@ -640,43 +539,6 @@ class DashboardWebTests(unittest.TestCase):
             404,
         )
         self.assertEqual(self.client.get("/api/sessions").status_code, 403)
-
-        smtp_client = Mock()
-        smtp_client.__enter__ = Mock(return_value=smtp_client)
-        smtp_client.__exit__ = Mock(return_value=False)
-        with patch(
-            "quizcord_bot.web.smtplib.SMTP", return_value=smtp_client
-        ):
-            faculty_reset = self.client.post(
-                "/api/password-reset/request",
-                json={"account_type": "faculty"},
-            )
-        self.assertEqual(faculty_reset.status_code, 202)
-        self.assertEqual(
-            smtp_client.send_message.call_args.args[0]["To"],
-            "faculty@example.com",
-        )
-        faculty_email = smtp_client.send_message.call_args.args[0]
-        faculty_reset_url = faculty_email.get_body(
-            preferencelist=("plain",)
-        ).get_content().splitlines()[3]
-        faculty_reset_token = parse_qs(
-            urlsplit(faculty_reset_url).fragment
-        )["token"][0]
-        faculty_reset_complete = self.client.post(
-            "/api/password-reset/complete",
-            json={
-                "token": faculty_reset_token,
-                "new_password": "ResetFacultyPassword456",
-            },
-        )
-        self.assertEqual(faculty_reset_complete.status_code, 200)
-        self.assertEqual(
-            self.database.verify_faculty_password(
-                67890, 123456, "ResetFacultyPassword456"
-            ),
-            (True, False),
-        )
 
     def test_dashboard_redirects_to_sign_in_and_sets_security_headers(self) -> None:
         response = self.client.get("/", follow_redirects=False)

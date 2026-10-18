@@ -24,8 +24,6 @@ class Settings:
     dashboard_session_secret: str | None
     turnstile_site_key: str | None
     turnstile_secret_key: str | None
-    gmail_smtp_username: str | None
-    gmail_smtp_app_password: str | None
     dashboard_host: str
     dashboard_port: int
 
@@ -55,24 +53,6 @@ class Settings:
         if bool(turnstile_site_key) != bool(turnstile_secret_key):
             raise ValueError(
                 "Set TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY together."
-            )
-        gmail_smtp_username = os.getenv("GMAIL_SMTP_USERNAME", "").strip()
-        gmail_smtp_app_password = os.getenv(
-            "GMAIL_SMTP_APP_PASSWORD", ""
-        ).strip().replace(" ", "")
-        if any(
-            character in gmail_smtp_username
-            for character in ("\r", "\n", "\t")
-        ):
-            raise ValueError("GMAIL_SMTP_USERNAME cannot contain whitespace.")
-        if any(
-            character in gmail_smtp_app_password
-            for character in ("\r", "\n", "\t")
-        ):
-            raise ValueError("GMAIL_SMTP_APP_PASSWORD cannot contain whitespace.")
-        if bool(gmail_smtp_username) != bool(gmail_smtp_app_password):
-            raise ValueError(
-                "Set GMAIL_SMTP_USERNAME and GMAIL_SMTP_APP_PASSWORD together."
             )
         dashboard_settings = (
             dashboard_public_url,
@@ -121,8 +101,6 @@ class Settings:
             dashboard_session_secret=session_secret or None,
             turnstile_site_key=turnstile_site_key or None,
             turnstile_secret_key=turnstile_secret_key or None,
-            gmail_smtp_username=gmail_smtp_username or None,
-            gmail_smtp_app_password=gmail_smtp_app_password or None,
             dashboard_host=dashboard_host,
             dashboard_port=dashboard_port,
         )

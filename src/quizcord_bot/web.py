@@ -1,17 +1,12 @@
 """Authenticated live web dashboard for Quizcord sessions."""
 
 import asyncio
-import hashlib
 import html
 import logging
 import secrets
-import smtplib
-import ssl
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
-from email.message import EmailMessage
-from email.utils import formataddr
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
@@ -37,16 +32,11 @@ DISCORD_API = "https://discord.com/api/v10"
 MANAGE_GUILD_PERMISSION = 1 << 5
 ADMINISTRATOR_PERMISSION = 1 << 3
 OAUTH_SESSION_TTL_SECONDS = 3600
-PASSWORD_RESET_TTL_SECONDS = 1800
 PERMISSION_CACHE_SECONDS = 60
 RATE_LIMIT_MAX_BUCKETS = 10_000
 RATE_LIMIT_RULES = {
     "/auth/login": (12, 60),
     "/auth/callback": (20, 60),
-    "/api/admin/password/verify": (10, 900),
-    "/api/admin/password/setup": (5, 900),
-    "/api/password-reset/request": (3, 900),
-    "/api/password-reset/complete": (10, 900),
     "/api/faculty/password/verify": (10, 900),
     "/api/faculty/password/change": (10, 900),
     "/api/admin/faculty-passwords": (10, 60),
@@ -116,8 +106,6 @@ def _wants_json_error(request: Request) -> bool:
 class _OAuthSession:
     user_id: int
     username: str
-    email: str | None
-    email_verified: bool
     access_token: str
     refresh_token: str
     access_token_expires_at: float
@@ -127,7 +115,6 @@ class _OAuthSession:
     is_faculty: bool
     faculty_password_verified: bool
     must_change_faculty_password: bool
-    admin_password_verified: bool
     permission_check_lock: asyncio.Lock
 
 
@@ -463,10 +450,9 @@ button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:5px;backgr
 <div id="captcha-container" class="hidden"><p class="muted">Complete this security check before trying again.</p><div id="turnstile-widget" data-sitekey="__TURNSTILE_SITE_KEY__"></div></div>
 <div id="new-password-fields" class="hidden"><label for="new-password">New password</label><input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="128"><label for="confirm-password">Confirm new password</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="128"><p class="muted">Use 12–128 characters. No character-mix rules are required. This is an app password, not your Discord password.</p></div>
 <button id="submit" type="submit">Continue</button><div class="message" id="message" role="alert"></div></form>
-<button id="forgot-password" type="button" class="muted">Email me a password reset link</button><div id="reset-message" class="message" role="status"></div><a href="/auth/logout">Sign out</a>
+<a href="/auth/logout">Sign out</a>
 <script>
 const form=document.getElementById("password-form"),password=document.getElementById("password"),fields=document.getElementById("new-password-fields"),captchaContainer=document.getElementById("captcha-container"),captchaWidget=document.getElementById("turnstile-widget"),message=document.getElementById("message"),button=document.getElementById("submit");
-document.getElementById("forgot-password").addEventListener("click",async event=>{const resetMessage=document.getElementById("reset-message"),resetButton=event.currentTarget;resetButton.disabled=true;resetMessage.textContent="";try{const response=await fetch("/api/password-reset/request",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({account_type:"faculty"}),cache:"no-store"});const result=await response.json().catch(()=>({detail:"Request failed."}));if(!response.ok)throw new Error(result.detail||"Could not send the reset link.");resetMessage.textContent=result.detail;}catch(error){resetMessage.textContent=error.message;}finally{resetButton.disabled=false;}});
 let mustChange=false,turnstileWidgetId=null,captchaToken="";
 async function send(path,data){const response=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data),cache:"no-store"});const body=await response.json().catch(()=>({detail:"Request failed."}));if(response.status===401&&body.detail==="Please sign in again."){location.replace("/faculty/login");throw new Error(body.detail);}if(!response.ok){const error=new Error(body.detail||"Could not verify your password.");error.body=body;throw error;}return body;}
 function resetCaptcha(){captchaToken="";if(turnstileWidgetId!==null&&window.turnstile)window.turnstile.reset(turnstileWidgetId);}
@@ -475,60 +461,6 @@ form.addEventListener("submit",async event=>{event.preventDefault();message.text
 try{if(!mustChange){const result=await send("/api/faculty/password/verify",{password:password.value,turnstile_token:captchaToken});mustChange=result.must_change;if(mustChange){fields.classList.remove("hidden");password.value="";password.autocomplete="new-password";document.getElementById("title").textContent="Set a new password";document.getElementById("description").textContent="Your temporary password was accepted. Choose a new password to finish signing in.";button.textContent="Update password";return;}location.replace("/faculty");return;}
 const next=document.getElementById("new-password").value,confirm=document.getElementById("confirm-password").value;if(next.length<12)throw new Error("Use at least 12 characters.");if(next!==confirm)throw new Error("The new passwords do not match.");await send("/api/faculty/password/change",{current_password:password.value,new_password:next});location.replace("/faculty");
 }catch(error){message.textContent=error.message;if(error.body&&error.body.captcha_required){try{await showCaptcha();if(captchaToken)resetCaptcha();}catch(loadError){message.textContent=loadError.message;}}else if(captchaToken)resetCaptcha();}finally{button.disabled=false;}});
-</script></main></body></html>"""
-
-ADMIN_PASSWORD_PAGE = r"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark"><title>Admin password · Quizcord</title>
-<style>
-:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#f2f3f5;background:#151a2b}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(ellipse at 50% 35%,#303f70 0,#151a2b 65%)}
-main{width:min(480px,calc(100% - 32px));padding:36px;border:1px solid #ffffff18;border-radius:16px;background:#202638;box-shadow:0 22px 64px #080b1480}
-.brand{font-size:13px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#bdcaff}.eyebrow{margin-top:32px;color:#91a6ff;font-size:11px;letter-spacing:.16em;font-weight:800;text-transform:uppercase}
-h1{font-size:27px;margin:9px 0 10px;letter-spacing:-.03em}.description{color:#b4bfd5;line-height:1.6;margin:0 0 22px}
-label{display:block;font-size:13px;color:#e0e6f3;margin:14px 0 7px}input{width:100%;padding:12px;background:#141a29;border:1px solid #4b5670;border-radius:7px;color:#f2f3f5;font:inherit}
-button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:7px;background:#647df3;color:white;font:inherit;font-weight:750;cursor:pointer}button:hover{background:#536be0}
-.muted{color:#9daac0;font-size:12px;line-height:1.55}.message{min-height:20px;margin-top:12px;color:#ffaaaa;font-size:13px}.hidden{display:none!important}a{color:#c2cdfd;font-size:13px}
-</style></head><body><main>
-<div class="brand">Quizcord · Administrator</div><div class="eyebrow">Additional sign-in step</div>
-<h1 id="title">Admin app password</h1><p class="description" id="description"></p>
-<form id="admin-password-form"><label for="password" id="password-label">Admin password</label>
-<input id="password" type="password" autocomplete="current-password" minlength="12" maxlength="128" required>
-<div id="confirmation" class="hidden"><label for="confirm-password">Confirm admin password</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="128" disabled></div>
-<p id="policy" class="muted hidden">Use 12–128 characters, including uppercase and lowercase letters, a number, and a symbol. Do not reuse your Discord password.</p>
-<button id="submit" type="submit">Continue</button><div class="message" id="message" role="alert"></div></form>
-<button id="forgot-password" type="button" class="hidden">Email me a password reset link</button><div id="reset-message" class="message" role="status"></div>
-<p class="muted">This password is stored as a salted hash. Five incorrect attempts lock verification for 15 minutes.</p>
-<a href="/auth/logout">Sign out</a>
-<script>
-const mode="__ADMIN_PASSWORD_MODE__",form=document.getElementById("admin-password-form"),password=document.getElementById("password"),confirmPassword=document.getElementById("confirm-password"),confirmation=document.getElementById("confirmation"),policy=document.getElementById("policy"),message=document.getElementById("message"),button=document.getElementById("submit");
-document.getElementById("forgot-password").addEventListener("click",async event=>{const resetMessage=document.getElementById("reset-message"),resetButton=event.currentTarget;resetButton.disabled=true;resetMessage.textContent="";try{const response=await fetch("/api/password-reset/request",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({account_type:"admin"}),cache:"no-store"});const result=await response.json().catch(()=>({detail:"Request failed."}));if(!response.ok)throw new Error(result.detail||"Could not send the reset link.");resetMessage.textContent=result.detail;}catch(error){resetMessage.textContent=error.message;}finally{resetButton.disabled=false;}});
-if(mode==="setup"){document.getElementById("title").textContent="Create your admin password";document.getElementById("description").textContent="Discord verified your administrator role. Set an additional password to protect the admin dashboard.";document.getElementById("password-label").textContent="New admin password";password.autocomplete="new-password";confirmation.classList.remove("hidden");confirmPassword.disabled=false;policy.classList.remove("hidden");button.textContent="Set password";}else{document.getElementById("forgot-password").classList.remove("hidden");}
-form.addEventListener("submit",async event=>{event.preventDefault();message.textContent="";button.disabled=true;try{let path,data;if(mode==="setup"){if(password.value!==confirmPassword.value)throw new Error("The passwords do not match.");path="/api/admin/password/setup";data={new_password:password.value};}else{path="/api/admin/password/verify";data={password:password.value};}const response=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data),cache:"no-store"});const result=await response.json().catch(()=>({detail:"Request failed."}));if(!response.ok)throw new Error(result.detail||"Could not verify your password.");location.replace("/");}catch(error){message.textContent=error.message;}finally{button.disabled=false;}});
-</script></main></body></html>"""
-
-PASSWORD_RESET_PAGE = r"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark"><title>Reset password · Quizcord</title>
-<style>
-:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#f2f3f5;background:#151a2b}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(ellipse at 50% 35%,#303f70 0,#151a2b 65%)}
-main{width:min(480px,calc(100% - 32px));padding:36px;border:1px solid #ffffff18;border-radius:16px;background:#202638;box-shadow:0 22px 64px #080b1480}
-.brand{font-size:13px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#bdcaff}.eyebrow{margin-top:32px;color:#91a6ff;font-size:11px;letter-spacing:.16em;font-weight:800;text-transform:uppercase}
-h1{font-size:27px;margin:9px 0 10px;letter-spacing:-.03em}.description{color:#b4bfd5;line-height:1.6;margin:0 0 22px}
-label{display:block;font-size:13px;color:#e0e6f3;margin:14px 0 7px}input{width:100%;padding:12px;background:#141a29;border:1px solid #4b5670;border-radius:7px;color:#f2f3f5;font:inherit}
-button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:7px;background:#647df3;color:white;font:inherit;font-weight:750;cursor:pointer}button:hover{background:#536be0}
-.muted{color:#9daac0;font-size:12px;line-height:1.55}.message{min-height:20px;margin-top:12px;color:#ffaaaa;font-size:13px}
-</style></head><body><main>
-<div class="brand">Quizcord · Account recovery</div><div class="eyebrow">Secure password reset</div>
-<h1>Choose a new password</h1><p class="description">This reset link can be used once and expires after 30 minutes.</p>
-<form id="reset-form"><label for="password">New password</label><input id="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required>
-<label for="confirm-password">Confirm new password</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required>
-<p class="muted">Use 12–128 characters. Admin passwords also require uppercase, lowercase, a number, and a symbol.</p>
-<button id="submit" type="submit">Reset password</button><div class="message" id="message" role="alert"></div></form>
-<script>
-const form=document.getElementById("reset-form"),password=document.getElementById("password"),confirmation=document.getElementById("confirm-password"),message=document.getElementById("message"),button=document.getElementById("submit"),token=new URLSearchParams(location.hash.slice(1)).get("token")||"";history.replaceState(null,"",location.pathname);
-form.addEventListener("submit",async event=>{event.preventDefault();message.textContent="";if(password.value!==confirmation.value){message.textContent="The passwords do not match.";return;}button.disabled=true;try{const response=await fetch("/api/password-reset/complete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token,new_password:password.value}),cache:"no-store"});const result=await response.json().catch(()=>({detail:"Request failed."}));if(!response.ok)throw new Error(result.detail||"Could not reset the password.");form.hidden=true;message.textContent="Password reset. Sign in through Discord and use your new app password.";}catch(error){message.textContent=error.message;}finally{button.disabled=false;}});
 </script></main></body></html>"""
 
 FACULTY_ADMIN_PAGE = r"""<!doctype html>
@@ -893,16 +825,6 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 status_code=403,
                 detail="Administrator access to the configured server is required.",
             )
-        if not database.has_admin_password(settings.guild_id, auth_session.user_id):
-            raise HTTPException(
-                status_code=428,
-                detail="Set your admin app password before continuing.",
-            )
-        if not auth_session.admin_password_verified:
-            raise HTTPException(
-                status_code=428,
-                detail="Verify your admin app password before continuing.",
-            )
         return auth_session
 
     async def current_faculty(request: Request) -> _OAuthSession:
@@ -955,7 +877,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             "client_id": client_id,
             "redirect_uri": f"{public_url}/auth/callback",
             "response_type": "code",
-            "scope": "identify guilds email",
+            "scope": "identify guilds",
             "state": state,
         }
         return RedirectResponse(
@@ -1050,14 +972,6 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         oauth_sessions[session_key] = _OAuthSession(
             user_id=int(user["id"]),
             username=str(user.get("global_name") or user.get("username") or "Admin"),
-            email=(
-                str(user["email"])
-                if user.get("verified") is True
-                and isinstance(user.get("email"), str)
-                and user["email"].strip()
-                else None
-            ),
-            email_verified=user.get("verified") is True,
             access_token=access_token,
             refresh_token=str(token.get("refresh_token") or ""),
             access_token_expires_at=now + int(token.get("expires_in", 3600)),
@@ -1067,7 +981,6 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             is_faculty=is_faculty,
             faculty_password_verified=False,
             must_change_faculty_password=False,
-            admin_password_verified=False,
             permission_check_lock=asyncio.Lock(),
         )
         request.session.clear()
@@ -1105,227 +1018,8 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                     else ""
                 )
                 return RedirectResponse(f"/login{suffix}", status_code=302)
-            if error.status_code == 428:
-                return RedirectResponse("/admin/password", status_code=302)
             raise
         return HTMLResponse(HTML_PAGE)
-
-    @app.get(
-        "/admin/password",
-        response_class=HTMLResponse,
-        response_model=None,
-    )
-    async def admin_password_page(
-        request: Request,
-    ) -> HTMLResponse | RedirectResponse:
-        try:
-            auth_session = await current_authenticated(request)
-        except HTTPException as error:
-            if error.status_code == 401:
-                return RedirectResponse("/login", status_code=302)
-            raise
-        if not auth_session.is_admin:
-            raise HTTPException(
-                status_code=403,
-                detail="Administrator access to the configured server is required.",
-            )
-        if (
-            auth_session.admin_password_verified
-            and database.has_admin_password(settings.guild_id, auth_session.user_id)
-        ):
-            return RedirectResponse("/", status_code=302)
-        mode = (
-            "verify"
-            if database.has_admin_password(settings.guild_id, auth_session.user_id)
-            else "setup"
-        )
-        return HTMLResponse(
-            ADMIN_PASSWORD_PAGE.replace("__ADMIN_PASSWORD_MODE__", mode)
-        )
-
-    @app.post("/api/admin/password/setup")
-    async def setup_admin_password(
-        request: Request, payload: dict[str, str] = Body(...)
-    ) -> dict[str, bool]:
-        auth_session = await current_authenticated(request)
-        if not auth_session.is_admin:
-            raise HTTPException(
-                status_code=403,
-                detail="Administrator access to the configured server is required.",
-            )
-        new_password = payload.get("new_password", "")
-        if not _valid_admin_password(new_password):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Use 12–128 characters, including uppercase and lowercase "
-                    "letters, a number, and a symbol."
-                ),
-            )
-        if not database.set_admin_password_if_absent(
-            settings.guild_id, auth_session.user_id, new_password
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="An admin password already exists. Sign in with that password.",
-            )
-        auth_session.admin_password_verified = True
-        return {"configured": True}
-
-    @app.post("/api/admin/password/verify")
-    async def verify_admin_password(
-        request: Request, payload: dict[str, str] = Body(...)
-    ) -> dict[str, bool]:
-        auth_session = await current_authenticated(request)
-        if not auth_session.is_admin:
-            raise HTTPException(
-                status_code=403,
-                detail="Administrator access to the configured server is required.",
-            )
-        password = payload.get("password", "")
-        if not password or len(password) > 128:
-            raise HTTPException(status_code=422, detail="Enter your admin password.")
-        if not database.verify_admin_password(
-            settings.guild_id, auth_session.user_id, password
-        ):
-            raise HTTPException(
-                status_code=401,
-                detail=(
-                    "Admin password is incorrect or temporarily locked. "
-                    "Contact your system administrator if you need a reset."
-                ),
-            )
-        auth_session.admin_password_verified = True
-        return {"verified": True}
-
-    @app.get("/password/reset", response_class=HTMLResponse)
-    async def password_reset_page() -> HTMLResponse:
-        return HTMLResponse(PASSWORD_RESET_PAGE)
-
-    @app.post("/api/password-reset/request", status_code=202)
-    async def request_password_reset(
-        request: Request, payload: dict[str, str] = Body(...)
-    ) -> dict[str, str]:
-        auth_session = await current_authenticated(request)
-        account_type = payload.get("account_type", "")
-        if account_type == "admin":
-            allowed = auth_session.is_admin
-        elif account_type == "faculty":
-            allowed = auth_session.is_faculty
-        else:
-            raise HTTPException(
-                status_code=422, detail="Choose a valid account type."
-            )
-        if not allowed:
-            raise HTTPException(
-                status_code=403,
-                detail="Your Discord account does not have access to this account type.",
-            )
-        has_password = (
-            database.has_admin_password(settings.guild_id, auth_session.user_id)
-            if account_type == "admin"
-            else database.has_faculty_password(settings.guild_id, auth_session.user_id)
-        )
-        if not has_password:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "No app password is configured for this account yet. "
-                    "Contact the service administrator."
-                ),
-            )
-        if not auth_session.email_verified or not auth_session.email:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Discord did not provide a verified email for this account. "
-                    "Verify your Discord email, sign out, and sign in again."
-                ),
-            )
-        if (
-            not settings.gmail_smtp_username
-            or not settings.gmail_smtp_app_password
-            or not settings.dashboard_public_url
-        ):
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Email password recovery is not configured. "
-                    "Contact the service administrator."
-                ),
-            )
-
-        token = secrets.token_urlsafe(32)
-        database.create_password_reset_token(
-            settings.guild_id,
-            auth_session.user_id,
-            account_type,
-            hashlib.sha256(token.encode("utf-8")).hexdigest(),
-            time.time() + PASSWORD_RESET_TTL_SECONDS,
-        )
-        reset_url = (
-            f"{settings.dashboard_public_url}/password/reset#"
-            f"{urlencode({'token': token})}"
-        )
-        await _send_password_reset_email(
-            settings, auth_session.email, account_type, reset_url
-        )
-        return {
-            "detail": (
-                "If a verified Discord email is available, a reset link has "
-                "been sent. The link expires in 30 minutes."
-            )
-        }
-
-    @app.post("/api/password-reset/complete")
-    async def complete_password_reset(
-        payload: dict[str, str] = Body(...),
-    ) -> dict[str, bool]:
-        token = payload.get("token", "")
-        new_password = payload.get("new_password", "")
-        if not token or len(token) > 256:
-            raise HTTPException(
-                status_code=400,
-                detail="This reset link is invalid or has expired.",
-            )
-        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        reset_target = database.get_password_reset_target(token_hash)
-        if reset_target is None:
-            raise HTTPException(
-                status_code=400,
-                detail="This reset link is invalid or has expired.",
-            )
-        account_type, target_discord_id = reset_target
-        if account_type == "admin":
-            if not _valid_admin_password(new_password):
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "Admin passwords must be 12–128 characters and include "
-                        "uppercase and lowercase letters, a number, and a symbol."
-                    ),
-                )
-        elif not 12 <= len(new_password) <= 128:
-            raise HTTPException(
-                status_code=422,
-                detail="Faculty passwords must be between 12 and 128 characters.",
-            )
-
-        if not database.reset_password_with_token(
-            token_hash, account_type, new_password
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="This reset link is invalid or has expired.",
-            )
-        for auth_session in oauth_sessions.values():
-            if auth_session.user_id != target_discord_id:
-                continue
-            if account_type == "admin":
-                auth_session.admin_password_verified = False
-            else:
-                auth_session.faculty_password_verified = False
-        return {"reset": True}
 
     @app.get("/faculty", response_class=HTMLResponse, response_model=None)
     async def faculty_page(request: Request) -> HTMLResponse | RedirectResponse:
@@ -1382,8 +1076,6 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         except HTTPException as error:
             if error.status_code == 401:
                 return RedirectResponse("/login", status_code=302)
-            if error.status_code == 428:
-                return RedirectResponse("/admin/password", status_code=302)
             raise
         return HTMLResponse(FACULTY_ADMIN_PAGE)
 
@@ -1400,8 +1092,6 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         except HTTPException as error:
             if error.status_code == 401:
                 return RedirectResponse("/login", status_code=302)
-            if error.status_code == 428:
-                return RedirectResponse("/admin/password", status_code=302)
             raise
         if not usn.strip() or len(usn) > 100:
             raise HTTPException(status_code=404, detail="Student not found.")
@@ -1501,7 +1191,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
       <div class="mobile-brand"><span class="brand-mark" aria-hidden="true">Q</span><span>Quizcord Analytics</span></div>
       <div class="eyebrow">Admin sign in</div>
       <h2>Welcome back</h2>
-      <p class="intro">Verify your administrator role with Discord, then use your Quizcord admin app password to open the dashboard.</p>
+      <p class="intro">Sign in with Discord. Access is limited to administrators of the configured server.</p>
       <a class="discord-button" href="/auth/login">
         <svg class="discord-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.7 5.3a18.4 18.4 0 0 0-4.6-1.4l-.6 1.2a16.7 16.7 0 0 0-5 0l-.6-1.2a18.4 18.4 0 0 0-4.6 1.4C1.4 9.5.6 13.6 1 17.6a18.5 18.5 0 0 0 5.7 2.9l1.2-2a11.8 11.8 0 0 1-1.9-.9l.5-.4a13.1 13.1 0 0 0 11 0l.5.4a11.8 11.8 0 0 1-1.9.9l1.2 2a18.5 18.5 0 0 0 5.7-2.9c.5-4.7-.8-8.8-3.3-12.3ZM8.8 14.9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2Zm6.4 0c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2Z"/></svg>
         Continue with Discord
@@ -1965,86 +1655,6 @@ def _is_guild_admin(guilds: Any, guild_id: int) -> bool:
         )
     return False
 
-
-def _valid_admin_password(password: str) -> bool:
-    return (
-        12 <= len(password) <= 128
-        and any(character.isupper() for character in password)
-        and any(character.islower() for character in password)
-        and any(character.isdigit() for character in password)
-        and any(
-            not character.isalnum() and not character.isspace()
-            for character in password
-        )
-    )
-
-
-async def _send_password_reset_email(
-    settings: Settings,
-    recipient: str,
-    account_type: str,
-    reset_url: str,
-) -> None:
-    if not settings.gmail_smtp_username or not settings.gmail_smtp_app_password:
-        raise HTTPException(
-            status_code=503,
-            detail="Email password recovery is not configured.",
-        )
-    account_label = "admin" if account_type == "admin" else "HOD/faculty"
-    text = (
-        f"We received a request to reset your Quizcord {account_label} app password.\n\n"
-        f"Use this one-time link within 30 minutes:\n{reset_url}\n\n"
-        "If you did not request this reset, you can ignore this email."
-    )
-    html_message = (
-        f"We received a request to reset your Quizcord {account_label} app "
-        "password. This one-time link expires in 30 minutes. "
-        f'<a href="{html.escape(reset_url, quote=True)}">Reset your password</a>. '
-        "If you did not request this reset, you can ignore this email."
-    )
-    email_message = EmailMessage()
-    email_message["From"] = formataddr(
-        ("Quizcord", settings.gmail_smtp_username)
-    )
-    email_message["To"] = recipient
-    email_message["Subject"] = "Reset your Quizcord app password"
-    email_message.set_content(text)
-    email_message.add_alternative(
-        f"<p>{html_message}</p>", subtype="html"
-    )
-
-    try:
-        await asyncio.to_thread(
-            _deliver_password_reset_email,
-            settings.gmail_smtp_username,
-            settings.gmail_smtp_app_password,
-            email_message,
-        )
-    except (OSError, smtplib.SMTPException) as error:
-        LOGGER.error(
-            "Password-reset email delivery through Gmail SMTP failed: %s",
-            error,
-        )
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "The password-reset email could not be sent. "
-                "Please try again later or contact the service administrator."
-            ),
-        ) from None
-
-
-def _deliver_password_reset_email(
-    username: str,
-    app_password: str,
-    email_message: EmailMessage,
-) -> None:
-    with smtplib.SMTP("smtp.gmail.com", 587, timeout=10) as client:
-        client.ehlo()
-        client.starttls(context=ssl.create_default_context())
-        client.ehlo()
-        client.login(username, app_password)
-        client.send_message(email_message)
 
 def _is_guild_faculty(member: Any, faculty_role_id: int | None) -> bool:
     if faculty_role_id is None or not isinstance(member, dict):
