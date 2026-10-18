@@ -1,18 +1,28 @@
 # Quizcord Analytics Bot
 
-<img src="multiserver_bot/assets/quizcord-analytics-icon.png" alt="Quizcord Analytics app icon" width="120" align="right">
+<p align="center">
+  <img src="multiserver_bot/assets/quizcord-analytics-icon.png" alt="Quizcord Analytics app icon" width="120">
+</p>
 
-A production-structured Discord bot for linking server members to student
-identifiers, importing Quizcord leaderboards, and privately viewing scores and
-quiz attendance.
+<p align="center">
+  A production-structured Discord bot for linking server members to student
+  identifiers, importing Quizcord leaderboards, and privately viewing scores and
+  quiz attendance.
+</p>
 
 ## Application screenshots
 
-<img src="multiserver_bot/assets/dashboard-sign-in.png" alt="Quizcord Analytics administrator sign-in page" width="720">
+<p align="center">
+  <img src="multiserver_bot/assets/dashboard-sign-in.png" alt="Quizcord Analytics administrator sign-in page" width="800">
+</p>
 
-<img src="multiserver_bot/assets/quiz-attendance-dashboard.png" alt="Quizcord Analytics quiz attendance dashboard" width="720">
+<p align="center">
+  <img src="multiserver_bot/assets/quiz-attendance-dashboard.png" alt="Quizcord Analytics quiz attendance dashboard" width="800">
+</p>
 
-<img src="multiserver_bot/assets/student-analytics-dashboard.png" alt="Quizcord Analytics student quiz analytics dashboard" width="720">
+<p align="center">
+  <img src="multiserver_bot/assets/student-analytics-dashboard.png" alt="Quizcord Analytics student quiz analytics dashboard" width="800">
+</p>
 
 ## Project structure
 
