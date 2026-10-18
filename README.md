@@ -244,6 +244,17 @@ supported single-service deployment:
    `https://your-service.up.railway.app/health`; it should return
    `{"status":"ok"}`. Sign in at the base URL with a Discord account that owns
    the server or has **Manage Server** / **Administrator** permission.
+8. To monitor availability, sign in to UptimeRobot and create an **HTTP(s)**
+   monitor for `https://your-service.up.railway.app/health`. Use the exact
+   Railway domain, choose an interval available on your UptimeRobot plan, and
+   configure an alert contact. Test the monitor and confirm the endpoint is
+   reported as up. The health check returns HTTP 200 with `{"status":"ok"}`.
+
+UptimeRobot checks and reports availability; it does not host or restart the
+bot, and polling is not a guarantee that a service will stay awake. Keep the
+Railway service deployed and running, with billing/usage configured for
+continuous operation. Railway's restart policy handles process failures;
+UptimeRobot can alert you if the health endpoint becomes unavailable.
 
 At quiz start, the server owner receives a private Discord DM with an **Open
 live web dashboard** button. The dashboard refreshes every few seconds and
