@@ -371,6 +371,19 @@ class Database:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                    token_hash TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    discord_id TEXT NOT NULL,
+                    account_type TEXT NOT NULL
+                        CHECK (account_type IN ('admin', 'faculty')),
+                    expires_at REAL NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
             eligibility_columns = {
                 row[1]
                 for row in connection.execute(
@@ -1512,6 +1525,112 @@ class Database:
                 (str(guild_id), str(admin_discord_id)),
             )
             return True
+
+    def create_password_reset_token(
+        self,
+        guild_id: int,
+        discord_id: int,
+        account_type: str,
+        token_hash: str,
+        expires_at: float,
+    ) -> None:
+        if account_type not in {"admin", "faculty"}:
+            raise ValueError("Unsupported password reset account type.")
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM password_reset_tokens WHERE expires_at <= ?",
+                (time.time(),),
+            )
+            connection.execute(
+                """
+                DELETE FROM password_reset_tokens
+                WHERE guild_id = ? AND discord_id = ? AND account_type = ?
+                """,
+                (str(guild_id), str(discord_id), account_type),
+            )
+            connection.execute(
+                """
+                INSERT INTO password_reset_tokens (
+                    token_hash, guild_id, discord_id, account_type, expires_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    token_hash,
+                    str(guild_id),
+                    str(discord_id),
+                    account_type,
+                    expires_at,
+                ),
+            )
+
+    def get_password_reset_target(
+        self, token_hash: str
+    ) -> tuple[str, int] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT account_type, discord_id FROM password_reset_tokens
+                WHERE token_hash = ? AND expires_at > ?
+                """,
+                (token_hash, time.time()),
+            ).fetchone()
+        return (str(row[0]), int(row[1])) if row is not None else None
+
+    def reset_password_with_token(
+        self, token_hash: str, account_type: str, password: str
+    ) -> bool:
+        if account_type not in {"admin", "faculty"}:
+            raise ValueError("Unsupported password reset account type.")
+        now = time.time()
+        salt = secrets.token_hex(16)
+        password_hash = self._password_hash(password, salt)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT guild_id, discord_id FROM password_reset_tokens
+                WHERE token_hash = ? AND account_type = ? AND expires_at > ?
+                """,
+                (token_hash, account_type, now),
+            ).fetchone()
+            if row is None:
+                return False
+            guild_id, discord_id = row
+            if account_type == "admin":
+                cursor = connection.execute(
+                    """
+                    UPDATE admin_credentials
+                    SET password_salt = ?, password_hash = ?,
+                        failed_attempts = 0, locked_until = 0,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ? AND discord_id = ?
+                    """,
+                    (salt, password_hash, guild_id, discord_id),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE faculty_credentials
+                    SET password_salt = ?, password_hash = ?,
+                        must_change_password = 0, failed_attempts = 0,
+                        locked_until = 0, updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ? AND discord_id = ?
+                    """,
+                    (salt, password_hash, guild_id, discord_id),
+                )
+            if cursor.rowcount == 0:
+                connection.execute(
+                    "DELETE FROM password_reset_tokens WHERE token_hash = ?",
+                    (token_hash,),
+                )
+                return False
+            connection.execute(
+                """
+                DELETE FROM password_reset_tokens
+                WHERE guild_id = ? AND discord_id = ? AND account_type = ?
+                """,
+                (guild_id, discord_id, account_type),
+            )
+        return True
 
     def claim_global_name_reminder(
         self, session_id: str, discord_id: int

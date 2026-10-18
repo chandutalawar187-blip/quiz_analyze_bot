@@ -126,6 +126,36 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.turnstile_site_key, "turnstile-site-key")
         self.assertEqual(settings.turnstile_secret_key, "turnstile-secret-key")
 
+    def test_gmail_smtp_password_reset_settings_must_be_configured_together(self) -> None:
+        values = {
+            "DISCORD_BOT_TOKEN": "test-token",
+            "BOT_GUILD_ID": "67890",
+            "GMAIL_SMTP_USERNAME": "quizcord@gmail.com",
+        }
+        with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+            os.environ, values, clear=True
+        ):
+            with self.assertRaisesRegex(ValueError, "GMAIL_SMTP_USERNAME"):
+                Settings.from_environment()
+
+        values["GMAIL_SMTP_APP_PASSWORD"] = "abcd efgh ijkl mnop"
+        with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+            os.environ, values, clear=True
+        ):
+            settings = Settings.from_environment()
+        self.assertEqual(
+            settings.gmail_smtp_username,
+            "quizcord@gmail.com",
+        )
+        self.assertEqual(settings.gmail_smtp_app_password, "abcdefghijklmnop")
+
+        values["GMAIL_SMTP_USERNAME"] = "quizcord@gmail.com\r\nBcc: user@gmail.com"
+        with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+            os.environ, values, clear=True
+        ):
+            with self.assertRaisesRegex(ValueError, "cannot contain whitespace"):
+                Settings.from_environment()
+
     def test_railway_port_overrides_local_dashboard_port(self) -> None:
         with patch("quizcord_bot.config.load_dotenv"), patch.dict(
             os.environ,

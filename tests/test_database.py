@@ -3,6 +3,7 @@
 import asyncio
 import sqlite3
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -578,6 +579,64 @@ class DatabaseTests(unittest.TestCase):
             self.database.verify_admin_password(
                 67890, 222, "StrongAdmin!Pass123"
             )
+        )
+
+    def test_password_reset_tokens_are_expiring_single_use_and_account_scoped(
+        self,
+    ) -> None:
+        self.database.set_admin_password_if_absent(
+            67890, 111, "OldAdmin!Password123"
+        )
+        self.database.set_faculty_temporary_password(
+            67890, 222, "OldFaculty!Password123"
+        )
+        self.database.create_password_reset_token(
+            67890, 111, "admin", "admin-token-hash", time.time() + 300
+        )
+        self.database.create_password_reset_token(
+            67890, 222, "faculty", "faculty-token-hash", time.time() + 300
+        )
+        self.database.create_password_reset_token(
+            67890, 333, "admin", "expired-token-hash", time.time() - 1
+        )
+
+        self.assertEqual(
+            self.database.get_password_reset_target("admin-token-hash"),
+            ("admin", 111),
+        )
+        self.assertIsNone(
+            self.database.get_password_reset_target("expired-token-hash")
+        )
+        self.assertFalse(
+            self.database.reset_password_with_token(
+                "faculty-token-hash", "admin", "NewFaculty!Password123"
+            )
+        )
+        self.assertTrue(
+            self.database.reset_password_with_token(
+                "admin-token-hash", "admin", "NewAdmin!Password123"
+            )
+        )
+        self.assertTrue(
+            self.database.verify_admin_password(
+                67890, 111, "NewAdmin!Password123"
+            )
+        )
+        self.assertFalse(
+            self.database.reset_password_with_token(
+                "admin-token-hash", "admin", "AnotherAdmin!Password123"
+            )
+        )
+        self.assertTrue(
+            self.database.reset_password_with_token(
+                "faculty-token-hash", "faculty", "NewFaculty!Password123"
+            )
+        )
+        self.assertEqual(
+            self.database.verify_faculty_password(
+                67890, 222, "NewFaculty!Password123"
+            ),
+            (True, False),
         )
 
     def test_unmapped_privileged_mention_uses_cached_name_and_is_counted(

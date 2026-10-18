@@ -69,6 +69,8 @@ Developer Portal.
 | `DISCORD_OAUTH_CLIENT_SECRET` | With dashboard | Discord application's OAuth2 client secret. |
 | `DASHBOARD_SESSION_SECRET` | With dashboard | Unique session-signing secret, at least 32 characters. |
 | `FACULTY_ROLE_ID` | With faculty dashboard | Discord server role ID granted to faculty; leave blank to disable faculty access. |
+| `GMAIL_SMTP_USERNAME` | For password recovery | Gmail address used to send reset emails. |
+| `GMAIL_SMTP_APP_PASSWORD` | With Gmail SMTP username | Google App Password for the sending account; do not use the normal Gmail password. |
 | `DASHBOARD_HOST` | No | Bind address; defaults to `127.0.0.1` behind a local reverse proxy. |
 | `DASHBOARD_PORT` | No | Web server port; defaults to `8765`. |
 
@@ -107,7 +109,9 @@ a password of at least 12 characters. Passwords are stored as salted PBKDF2
 hashes, and five consecutive failed attempts lock password verification for
 15 minutes. HOD/faculty passwords may use any characters, must be 12–128
 characters long, and do not require a specific character mix. To reset a
-forgotten faculty password, an administrator issues a new temporary password.
+forgotten faculty password, use the email reset link on the faculty password
+page; an administrator can still issue a temporary password if recovery email
+is unavailable.
 
 Admin dashboard access also requires an app password after Discord confirms
 the account has server-management permission. Each administrator creates this
@@ -116,9 +120,27 @@ subsequent sign-ins. Admin passwords must be 12–128 characters and contain an
 uppercase letter, a lowercase letter, a number, and a symbol. They are stored
 as salted PBKDF2 hashes; five consecutive incorrect attempts lock verification
 for 15 minutes. If an administrator forgets their password, an operator can
-remove only that administrator's row from the `admin_credentials` table in the
-configured SQLite database; after a fresh Discord sign-in, that admin can set
-a replacement. Back up the database before making a manual change.
+use **Email me a password reset link** after signing in through Discord. The
+same recovery option is available on the HOD/faculty password page. Discord
+must return a verified email for the signed-in account.
+
+Password-reset email uses Gmail SMTP, so a custom sender domain is not
+required. On the Gmail account you want to send from, enable 2-Step
+Verification, then create an App Password in your Google Account's
+**Security → 2-Step Verification → App passwords** settings. In Railway's
+service **Variables**, set `GMAIL_SMTP_USERNAME` to that Gmail address and
+`GMAIL_SMTP_APP_PASSWORD` to the generated App Password; for local use, set
+the same values in `.env`. Configure both values. The application connects to
+`smtp.gmail.com` on port `587` with STARTTLS and sends from the configured
+Gmail address. Google may restrict App Password availability for some managed
+accounts, and standard Gmail sending limits apply. Never commit or share the
+App Password. Resend credentials are not used by this transport.
+
+A reset link is single-use, expires in 30 minutes, and its random token is
+stored only as a SHA-256 hash. Discord OAuth requests the email scope; only
+Discord-verified addresses are eligible. Admin and faculty reset links can
+reset only the matching account type, and resetting invalidates active
+app-password verification sessions for that account.
 
 The faculty password page requires Cloudflare Turnstile after two consecutive
 incorrect password attempts. Create a Managed Turnstile widget for the
@@ -135,11 +157,12 @@ The dashboard also applies per-client sliding-window limits: 300 requests per
 minute overall (except health checks); 12 OAuth sign-in starts and 20 OAuth
 callbacks per minute; 10 faculty password verifications and 10 password
 changes per 15 minutes; 10 admin password verifications and 5 initial admin
-password setups per 15 minutes; 10 faculty password provisions per minute; 30
-faculty-directory searches per minute; and 120 API requests per minute
-overall. Limited requests return HTTP 429 with a `Retry-After` header. These
-counters are held in the web process memory, are bounded, and reset when the
-process restarts. They are not shared across multiple service replicas.
+password setups per 15 minutes; 3 reset-email requests and 10 reset
+completions per 15 minutes; 10 faculty password provisions per minute; 30
+faculty-directory searches per minute; and 120 API requests per minute overall.
+Limited requests return HTTP 429 with a `Retry-After` header. These counters
+are held in the web process memory, are bounded, and reset when the process
+restarts. They are not shared across multiple service replicas.
 
 Application rate limits only reject requests after traffic reaches this
 process; they do not absorb a network-level DDoS or protect the public network
