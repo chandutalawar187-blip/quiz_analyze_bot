@@ -44,7 +44,6 @@ RATE_LIMIT_RULES = {
 }
 DEFAULT_REQUEST_RATE_LIMIT = (300, 60)
 DEFAULT_API_RATE_LIMIT = (120, 60)
-FACULTY_PASSWORD_CAPTCHA_THRESHOLD = 2
 
 
 def _error_page(status_code: int, detail: Any) -> str:
@@ -446,21 +445,23 @@ button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:5px;backgr
 <div class="brand">Quizcord <span>Faculty</span></div><div class="eyebrow">Second step</div>
 <h1 id="title">Faculty password</h1>
 <p class="description" id="description">Enter the temporary faculty password provided by your administrator.</p>
-<form id="password-form"><label for="password">Faculty password</label><input id="password" type="password" autocomplete="current-password" required>
-<div id="captcha-container" class="hidden"><p class="muted">Complete this security check before trying again.</p><div id="turnstile-widget" data-sitekey="__TURNSTILE_SITE_KEY__"></div></div>
+<form id="password-form"><div id="captcha-container"><p class="muted">Complete this security check to continue.</p><div id="turnstile-widget" data-sitekey="__TURNSTILE_SITE_KEY__"></div></div>
+<label for="password">Faculty password</label><input id="password" type="password" autocomplete="current-password" disabled required>
 <div id="new-password-fields" class="hidden"><label for="new-password">New password</label><input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="128"><label for="confirm-password">Confirm new password</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="128"><p class="muted">Use 12–128 characters. No character-mix rules are required. This is an app password, not your Discord password.</p></div>
-<button id="submit" type="submit">Continue</button><div class="message" id="message" role="alert"></div></form>
+<button id="submit" type="submit" disabled>Continue</button><div class="message" id="message" role="alert"></div></form>
 <a href="/auth/logout">Sign out</a>
 <script>
 const form=document.getElementById("password-form"),password=document.getElementById("password"),fields=document.getElementById("new-password-fields"),captchaContainer=document.getElementById("captcha-container"),captchaWidget=document.getElementById("turnstile-widget"),message=document.getElementById("message"),button=document.getElementById("submit");
 let mustChange=false,turnstileWidgetId=null,captchaToken="";
 async function send(path,data){const response=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data),cache:"no-store"});const body=await response.json().catch(()=>({detail:"Request failed."}));if(response.status===401&&body.detail==="Please sign in again."){location.replace("/faculty/login");throw new Error(body.detail);}if(!response.ok){const error=new Error(body.detail||"Could not verify your password.");error.body=body;throw error;}return body;}
-function resetCaptcha(){captchaToken="";if(turnstileWidgetId!==null&&window.turnstile)window.turnstile.reset(turnstileWidgetId);}
-function showCaptcha(){captchaContainer.classList.remove("hidden");if(!captchaWidget.dataset.sitekey)throw new Error("Security check is not configured. Contact an administrator.");if(turnstileWidgetId!==null)return Promise.resolve();return new Promise((resolve,reject)=>{const render=()=>{turnstileWidgetId=window.turnstile.render(captchaWidget,{sitekey:captchaWidget.dataset.sitekey,action:"faculty_password",callback:token=>{captchaToken=token;},"expired-callback":()=>{captchaToken="";},"error-callback":()=>{captchaToken="";message.textContent="Security check failed to load. Please retry.";}});resolve();};if(window.turnstile){render();return;}const script=document.createElement("script");script.src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";script.async=true;script.defer=true;script.onload=render;script.onerror=()=>reject(new Error("Security check failed to load. Please retry."));document.head.appendChild(script);});}
+function setVerificationEnabled(enabled){password.disabled=!enabled;button.disabled=!enabled;}
+function resetCaptcha(){captchaToken="";setVerificationEnabled(false);if(turnstileWidgetId!==null&&window.turnstile)window.turnstile.reset(turnstileWidgetId);}
+function showCaptcha(){captchaContainer.classList.remove("hidden");if(!captchaWidget.dataset.sitekey)throw new Error("Security check is not configured. Contact an administrator.");if(turnstileWidgetId!==null)return Promise.resolve();return new Promise((resolve,reject)=>{const render=()=>{turnstileWidgetId=window.turnstile.render(captchaWidget,{sitekey:captchaWidget.dataset.sitekey,action:"faculty_password",callback:token=>{captchaToken=token;setVerificationEnabled(true);message.textContent="";},"expired-callback":()=>{captchaToken="";setVerificationEnabled(false);},"error-callback":()=>{captchaToken="";setVerificationEnabled(false);message.textContent="Security check failed to load. Please retry.";}});resolve();};if(window.turnstile){render();return;}const script=document.createElement("script");script.src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";script.async=true;script.defer=true;script.onload=render;script.onerror=()=>reject(new Error("Security check failed to load. Please retry."));document.head.appendChild(script);});}
+showCaptcha().catch(error=>{message.textContent=error.message;});
 form.addEventListener("submit",async event=>{event.preventDefault();message.textContent="";button.disabled=true;
-try{if(!mustChange){const result=await send("/api/faculty/password/verify",{password:password.value,turnstile_token:captchaToken});mustChange=result.must_change;if(mustChange){fields.classList.remove("hidden");password.value="";password.autocomplete="new-password";document.getElementById("title").textContent="Set a new password";document.getElementById("description").textContent="Your temporary password was accepted. Choose a new password to finish signing in.";button.textContent="Update password";return;}location.replace("/faculty");return;}
+try{if(!mustChange){if(!captchaToken)throw new Error("Complete the security check before continuing.");const result=await send("/api/faculty/password/verify",{password:password.value,turnstile_token:captchaToken});captchaToken="";mustChange=result.must_change;if(mustChange){captchaContainer.classList.add("hidden");fields.classList.remove("hidden");password.value="";password.autocomplete="new-password";password.disabled=false;document.getElementById("title").textContent="Set a new password";document.getElementById("description").textContent="Your temporary password was accepted. Choose a new password to finish signing in.";button.textContent="Update password";button.disabled=false;return;}location.replace("/faculty");return;}
 const next=document.getElementById("new-password").value,confirm=document.getElementById("confirm-password").value;if(next.length<12)throw new Error("Use at least 12 characters.");if(next!==confirm)throw new Error("The new passwords do not match.");await send("/api/faculty/password/change",{current_password:password.value,new_password:next});location.replace("/faculty");
-}catch(error){message.textContent=error.message;if(error.body&&error.body.captcha_required){try{await showCaptcha();if(captchaToken)resetCaptcha();}catch(loadError){message.textContent=loadError.message;}}else if(captchaToken)resetCaptcha();}finally{button.disabled=false;}});
+}catch(error){message.textContent=error.message;if(!mustChange)resetCaptcha();else button.disabled=false;}});
 </script></main></body></html>"""
 
 FACULTY_ADMIN_PAGE = r"""<!doctype html>
@@ -1278,49 +1279,40 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             raise HTTPException(
                 status_code=403, detail="The configured Faculty role is required."
             )
+        if not settings.turnstile_secret_key:
+            raise HTTPException(
+                status_code=503,
+                detail="Security check is not configured. Contact an administrator.",
+            )
+        token = payload.get("turnstile_token", "")
+        if not token or len(token) > 2048:
+            return JSONResponse(
+                status_code=428,
+                content={
+                    "detail": "Complete the security check before continuing.",
+                    "captcha_required": True,
+                },
+            )
+        if not await _verify_turnstile_token(settings, token):
+            return JSONResponse(
+                status_code=428,
+                content={
+                    "detail": "Security check expired or invalid. Please retry it.",
+                    "captcha_required": True,
+                },
+            )
         password = payload.get("password", "")
         if not password or len(password) > 256:
             raise HTTPException(status_code=422, detail="Enter your faculty password.")
-        failed_attempts = database.get_faculty_password_failed_attempts(
-            settings.guild_id, auth_session.user_id
-        )
-        if failed_attempts >= FACULTY_PASSWORD_CAPTCHA_THRESHOLD:
-            if not settings.turnstile_secret_key:
-                raise HTTPException(
-                    status_code=503,
-                    detail="Security check is not configured. Contact an administrator.",
-                )
-            token = payload.get("turnstile_token", "")
-            if not token or len(token) > 2048:
-                return JSONResponse(
-                    status_code=428,
-                    content={
-                        "detail": "Complete the security check before trying again.",
-                        "captcha_required": True,
-                    },
-                )
-            if not await _verify_turnstile_token(settings, token):
-                return JSONResponse(
-                    status_code=428,
-                    content={
-                        "detail": "Security check expired or invalid. Please retry it.",
-                        "captcha_required": True,
-                    },
-                )
         valid, must_change = database.verify_faculty_password(
             settings.guild_id, auth_session.user_id, password
         )
         if not valid:
-            failed_attempts = database.get_faculty_password_failed_attempts(
-                settings.guild_id, auth_session.user_id
-            )
             return JSONResponse(
                 status_code=401,
                 content={
                     "detail": "Faculty password is incorrect, not provisioned, or temporarily locked. Contact an administrator if you need a reset.",
-                    "captcha_required": (
-                        failed_attempts >= FACULTY_PASSWORD_CAPTCHA_THRESHOLD
-                    ),
+                    "captcha_required": True,
                 },
             )
         auth_session.faculty_password_verified = True

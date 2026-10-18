@@ -112,16 +112,17 @@ forgotten faculty password, an administrator can issue a new temporary
 password. Email password recovery is disabled for now and can be added later
 when a verified sender domain and delivery provider are available.
 
-The faculty password page requires Cloudflare Turnstile after two consecutive
-incorrect password attempts. Create a Managed Turnstile widget for the
-dashboard hostname and configure its site key as `TURNSTILE_SITE_KEY` and its
-secret key as `TURNSTILE_SECRET_KEY` in the local `.env` or the deployment
-environment (for Railway, add both as service variables). The keys must be set
-together. Keep the secret key private and never put it in browser code or share
-it in chat. The server validates each challenge with Cloudflare and checks the
-configured hostname and `faculty_password` action. If server-side verification
-is required but the keys are missing or Cloudflare cannot be reached, password
-verification fails closed until the configuration or service is restored.
+The faculty password page requires Cloudflare Turnstile before the password
+field is enabled or any password is submitted. Create a Managed Turnstile
+widget for the dashboard hostname and configure its site key as
+`TURNSTILE_SITE_KEY` and its secret key as `TURNSTILE_SECRET_KEY` in the local
+`.env` or the deployment environment (for Railway, add both as service
+variables). The keys must be set together. Keep the secret key private and
+never put it in browser code or share it in chat. The server validates every
+challenge with Cloudflare and checks the configured hostname and
+`faculty_password` action. If server-side verification is required but the keys
+are missing or Cloudflare cannot be reached, password verification fails
+closed until the configuration or service is restored.
 
 The dashboard also applies per-client sliding-window limits: 300 requests per
 minute overall (except health checks); 12 OAuth sign-in starts and 20 OAuth

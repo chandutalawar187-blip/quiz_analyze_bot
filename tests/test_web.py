@@ -390,6 +390,15 @@ class DashboardWebTests(unittest.TestCase):
         self.assertNotIn("Email me a password reset link", password_page.text)
         self.assertIn("Use 12–128 characters", password_page.text)
         self.assertIn('data-sitekey="turnstile-site-key"', password_page.text)
+        self.assertLess(
+            password_page.text.index('id="captcha-container"'),
+            password_page.text.index('id="password"'),
+        )
+        self.assertIn(
+            'id="password" type="password" autocomplete="current-password" disabled',
+            password_page.text,
+        )
+        self.assertIn('showCaptcha().catch', password_page.text)
         self.assertEqual(self.client.get("/faculty").status_code, 200)
         self.assertEqual(
             self.client.get("/api/faculty/students").status_code, 428
@@ -403,24 +412,16 @@ class DashboardWebTests(unittest.TestCase):
             404,
         )
 
-        first_failure = self.client.post(
-            "/api/faculty/password/verify",
-            json={"password": "wrong-password"},
-        )
-        self.assertEqual(first_failure.status_code, 401)
-        self.assertFalse(first_failure.json()["captcha_required"])
-        second_failure = self.client.post(
-            "/api/faculty/password/verify",
-            json={"password": "wrong-password"},
-        )
-        self.assertEqual(second_failure.status_code, 401)
-        self.assertTrue(second_failure.json()["captcha_required"])
         missing_captcha = self.client.post(
             "/api/faculty/password/verify",
             json={"password": "Temporary!FacultyPassword"},
         )
         self.assertEqual(missing_captcha.status_code, 428)
         self.assertTrue(missing_captcha.json()["captcha_required"])
+        self.assertEqual(
+            self.database.get_faculty_password_failed_attempts(67890, 123456),
+            0,
+        )
 
         invalid_response = Mock()
         invalid_response.json.return_value = {
@@ -446,6 +447,10 @@ class DashboardWebTests(unittest.TestCase):
             )
         self.assertEqual(invalid_captcha.status_code, 428)
         self.assertTrue(invalid_captcha.json()["captcha_required"])
+        self.assertEqual(
+            self.database.get_faculty_password_failed_attempts(67890, 123456),
+            0,
+        )
 
         turnstile_client.post = AsyncMock(side_effect=httpx.ConnectError("offline"))
         with self.assertLogs("quizcord_analytics.dashboard", level="ERROR"):
@@ -468,6 +473,20 @@ class DashboardWebTests(unittest.TestCase):
             "hostname": "analytics.example.com",
             "action": "faculty_password",
         }
+        turnstile_client.post = AsyncMock(return_value=valid_response)
+        with patch(
+            "quizcord_bot.web.httpx.AsyncClient",
+            return_value=turnstile_context,
+        ):
+            first_failure = self.client.post(
+                "/api/faculty/password/verify",
+                json={
+                    "password": "wrong-password",
+                    "turnstile_token": "valid-token",
+                },
+            )
+        self.assertEqual(first_failure.status_code, 401)
+        self.assertTrue(first_failure.json()["captcha_required"])
         turnstile_client.post = AsyncMock(return_value=valid_response)
         with patch(
             "quizcord_bot.web.httpx.AsyncClient",
