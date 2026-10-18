@@ -618,6 +618,8 @@ class DashboardWebTests(unittest.TestCase):
         self.assertIn("marked inactive", privacy.text)
         self.assertIn("chandutalawar187@gmail.com", privacy.text)
         self.assertIn('href="/terms"', privacy.text)
+        self.assertIn("Sentry monitoring", privacy.text)
+        self.assertIn("request bodies", privacy.text)
         self.assertEqual(terms.status_code, 200)
         self.assertIn("Terms of Service", terms.text)
         self.assertIn('href="/privacy"', terms.text)

@@ -4,6 +4,7 @@ import logging
 
 from quizcord_bot.bot import AnalyticsBot
 from quizcord_bot.config import Settings
+from quizcord_bot.telemetry import initialize_sentry
 
 
 def main() -> None:
@@ -16,6 +17,7 @@ def main() -> None:
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
+    initialize_sentry(settings)
     bot = AnalyticsBot(settings)
     bot.run(settings.token, log_handler=None)
 

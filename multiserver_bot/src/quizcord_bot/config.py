@@ -1,5 +1,6 @@
 """Environment-backed configuration for the bot."""
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,8 @@ class Settings:
     turnstile_secret_key: str | None
     dashboard_host: str
     dashboard_port: int
+    sentry_dsn: str | None
+    sentry_traces_sample_rate: float
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -88,6 +91,10 @@ class Settings:
         dashboard_host = os.getenv("DASHBOARD_HOST", "127.0.0.1").strip()
         if not dashboard_host:
             raise ValueError("DASHBOARD_HOST cannot be empty.")
+        sentry_dsn = os.getenv("SENTRY_DSN", "").strip()
+        sentry_traces_sample_rate = _parse_sample_rate(
+            os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1").strip()
+        )
 
         return cls(
             token=token,
@@ -103,6 +110,8 @@ class Settings:
             turnstile_secret_key=turnstile_secret_key or None,
             dashboard_host=dashboard_host,
             dashboard_port=dashboard_port,
+            sentry_dsn=sentry_dsn or None,
+            sentry_traces_sample_rate=sentry_traces_sample_rate,
         )
 
 
@@ -136,3 +145,17 @@ def _parse_port(value: str) -> int:
     if not 1 <= port <= 65535:
         raise ValueError("DASHBOARD_PORT must be between 1 and 65535.")
     return port
+
+
+def _parse_sample_rate(value: str) -> float:
+    try:
+        rate = float(value)
+    except ValueError as error:
+        raise ValueError(
+            "SENTRY_TRACES_SAMPLE_RATE must be a number between 0 and 1."
+        ) from error
+    if not math.isfinite(rate) or not 0 <= rate <= 1:
+        raise ValueError(
+            "SENTRY_TRACES_SAMPLE_RATE must be a number between 0 and 1."
+        )
+    return rate

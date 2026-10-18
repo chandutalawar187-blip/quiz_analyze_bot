@@ -54,6 +54,48 @@ class SettingsTests(unittest.TestCase):
 
         self.assertIsNone(settings.quizcord_bot_id)
 
+    def test_sentry_is_optional_and_uses_a_conservative_trace_sample_rate(self) -> None:
+        with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+            os.environ, {"DISCORD_BOT_TOKEN": "test-token"}, clear=True
+        ):
+            settings = Settings.from_environment()
+
+        self.assertIsNone(settings.sentry_dsn)
+        self.assertEqual(settings.sentry_traces_sample_rate, 0.1)
+
+        with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+            os.environ,
+            {
+                "DISCORD_BOT_TOKEN": "test-token",
+                "SENTRY_DSN": "https://public@example.ingest.sentry.io/123",
+                "SENTRY_TRACES_SAMPLE_RATE": "0.25",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_environment()
+
+        self.assertEqual(
+            settings.sentry_dsn,
+            "https://public@example.ingest.sentry.io/123",
+        )
+        self.assertEqual(settings.sentry_traces_sample_rate, 0.25)
+
+    def test_sentry_trace_sample_rate_must_be_between_zero_and_one(self) -> None:
+        for value in ("not-a-number", "-0.1", "1.1", "nan", "inf"):
+            with self.subTest(value=value):
+                with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+                    os.environ,
+                    {
+                        "DISCORD_BOT_TOKEN": "test-token",
+                        "SENTRY_TRACES_SAMPLE_RATE": value,
+                    },
+                    clear=True,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError, "SENTRY_TRACES_SAMPLE_RATE"
+                    ):
+                        Settings.from_environment()
+
     def test_dashboard_is_optional_without_oauth_configuration(self) -> None:
         with patch("quizcord_bot.config.load_dotenv"), patch.dict(
             os.environ,
