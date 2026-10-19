@@ -117,7 +117,7 @@ Developer Portal.
 | --- | --- | --- |
 | `DISCORD_BOT_TOKEN` | Yes | Discord bot token. |
 | `QUIZCORD_BOT_ID` | No | Optional fixed Quizcord bot ID. Leave blank to detect bot/webhook quiz-start, leaderboard, and Quiz ID signals automatically. |
-| `BOT_GUILD_ID` | No | Only needed when migrating old single-server data: set it to the server that owns the existing mappings/results. Leave blank for a fresh multi-server install. |
+| `BOT_GUILD_ID` | No | Only needed when migrating old single-server data: set it to the server that owns the existing mappings/results. Leave blank for a fresh multi-server install. Legacy guild-command cleanup requires the bot to have access to this server; if Discord denies that cleanup, startup continues with global commands and logs a warning. |
 | `BOT_DATABASE_PATH` | No | SQLite database path. Defaults to `server_results.db` in the project directory. |
 | `DASHBOARD_PUBLIC_URL` | No | Public HTTPS origin for the web dashboard, e.g. `https://analytics.example.com`. |
 | `DISCORD_OAUTH_CLIENT_ID` | With dashboard | Discord application's OAuth2 client ID. |

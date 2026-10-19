@@ -62,11 +62,19 @@ class AnalyticsBot(commands.Bot):
         if self.settings.guild_id is not None:
             legacy_guild = discord.Object(id=self.settings.guild_id)
             self.tree.clear_commands(guild=legacy_guild)
-            await self.tree.sync(guild=legacy_guild)
-            LOGGER.info(
-                "Removed legacy guild-scoped commands from server %s.",
-                self.settings.guild_id,
-            )
+            try:
+                await self.tree.sync(guild=legacy_guild)
+            except discord.Forbidden:
+                LOGGER.warning(
+                    "Could not remove legacy guild-scoped commands from server %s "
+                    "(Discord returned 403 Missing Access); continuing with global commands.",
+                    self.settings.guild_id,
+                )
+            else:
+                LOGGER.info(
+                    "Removed legacy guild-scoped commands from server %s.",
+                    self.settings.guild_id,
+                )
 
     async def _wait_for_dashboard(self) -> None:
         while self.dashboard_server is not None:
