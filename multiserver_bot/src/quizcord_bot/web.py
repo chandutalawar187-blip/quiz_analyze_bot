@@ -180,6 +180,7 @@ HTML_PAGE = r"""<!doctype html>
     let activeView = "sessions";
     let pollBusy = false;
     let userSearchQuery = "";
+    let pendingDirectoryUsers = null;
     function metric(label,value){const card=el("div","card");card.append(el("div","metric-label",label),el("div","metric",value));return card;}
     function statusLabel(status){return status==="completed"?"Complete":status==="interrupted"?"Interrupted":"Live";}
     function dateLabel(value,withTime=false){if(!value)return"Date unavailable";if(/^\d{4}-\d{2}-\d{2}$/.test(value)){const [year,month,day]=value.split("-").map(Number);return new Date(year,month-1,day).toLocaleDateString();}return new Date(value).toLocaleString(undefined,withTime?{}:{dateStyle:"short"});}
@@ -246,6 +247,7 @@ HTML_PAGE = r"""<!doctype html>
       if(!users.length)panel.append(el("div","empty","No synchronized human members found."));
       const filterRows=()=>{const query=search.value.trim().toLocaleLowerCase();rows.forEach(row=>{row.hidden=!row.dataset.search.includes(query);});};
       search.addEventListener("input",()=>{userSearchQuery=search.value;filterRows();});
+      search.addEventListener("blur",()=>{if(pendingDirectoryUsers!==null&&activeView==="users"){const updatedUsers=pendingDirectoryUsers;pendingDirectoryUsers=null;renderUsers(updatedUsers);}});
       filterRows();
       content.replaceChildren(heading,panel);
     }
@@ -303,7 +305,10 @@ HTML_PAGE = r"""<!doctype html>
         if(response.status===401){location.replace("/");return;}
         if(!response.ok)throw new Error("Could not load server users.");
         const users=await response.json();
-        if(activeView==="users")renderUsers(users);
+        if(activeView==="users"){
+          if(content.querySelector(".directory-search")===document.activeElement)pendingDirectoryUsers=users;
+          else renderUsers(users);
+        }
       }catch(error){content.replaceChildren(el("div","empty error",error.message));}
       finally{pollBusy=false;}
     }
