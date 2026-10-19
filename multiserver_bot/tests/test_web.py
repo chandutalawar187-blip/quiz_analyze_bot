@@ -606,9 +606,12 @@ class DashboardWebTests(unittest.TestCase):
 
     def test_health_endpoint_does_not_require_sign_in(self) -> None:
         response = self.client.get("/health")
+        head_response = self.client.head("/health")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok"})
+        self.assertEqual(head_response.status_code, 200)
+        self.assertEqual(head_response.content, b"")
 
     def test_sentry_http_metrics_use_the_matched_route_template(self) -> None:
         app = create_dashboard_app(

@@ -926,6 +926,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         return HTMLResponse(_error_page(500, detail), status_code=500)
 
     @app.get("/health")
+    @app.head("/health", include_in_schema=False)
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
