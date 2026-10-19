@@ -230,13 +230,13 @@ HTML_PAGE = r"""<!doctype html>
       const search=document.createElement("input");search.className="directory-search";search.type="search";search.placeholder="Search names or USN";search.setAttribute("aria-label","Search users");
       tools.append(el("span","","Names marked below need a USN-format global display name."),search);panel.append(tools);
       const wrap=el("div","table-wrap"),table=el("table","directory-table"),thead=el("thead"),headRow=el("tr");
-      ["Global display name","Account username","Server nickname","Student name","USN"].forEach(label=>headRow.append(el("th","",label)));
+      ["Global display name","Account username","Server nickname","USN"].forEach(label=>headRow.append(el("th","",label)));
       thead.append(headRow);table.append(thead);const body=el("tbody");
       const rows=[];
       users.forEach(user=>{const row=el("tr"),globalCell=el("td","");
         globalCell.append(el("span","",user.global_name||"Not set"));
         if(!user.name_matches_usn_format)globalCell.append(el("div","directory-warning","Name not updated to USN"));
-        row.append(globalCell,el("td","",user.account_name),el("td","",user.server_nickname||"—"),el("td","",user.student_name||"Not mapped"),el("td","usn",user.usn||"—"));
+        row.append(globalCell,el("td","",user.account_name),el("td","",user.server_nickname||"—"),el("td","usn",user.usn||"—"));
         row.dataset.search=[user.global_name,user.account_name,user.server_nickname,user.student_name,user.usn].filter(Boolean).join(" ").toLocaleLowerCase();
         rows.push(row);body.append(row);
       });
