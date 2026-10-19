@@ -24,6 +24,3 @@ quizcord-analytics = "quizcord_bot.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-quizcord_bot = ["templates/*.html", "static/css/*.css", "static/js/*.js"]

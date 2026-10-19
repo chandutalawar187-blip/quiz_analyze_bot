@@ -101,22 +101,6 @@ class DashboardWebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["detail"], "Please sign in again.")
 
-    def test_pixel_ui_templates_and_static_assets_are_served(self) -> None:
-        for path in ("/login", "/faculty/login", "/privacy", "/terms"):
-            with self.subTest(path=path):
-                response = self.client.get(path)
-                self.assertEqual(response.status_code, 200)
-                self.assertIn('/static/css/pixel.css', response.text)
-
-        stylesheet = self.client.get("/static/css/pixel.css")
-        self.assertEqual(stylesheet.status_code, 200)
-        self.assertIn("--pixel-mint", stylesheet.text)
-        self.assertEqual(stylesheet.headers["Cache-Control"], "no-store")
-
-        dashboard_script = self.client.get("/static/js/dashboard.js")
-        self.assertEqual(dashboard_script.status_code, 200)
-        self.assertIn('fetch("/api/sessions"', dashboard_script.text)
-
     def test_oauth_login_is_rate_limited(self) -> None:
         responses = [
             self.client.get(
@@ -165,7 +149,7 @@ class DashboardWebTests(unittest.TestCase):
         self.assertEqual(limited.json()["detail"], "Too many requests. Please wait before trying again.")
         self.assertEqual(limited.headers["X-RateLimit-Limit"], "10")
 
-    def test_browser_http_errors_use_pixel_art_html_pages(self) -> None:
+    def test_browser_http_errors_use_discord_style_html_pages(self) -> None:
         missing_page = self.client.get("/missing-page")
 
         self.assertEqual(missing_page.status_code, 404)
@@ -173,7 +157,6 @@ class DashboardWebTests(unittest.TestCase):
         self.assertIn("404", missing_page.text)
         self.assertIn("This page is missing", missing_page.text)
         self.assertIn("Quizcord", missing_page.text)
-        self.assertIn('/static/css/pixel.css', missing_page.text)
 
         unauthorized_page = self.client.get(
             "/students/ABC123", follow_redirects=False
@@ -449,14 +432,9 @@ class DashboardWebTests(unittest.TestCase):
             'id="password" type="password" autocomplete="current-password" disabled',
             password_page.text,
         )
-        self.assertIn('/static/js/faculty-password.js', password_page.text)
-        faculty_password_script = self.client.get(
-            "/static/js/faculty-password.js"
-        )
-        self.assertEqual(faculty_password_script.status_code, 200)
         self.assertIn(
             "initializeGuildSelector().then(showCaptcha).catch",
-            faculty_password_script.text,
+            password_page.text,
         )
         self.assertEqual(self.client.get("/faculty").status_code, 200)
         self.assertEqual(

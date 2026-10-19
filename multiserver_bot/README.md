@@ -37,22 +37,9 @@
 │       ├── config.py
 │       ├── database.py
 │       ├── quizcord.py
-│       ├── templates/
-│       │   ├── dashboard.html
-│       │   ├── faculty*.html
-│       │   ├── admin_login.html
-│       │   ├── privacy.html
-│       │   └── terms.html
-│       ├── static/
-│       │   ├── css/pixel.css
-│       │   └── js/
-│       ├── web.py
 │       └── views.py
 └── tests/
 ```
-
-Dashboard pages, shared pixel-art styling, and browser scripts are packaged as
-separate resources; `web.py` owns the routes and application behavior.
 
 The existing `fetch_users.py` remains as a small compatibility launcher.
 
