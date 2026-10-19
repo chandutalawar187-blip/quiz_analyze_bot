@@ -179,6 +179,7 @@ HTML_PAGE = r"""<!doctype html>
     let activeSession = initialSession;
     let activeView = "sessions";
     let pollBusy = false;
+    let userSearchQuery = "";
     function metric(label,value){const card=el("div","card");card.append(el("div","metric-label",label),el("div","metric",value));return card;}
     function statusLabel(status){return status==="completed"?"Complete":status==="interrupted"?"Interrupted":"Live";}
     function dateLabel(value,withTime=false){if(!value)return"Date unavailable";if(/^\d{4}-\d{2}-\d{2}$/.test(value)){const [year,month,day]=value.split("-").map(Number);return new Date(year,month-1,day).toLocaleDateString();}return new Date(value).toLocaleString(undefined,withTime?{}:{dateStyle:"short"});}
@@ -228,6 +229,7 @@ HTML_PAGE = r"""<!doctype html>
       heading.append(title,el("div","panel-sub",users.length+" human members"));
       const panel=el("article","panel"),tools=el("div","directory-tools");
       const search=document.createElement("input");search.className="directory-search";search.type="search";search.placeholder="Search names or USN";search.setAttribute("aria-label","Search users");
+      search.value=userSearchQuery;
       tools.append(el("span","","Names marked below need a USN-format global display name."),search);panel.append(tools);
       const wrap=el("div","table-wrap"),table=el("table","directory-table"),thead=el("thead"),headRow=el("tr");
       ["Global display name","Account username","Server nickname","USN"].forEach(label=>headRow.append(el("th","",label)));
@@ -242,7 +244,9 @@ HTML_PAGE = r"""<!doctype html>
       });
       table.append(body);wrap.append(table);panel.append(wrap);
       if(!users.length)panel.append(el("div","empty","No synchronized human members found."));
-      search.addEventListener("input",()=>{const query=search.value.trim().toLocaleLowerCase();rows.forEach(row=>{row.hidden=!row.dataset.search.includes(query);});});
+      const filterRows=()=>{const query=search.value.trim().toLocaleLowerCase();rows.forEach(row=>{row.hidden=!row.dataset.search.includes(query);});};
+      search.addEventListener("input",()=>{userSearchQuery=search.value;filterRows();});
+      filterRows();
       content.replaceChildren(heading,panel);
     }
     function renderStudent(student){
