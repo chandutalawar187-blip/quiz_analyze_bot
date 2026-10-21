@@ -119,11 +119,21 @@ class _OAuthSession:
 
 
 HTML_PAGE = r"""<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    try {
+      const savedTheme = localStorage.getItem("quizcord-dashboard-theme");
+      if (savedTheme === "dark" || savedTheme === "light") {
+        document.documentElement.dataset.theme = savedTheme;
+      }
+    } catch (error) {
+      console.warn("Could not restore the dashboard theme preference.", error);
+    }
+  </script>
   <title>Quizcord Analytics</title>
   <style>
     :root {
@@ -146,10 +156,30 @@ HTML_PAGE = r"""<!doctype html>
       --radius-lg: 18px;
       --radius-md: 12px;
       --radius-sm: 10px;
+      color-scheme: light;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
       color: var(--text);
       background: var(--bg);
       font-synthesis: none;
+    }
+    :root[data-theme="dark"] {
+      --bg: #17191c;
+      --bg-elevated: #202328;
+      --panel: #22262b;
+      --panel-strong: #292e34;
+      --line: #343a42;
+      --line-strong: #48515c;
+      --text: #edf0f2;
+      --text-soft: #c1c7ce;
+      --text-muted: #9aa3ad;
+      --accent: #e4e9ef;
+      --accent-soft: #303944;
+      --accent-strong: #aebdce;
+      --success: #9eb8a4;
+      --warning: #d2b27e;
+      --danger: #e0a0a0;
+      --shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
+      color-scheme: dark;
     }
     * { box-sizing: border-box; }
     body {
@@ -174,6 +204,7 @@ HTML_PAGE = r"""<!doctype html>
       z-index: 2;
       backdrop-filter: blur(8px);
     }
+    :root[data-theme="dark"] .top { background: rgba(34, 38, 43, 0.96); }
     .brand {
       font-weight: 800;
       letter-spacing: -0.02em;
@@ -193,6 +224,43 @@ HTML_PAGE = r"""<!doctype html>
       text-decoration: none;
     }
     .account a:hover { color: var(--text); }
+    .theme-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      padding: 8px 11px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-sm);
+      background: var(--panel);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .theme-toggle:hover { background: var(--panel-strong); }
+    .theme-toggle:focus-visible {
+      outline: 3px solid var(--accent-strong);
+      outline-offset: 2px;
+    }
+    .theme-toggle-mark {
+      width: 14px;
+      height: 14px;
+      display: inline-block;
+      border: 2px solid currentColor;
+      border-radius: 50%;
+      position: relative;
+      flex: none;
+    }
+    .theme-toggle-mark::after {
+      content: "";
+      position: absolute;
+      width: 7px;
+      height: 7px;
+      right: -4px;
+      top: -3px;
+      border-radius: 50%;
+      background: var(--panel);
+    }
     main {
       max-width: 1280px;
       margin: 38px auto;
@@ -333,6 +401,7 @@ HTML_PAGE = r"""<!doctype html>
       align-items: center;
       background: rgba(250, 249, 247, 0.6);
     }
+    :root[data-theme="dark"] .panel-head { background: rgba(41, 46, 52, 0.65); }
     .panel h2 { font-size: 16px; margin: 0; }
     .panel-sub {
       font-size: 12px;
@@ -506,6 +575,20 @@ HTML_PAGE = r"""<!doctype html>
       font-weight: 700;
       margin-top: 18px;
     }
+    .theme-liquid {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      pointer-events: none;
+    }
+    .theme-liquid path { fill: var(--bg); }
+    .theme-liquid-shape {
+      transform-box: view-box;
+      transform-origin: 0 0;
+    }
     @media(max-width:860px){ .grid{grid-template-columns:repeat(2,1fr)} .main-grid{grid-template-columns:1fr} }
     @media(max-width:520px){
       .top{ padding:0 16px; }
@@ -516,12 +599,13 @@ HTML_PAGE = r"""<!doctype html>
       .grid{ gap:10px; }
       .card{ padding:16px; }
       .metric{ font-size:24px; }
+      .theme-toggle-label{ display:none; }
       th, td{ padding:12px 14px; }
     }
   </style>
 </head>
 <body>
-  <header class="top"><div class="brand">Quizcord <span>Analytics</span></div><div class="account"><a id="back-link" href="/" hidden>← Dashboard</a><a id="faculty-password-link" href="/admin/faculty-passwords" hidden>Faculty passwords</a><select id="guild-select" aria-label="Select server" hidden></select><span id="account-name"></span><a href="/auth/logout">Sign out</a></div></header>
+  <header class="top"><div class="brand">Quizcord <span>Analytics</span></div><div class="account"><a id="back-link" href="/" hidden>← Dashboard</a><a id="faculty-password-link" href="/admin/faculty-passwords" hidden>Faculty passwords</a><select id="guild-select" aria-label="Select server" hidden></select><span id="account-name"></span><button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false"><span class="theme-toggle-mark" aria-hidden="true"></span><span class="theme-toggle-label">Dark mode</span></button><a href="/auth/logout">Sign out</a></div></header>
   <main>
     <nav class="dashboard-tabs" id="dashboard-tabs" aria-label="Dashboard sections">
       <button type="button" data-view="sessions" aria-selected="true">Quiz sessions</button>
@@ -530,6 +614,111 @@ HTML_PAGE = r"""<!doctype html>
     <section class="heading" id="session-heading"><div><div class="eyebrow">Live monitoring</div><h1>Quiz dashboard</h1></div><select id="session-select" aria-label="Select quiz session"></select></section>
     <div id="content"><div class="empty">Loading quiz sessions…</div></div>
   </main>
+  <script>
+    (() => {
+      const toggle = document.getElementById("theme-toggle");
+      const label = toggle.querySelector(".theme-toggle-label");
+      const root = document.documentElement;
+      const blobPath = "M 0 -1 C .22 -1.04 .20 -.78 .43 -.81 C .72 -.89 .63 -.56 .88 -.46 C 1.12 -.35 .81 -.15 1 .08 C 1.16 .32 .78 .34 .84 .60 C .89 .90 .54 .74 .36 .91 C .12 1.09 -.02 .77 -.27 .93 C -.52 1.08 -.42 .71 -.66 .67 C -.94 .63 -.65 .40 -.91 .19 C -1.13 -.02 -.73 -.10 -.86 -.37 C -.99 -.67 -.59 -.54 -.50 -.79 C -.34 -1.05 -.16 -.77 0 -1 Z";
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+      function syncToggle() {
+        const isDark = root.dataset.theme === "dark";
+        label.textContent = isDark ? "Light mode" : "Dark mode";
+        toggle.setAttribute("aria-label", isDark ? "Switch to light mode" : "Switch to dark mode");
+        toggle.setAttribute("aria-pressed", String(isDark));
+      }
+
+      function applyTheme(theme) {
+        root.dataset.theme = theme;
+        syncToggle();
+        try {
+          localStorage.setItem("quizcord-dashboard-theme", theme);
+        } catch (error) {
+          console.warn("Could not save the dashboard theme preference.", error);
+        }
+      }
+
+      function spillFrom(button, theme) {
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        const bounds = button.getBoundingClientRect();
+        const x = bounds.left + bounds.width / 2;
+        const y = bounds.top + bounds.height / 2;
+        const previousTheme = root.dataset.theme;
+        root.dataset.theme = theme;
+        const inkColor = getComputedStyle(root).getPropertyValue("--bg").trim();
+        root.dataset.theme = previousTheme;
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("class", "theme-liquid");
+        svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+        svg.setAttribute("aria-hidden", "true");
+
+        const shape = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        shape.setAttribute("d", blobPath);
+        shape.style.fill = inkColor;
+        const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        group.setAttribute("class", "theme-liquid-shape");
+        group.append(shape);
+        svg.append(group);
+        document.body.append(svg);
+        toggle.disabled = true;
+
+        if (reducedMotion.matches || !group.animate || !svg.animate) {
+          shape.setAttribute("d", `M0 0H${width}V${height}H0Z`);
+          applyTheme(theme);
+          const fade = svg.animate?.(
+            [{ opacity: 0.96 }, { opacity: 0 }],
+            { duration: reducedMotion.matches ? 240 : 320, easing: "ease-out" }
+          );
+          if (fade) {
+            fade.onfinish = () => {
+              svg.remove();
+              toggle.disabled = false;
+            };
+          } else {
+            svg.style.transition = "opacity 240ms ease-out";
+            window.requestAnimationFrame(() => { svg.style.opacity = "0"; });
+            window.setTimeout(() => {
+              svg.remove();
+              toggle.disabled = false;
+            }, 260);
+          }
+          return;
+        }
+
+        const radius = Math.hypot(
+          Math.max(x, width - x),
+          Math.max(y, height - y)
+        ) * 1.35;
+        let themeApplied = false;
+        const transition = group.animate(
+          [
+            { transform: `translate(${x}px, ${y}px) scale(1.5)`, opacity: 1 },
+            { transform: `translate(${x}px, ${y}px) scale(${radius})`, opacity: 1, offset: 0.82 },
+            { transform: `translate(${x}px, ${y}px) scale(${radius})`, opacity: 0 }
+          ],
+          { duration: 1100, easing: "cubic-bezier(.16, 1, .3, 1)", fill: "forwards" }
+        );
+        const applyAtCoverage = window.setTimeout(() => {
+          applyTheme(theme);
+          themeApplied = true;
+        }, 900);
+        transition.onfinish = () => {
+          window.clearTimeout(applyAtCoverage);
+          if (!themeApplied) applyTheme(theme);
+          svg.remove();
+          toggle.disabled = false;
+        };
+      }
+
+      syncToggle();
+      toggle.addEventListener("click", () => {
+        const theme = root.dataset.theme === "dark" ? "light" : "dark";
+        spillFrom(toggle, theme);
+      });
+    })();
+  </script>
   <script>
     const select = document.getElementById("session-select");
     const content = document.getElementById("content");
@@ -603,7 +792,7 @@ HTML_PAGE = r"""<!doctype html>
       const rows=el("div","summary-list");
       [["Human server members",eligibleCount??"Unavailable"],["Started",new Date(session.started_at).toLocaleString()]].forEach(([label,value])=>{const row=el("div","summary-row");row.append(el("span","",label),el("strong","",safe(value)));rows.append(row);});
       side.append(rows,el("div","note","Attendance includes human members regardless of server permissions. Bot accounts are excluded."));
-      if(complete){const link=document.createElement("a");link.href="/api/sessions/"+encodeURIComponent(session.session_id)+"/export.xlsx";link.textContent="Download Excel";link.style.cssText="display:block;margin:0 20px 20px;text-align:center;padding:11px;border-radius:9px;background:#26365b;color:#dce5ff;text-decoration:none;font-size:13px;font-weight:650";side.append(link);}
+      if(complete){const link=document.createElement("a");link.className="export-link";link.href="/api/sessions/"+encodeURIComponent(session.session_id)+"/export.xlsx";link.textContent="Download Excel";link.style.display="block";link.style.margin="0 20px 20px";link.style.textAlign="center";side.append(link);}
       layout.append(roster,side);content.replaceChildren(grid,layout);
     }
     function renderUsers(users){
@@ -919,11 +1108,21 @@ document.getElementById("copy").addEventListener("click",async()=>{await navigat
 </script></main></body></html>"""
 
 FACULTY_PAGE = r"""<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    try {
+      const savedTheme = localStorage.getItem("quizcord-dashboard-theme");
+      if (savedTheme === "dark" || savedTheme === "light") {
+        document.documentElement.dataset.theme = savedTheme;
+      }
+    } catch (error) {
+      console.warn("Could not restore the dashboard theme preference.", error);
+    }
+  </script>
   <title>Faculty · Quizcord Analytics</title>
   <style>
     :root {
@@ -945,9 +1144,28 @@ FACULTY_PAGE = r"""<!doctype html>
       --radius-lg: 18px;
       --radius-md: 12px;
       --radius-sm: 10px;
+      color-scheme: light;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
       color: var(--text);
       background: var(--bg);
+    }
+    :root[data-theme="dark"] {
+      --bg: #17191c;
+      --bg-elevated: #202328;
+      --panel: #22262b;
+      --panel-strong: #292e34;
+      --line: #343a42;
+      --line-strong: #48515c;
+      --text: #edf0f2;
+      --text-soft: #c1c7ce;
+      --text-muted: #9aa3ad;
+      --accent: #e4e9ef;
+      --accent-soft: #303944;
+      --accent-strong: #aebdce;
+      --danger: #e0a0a0;
+      --warning: #d2b27e;
+      --shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
+      color-scheme: dark;
     }
     * { box-sizing: border-box; }
     body {
@@ -991,6 +1209,43 @@ FACULTY_PAGE = r"""<!doctype html>
       text-decoration: none;
     }
     .account a:hover { color: var(--text); }
+    .theme-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      padding: 8px 11px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-sm);
+      background: var(--panel);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .theme-toggle:hover { background: var(--panel-strong); }
+    .theme-toggle:focus-visible {
+      outline: 3px solid var(--accent-strong);
+      outline-offset: 2px;
+    }
+    .theme-toggle-mark {
+      width: 14px;
+      height: 14px;
+      display: inline-block;
+      border: 2px solid currentColor;
+      border-radius: 50%;
+      position: relative;
+      flex: none;
+    }
+    .theme-toggle-mark::after {
+      content: "";
+      position: absolute;
+      width: 7px;
+      height: 7px;
+      right: -4px;
+      top: -3px;
+      border-radius: 50%;
+      background: var(--panel);
+    }
     .account select {
       max-width: 220px;
       padding: 8px 10px;
@@ -1033,6 +1288,8 @@ FACULTY_PAGE = r"""<!doctype html>
       border-bottom: 1px solid var(--line);
       background: rgba(250, 249, 247, 0.6);
     }
+    :root[data-theme="dark"] .top { background: rgba(34, 38, 43, 0.96); }
+    :root[data-theme="dark"] .panel-head { background: rgba(41, 46, 52, 0.65); }
     .panel h2 { font-size: 16px; margin: 0; }
     .panel-sub {
       font-size: 12px;
@@ -1073,10 +1330,10 @@ FACULTY_PAGE = r"""<!doctype html>
       font-size: 12px;
       font-weight: 700;
     }
-    .button:hover { background: #edf2fa; }
+    .button:hover { background: var(--bg-elevated); }
     .button.remove {
-      background: #f7f0f0;
-      border-color: #dac3c3;
+      background: var(--bg-elevated);
+      border-color: var(--line-strong);
       color: var(--danger);
     }
     .button:disabled { opacity: 0.55; cursor: wait; }
@@ -1112,9 +1369,21 @@ FACULTY_PAGE = r"""<!doctype html>
       line-height: 1.4;
       max-width: 460px;
     }
+    .theme-liquid {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      pointer-events: none;
+    }
+    .theme-liquid path { fill: var(--bg); }
+    .theme-liquid-shape { transform-box: view-box; transform-origin: 0 0; }
     @media(max-width:600px){
       .top{ padding:0 16px; }
       .account{ gap:8px; }
+      .theme-toggle-label{ display:none; }
       main{ margin:24px auto; padding:0 16px; }
       .search-tools{ flex-direction:column; }
       th, td{ padding:12px; }
@@ -1122,7 +1391,7 @@ FACULTY_PAGE = r"""<!doctype html>
   </style>
 </head>
 <body>
-  <header class="top"><div class="brand">Quizcord <span>Faculty</span></div><div class="account"><select id="guild-select" aria-label="Select server" hidden></select><span id="account-name"></span><a href="/auth/logout">Sign out</a></div></header>
+  <header class="top"><div class="brand">Quizcord <span>Faculty</span></div><div class="account"><select id="guild-select" aria-label="Select server" hidden></select><span id="account-name"></span><button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false"><span class="theme-toggle-mark" aria-hidden="true"></span><span class="theme-toggle-label">Dark mode</span></button><a href="/auth/logout">Sign out</a></div></header>
   <main>
     <div class="eyebrow">Student mentoring</div><h1>Monitor your students</h1>
     <p class="intro">Add students by USN to follow their Quizcord attendance and performance.</p>
@@ -1132,6 +1401,111 @@ FACULTY_PAGE = r"""<!doctype html>
       <div id="candidates"><div class="empty">Enter a USN to find students.</div></div>
     </section>
   </main>
+  <script>
+    (() => {
+      const toggle = document.getElementById("theme-toggle");
+      const label = toggle.querySelector(".theme-toggle-label");
+      const root = document.documentElement;
+      const blobPath = "M 0 -1 C .22 -1.04 .20 -.78 .43 -.81 C .72 -.89 .63 -.56 .88 -.46 C 1.12 -.35 .81 -.15 1 .08 C 1.16 .32 .78 .34 .84 .60 C .89 .90 .54 .74 .36 .91 C .12 1.09 -.02 .77 -.27 .93 C -.52 1.08 -.42 .71 -.66 .67 C -.94 .63 -.65 .40 -.91 .19 C -1.13 -.02 -.73 -.10 -.86 -.37 C -.99 -.67 -.59 -.54 -.50 -.79 C -.34 -1.05 -.16 -.77 0 -1 Z";
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+      function syncToggle() {
+        const isDark = root.dataset.theme === "dark";
+        label.textContent = isDark ? "Light mode" : "Dark mode";
+        toggle.setAttribute("aria-label", isDark ? "Switch to light mode" : "Switch to dark mode");
+        toggle.setAttribute("aria-pressed", String(isDark));
+      }
+
+      function applyTheme(theme) {
+        root.dataset.theme = theme;
+        syncToggle();
+        try {
+          localStorage.setItem("quizcord-dashboard-theme", theme);
+        } catch (error) {
+          console.warn("Could not save the dashboard theme preference.", error);
+        }
+      }
+
+      function spillFrom(button, theme) {
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        const bounds = button.getBoundingClientRect();
+        const x = bounds.left + bounds.width / 2;
+        const y = bounds.top + bounds.height / 2;
+        const previousTheme = root.dataset.theme;
+        root.dataset.theme = theme;
+        const inkColor = getComputedStyle(root).getPropertyValue("--bg").trim();
+        root.dataset.theme = previousTheme;
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("class", "theme-liquid");
+        svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+        svg.setAttribute("aria-hidden", "true");
+
+        const shape = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        shape.setAttribute("d", blobPath);
+        shape.style.fill = inkColor;
+        const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        group.setAttribute("class", "theme-liquid-shape");
+        group.append(shape);
+        svg.append(group);
+        document.body.append(svg);
+        toggle.disabled = true;
+
+        if (reducedMotion.matches || !group.animate || !svg.animate) {
+          shape.setAttribute("d", `M0 0H${width}V${height}H0Z`);
+          applyTheme(theme);
+          const fade = svg.animate?.(
+            [{ opacity: 0.96 }, { opacity: 0 }],
+            { duration: reducedMotion.matches ? 240 : 320, easing: "ease-out" }
+          );
+          if (fade) {
+            fade.onfinish = () => {
+              svg.remove();
+              toggle.disabled = false;
+            };
+          } else {
+            svg.style.transition = "opacity 240ms ease-out";
+            window.requestAnimationFrame(() => { svg.style.opacity = "0"; });
+            window.setTimeout(() => {
+              svg.remove();
+              toggle.disabled = false;
+            }, 260);
+          }
+          return;
+        }
+
+        const radius = Math.hypot(
+          Math.max(x, width - x),
+          Math.max(y, height - y)
+        ) * 1.35;
+        let themeApplied = false;
+        const transition = group.animate(
+          [
+            { transform: `translate(${x}px, ${y}px) scale(1.5)`, opacity: 1 },
+            { transform: `translate(${x}px, ${y}px) scale(${radius})`, opacity: 1, offset: 0.82 },
+            { transform: `translate(${x}px, ${y}px) scale(${radius})`, opacity: 0 }
+          ],
+          { duration: 1100, easing: "cubic-bezier(.16, 1, .3, 1)", fill: "forwards" }
+        );
+        const applyAtCoverage = window.setTimeout(() => {
+          applyTheme(theme);
+          themeApplied = true;
+        }, 900);
+        transition.onfinish = () => {
+          window.clearTimeout(applyAtCoverage);
+          if (!themeApplied) applyTheme(theme);
+          svg.remove();
+          toggle.disabled = false;
+        };
+      }
+
+      syncToggle();
+      toggle.addEventListener("click", () => {
+        const theme = root.dataset.theme === "dark" ? "light" : "dark";
+        spillFrom(toggle, theme);
+      });
+    })();
+  </script>
   <script>
     const el=(tag,className,text)=>{const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node;};
     const assigned=document.getElementById("assigned"),candidates=document.getElementById("candidates"),search=document.getElementById("student-search");
