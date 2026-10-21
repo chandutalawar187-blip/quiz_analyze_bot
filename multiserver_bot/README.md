@@ -36,10 +36,39 @@
 │       ├── bot.py
 │       ├── config.py
 │       ├── database.py
+│       ├── static/
+│       │   ├── admin-dashboard.css
+│       │   ├── admin-dashboard.js
+│       │   ├── dashboard-theme.css
+│       │   ├── dashboard-theme.js
+│       │   ├── faculty-dashboard.css
+│       │   ├── faculty-dashboard.js
+│       │   └── icons/
+│       │       ├── *.svg (selected Tabler Icons)
+│       │       └── LICENSE
+│       ├── templates/
+│       │   ├── admin_dashboard.html
+│       │   ├── admin_login.html
+│       │   ├── faculty_dashboard.html
+│       │   ├── faculty_login.html
+│       │   ├── faculty_password.html
+│       │   ├── faculty_password_admin.html
+│       │   ├── privacy_policy.html
+│       │   └── terms_of_service.html
+│       ├── telemetry.py
 │       ├── quizcord.py
-│       └── views.py
+│       ├── views.py
+│       └── web.py
 └── tests/
 ```
+
+Dashboard markup lives in `templates/`; browser assets live in `static/`.
+Shared theme tokens and the theme toggle are maintained separately from each
+dashboard's page-specific styles and behavior. `web.py` contains the FastAPI
+routes, authentication, and data orchestration.
+Dashboard illustrations use locally served outline SVGs from the
+[Tabler Icons](https://github.com/tabler/tabler-icons) public archive; their
+MIT license is included with the assets.
 
 The existing `fetch_users.py` remains as a small compatibility launcher.
 

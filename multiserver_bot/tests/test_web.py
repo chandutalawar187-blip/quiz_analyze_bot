@@ -604,6 +604,55 @@ class DashboardWebTests(unittest.TestCase):
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertEqual(response.headers["x-frame-options"], "DENY")
 
+    def test_dashboard_static_assets_are_served(self) -> None:
+        for path, content_type, expected in (
+            (
+                "/static/dashboard-theme.css",
+                "text/css",
+                "--bg: #e7e9ed",
+            ),
+            (
+                "/static/dashboard-theme.js",
+                "javascript",
+                "function blobPathAt",
+            ),
+            (
+                "/static/admin-dashboard.css",
+                "text/css",
+                ".dashboard-tabs",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "Participant leaderboard",
+            ),
+            (
+                "/static/faculty-dashboard.css",
+                "text/css",
+                ".candidate-warning",
+            ),
+            (
+                "/static/icons/moon.svg",
+                "image/svg+xml",
+                "<svg",
+            ),
+            (
+                "/static/icons/users.svg",
+                "image/svg+xml",
+                "<svg",
+            ),
+            (
+                "/static/faculty-dashboard.js",
+                "javascript",
+                "loadAssigned",
+            ),
+        ):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(content_type, response.headers["content-type"])
+                self.assertIn(expected, response.text)
+
     def test_health_endpoint_does_not_require_sign_in(self) -> None:
         response = self.client.get("/health")
         head_response = self.client.head("/health")
