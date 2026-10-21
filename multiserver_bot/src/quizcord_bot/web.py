@@ -585,10 +585,6 @@ HTML_PAGE = r"""<!doctype html>
       pointer-events: none;
     }
     .theme-liquid path { fill: var(--bg); }
-    .theme-liquid-shape {
-      transform-box: view-box;
-      transform-origin: 0 0;
-    }
     @media(max-width:860px){ .grid{grid-template-columns:repeat(2,1fr)} .main-grid{grid-template-columns:1fr} }
     @media(max-width:520px){
       .top{ padding:0 16px; }
@@ -619,8 +615,8 @@ HTML_PAGE = r"""<!doctype html>
       const toggle = document.getElementById("theme-toggle");
       const label = toggle.querySelector(".theme-toggle-label");
       const root = document.documentElement;
-      const blobPath = "M 0 -1 C .22 -1.04 .20 -.78 .43 -.81 C .72 -.89 .63 -.56 .88 -.46 C 1.12 -.35 .81 -.15 1 .08 C 1.16 .32 .78 .34 .84 .60 C .89 .90 .54 .74 .36 .91 C .12 1.09 -.02 .77 -.27 .93 C -.52 1.08 -.42 .71 -.66 .67 C -.94 .63 -.65 .40 -.91 .19 C -1.13 -.02 -.73 -.10 -.86 -.37 C -.99 -.67 -.59 -.54 -.50 -.79 C -.34 -1.05 -.16 -.77 0 -1 Z";
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+      const blobFactors = [1, 1.08, 0.96, 1.16, 0.94, 1.10, 0.98, 1.20, 0.93, 1.08, 0.97, 1.13];
 
       function syncToggle() {
         const isDark = root.dataset.theme === "dark";
@@ -639,12 +635,49 @@ HTML_PAGE = r"""<!doctype html>
         }
       }
 
+      function blobPathAt(x, y, radius) {
+        const points = blobFactors.map((factor, index) => {
+          const angle = (Math.PI * 2 * index) / blobFactors.length;
+          const distance = radius * factor;
+          return {
+            x: x + Math.cos(angle) * distance,
+            y: y + Math.sin(angle) * distance
+          };
+        });
+        const length = points.length;
+        let path = `M ${points[0].x} ${points[0].y}`;
+        for (let index = 0; index < length; index += 1) {
+          const previous = points[(index + length - 1) % length];
+          const start = points[index];
+          const end = points[(index + 1) % length];
+          const next = points[(index + 2) % length];
+          const control1 = {
+            x: start.x + (end.x - previous.x) / 6,
+            y: start.y + (end.y - previous.y) / 6
+          };
+          const control2 = {
+            x: end.x - (next.x - start.x) / 6,
+            y: end.y - (next.y - start.y) / 6
+          };
+          path += ` C ${control1.x} ${control1.y}, ${control2.x} ${control2.y}, ${end.x} ${end.y}`;
+        }
+        return `${path} Z`;
+      }
+
       function spillFrom(button, theme) {
         const width = window.innerWidth;
         const height = window.innerHeight;
         const bounds = button.getBoundingClientRect();
         const x = bounds.left + bounds.width / 2;
         const y = bounds.top + bounds.height / 2;
+        const startRadius = Math.max(bounds.width, bounds.height) * 0.56;
+        const maxCornerDistance = Math.max(
+          Math.hypot(x, y),
+          Math.hypot(width - x, y),
+          Math.hypot(x, height - y),
+          Math.hypot(width - x, height - y)
+        );
+        const endRadius = maxCornerDistance / Math.min(...blobFactors) * 1.08;
         const previousTheme = root.dataset.theme;
         root.dataset.theme = theme;
         const inkColor = getComputedStyle(root).getPropertyValue("--bg").trim();
@@ -655,61 +688,73 @@ HTML_PAGE = r"""<!doctype html>
         svg.setAttribute("aria-hidden", "true");
 
         const shape = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        shape.setAttribute("d", blobPath);
+        shape.setAttribute("d", blobPathAt(x, y, startRadius));
         shape.style.fill = inkColor;
-        const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
-        group.setAttribute("class", "theme-liquid-shape");
-        group.append(shape);
-        svg.append(group);
+        svg.append(shape);
         document.body.append(svg);
         toggle.disabled = true;
 
-        if (reducedMotion.matches || !group.animate || !svg.animate) {
+        if (reducedMotion.matches || !window.requestAnimationFrame) {
           shape.setAttribute("d", `M0 0H${width}V${height}H0Z`);
-          applyTheme(theme);
-          const fade = svg.animate?.(
-            [{ opacity: 0.96 }, { opacity: 0 }],
-            { duration: reducedMotion.matches ? 240 : 320, easing: "ease-out" }
-          );
-          if (fade) {
-            fade.onfinish = () => {
-              svg.remove();
-              toggle.disabled = false;
+          svg.style.opacity = "0";
+          if (svg.animate) {
+            const fadeIn = svg.animate(
+              [{ opacity: 0 }, { opacity: 1 }],
+              { duration: 180, easing: "ease-out", fill: "forwards" }
+            );
+            fadeIn.onfinish = () => {
+              applyTheme(theme);
+              const fadeOut = svg.animate(
+                [{ opacity: 1 }, { opacity: 0 }],
+                { duration: 180, easing: "ease-in", fill: "forwards" }
+              );
+              fadeOut.onfinish = () => {
+                svg.remove();
+                toggle.disabled = false;
+              };
             };
           } else {
-            svg.style.transition = "opacity 240ms ease-out";
-            window.requestAnimationFrame(() => { svg.style.opacity = "0"; });
+            svg.style.transition = "opacity 180ms ease";
             window.setTimeout(() => {
-              svg.remove();
-              toggle.disabled = false;
-            }, 260);
+              svg.style.opacity = "1";
+              window.setTimeout(() => {
+                applyTheme(theme);
+                svg.style.opacity = "0";
+                window.setTimeout(() => {
+                  svg.remove();
+                  toggle.disabled = false;
+                }, 200);
+              }, 200);
+            }, 0);
           }
           return;
         }
 
-        const radius = Math.hypot(
-          Math.max(x, width - x),
-          Math.max(y, height - y)
-        ) * 1.35;
-        let themeApplied = false;
-        const transition = group.animate(
-          [
-            { transform: `translate(${x}px, ${y}px) scale(1.5)`, opacity: 1 },
-            { transform: `translate(${x}px, ${y}px) scale(${radius})`, opacity: 1, offset: 0.82 },
-            { transform: `translate(${x}px, ${y}px) scale(${radius})`, opacity: 0 }
-          ],
-          { duration: 1100, easing: "cubic-bezier(.16, 1, .3, 1)", fill: "forwards" }
-        );
-        const applyAtCoverage = window.setTimeout(() => {
+        if (!window.requestAnimationFrame) {
           applyTheme(theme);
-          themeApplied = true;
-        }, 900);
-        transition.onfinish = () => {
-          window.clearTimeout(applyAtCoverage);
-          if (!themeApplied) applyTheme(theme);
           svg.remove();
           toggle.disabled = false;
-        };
+          return;
+        }
+
+        const startedAt = performance.now();
+        const duration = 1250;
+        function frame(now) {
+          const progress = Math.min(1, (now - startedAt) / duration);
+          const eased = 1 - Math.pow(1 - progress, 3.2);
+          const radius = startRadius + (endRadius - startRadius) * eased;
+          shape.setAttribute("d", blobPathAt(x, y, radius));
+          if (progress < 1) {
+            window.requestAnimationFrame(frame);
+            return;
+          }
+          applyTheme(theme);
+          window.requestAnimationFrame(() => {
+            svg.remove();
+            toggle.disabled = false;
+          });
+        }
+        window.requestAnimationFrame(frame);
       }
 
       syncToggle();
@@ -1379,7 +1424,6 @@ FACULTY_PAGE = r"""<!doctype html>
       pointer-events: none;
     }
     .theme-liquid path { fill: var(--bg); }
-    .theme-liquid-shape { transform-box: view-box; transform-origin: 0 0; }
     @media(max-width:600px){
       .top{ padding:0 16px; }
       .account{ gap:8px; }
@@ -1406,8 +1450,8 @@ FACULTY_PAGE = r"""<!doctype html>
       const toggle = document.getElementById("theme-toggle");
       const label = toggle.querySelector(".theme-toggle-label");
       const root = document.documentElement;
-      const blobPath = "M 0 -1 C .22 -1.04 .20 -.78 .43 -.81 C .72 -.89 .63 -.56 .88 -.46 C 1.12 -.35 .81 -.15 1 .08 C 1.16 .32 .78 .34 .84 .60 C .89 .90 .54 .74 .36 .91 C .12 1.09 -.02 .77 -.27 .93 C -.52 1.08 -.42 .71 -.66 .67 C -.94 .63 -.65 .40 -.91 .19 C -1.13 -.02 -.73 -.10 -.86 -.37 C -.99 -.67 -.59 -.54 -.50 -.79 C -.34 -1.05 -.16 -.77 0 -1 Z";
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+      const blobFactors = [1, 1.08, 0.96, 1.16, 0.94, 1.10, 0.98, 1.20, 0.93, 1.08, 0.97, 1.13];
 
       function syncToggle() {
         const isDark = root.dataset.theme === "dark";
@@ -1426,12 +1470,49 @@ FACULTY_PAGE = r"""<!doctype html>
         }
       }
 
+      function blobPathAt(x, y, radius) {
+        const points = blobFactors.map((factor, index) => {
+          const angle = (Math.PI * 2 * index) / blobFactors.length;
+          const distance = radius * factor;
+          return {
+            x: x + Math.cos(angle) * distance,
+            y: y + Math.sin(angle) * distance
+          };
+        });
+        const length = points.length;
+        let path = `M ${points[0].x} ${points[0].y}`;
+        for (let index = 0; index < length; index += 1) {
+          const previous = points[(index + length - 1) % length];
+          const start = points[index];
+          const end = points[(index + 1) % length];
+          const next = points[(index + 2) % length];
+          const control1 = {
+            x: start.x + (end.x - previous.x) / 6,
+            y: start.y + (end.y - previous.y) / 6
+          };
+          const control2 = {
+            x: end.x - (next.x - start.x) / 6,
+            y: end.y - (next.y - start.y) / 6
+          };
+          path += ` C ${control1.x} ${control1.y}, ${control2.x} ${control2.y}, ${end.x} ${end.y}`;
+        }
+        return `${path} Z`;
+      }
+
       function spillFrom(button, theme) {
         const width = window.innerWidth;
         const height = window.innerHeight;
         const bounds = button.getBoundingClientRect();
         const x = bounds.left + bounds.width / 2;
         const y = bounds.top + bounds.height / 2;
+        const startRadius = Math.max(bounds.width, bounds.height) * 0.56;
+        const maxCornerDistance = Math.max(
+          Math.hypot(x, y),
+          Math.hypot(width - x, y),
+          Math.hypot(x, height - y),
+          Math.hypot(width - x, height - y)
+        );
+        const endRadius = maxCornerDistance / Math.min(...blobFactors) * 1.08;
         const previousTheme = root.dataset.theme;
         root.dataset.theme = theme;
         const inkColor = getComputedStyle(root).getPropertyValue("--bg").trim();
@@ -1442,61 +1523,73 @@ FACULTY_PAGE = r"""<!doctype html>
         svg.setAttribute("aria-hidden", "true");
 
         const shape = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        shape.setAttribute("d", blobPath);
+        shape.setAttribute("d", blobPathAt(x, y, startRadius));
         shape.style.fill = inkColor;
-        const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
-        group.setAttribute("class", "theme-liquid-shape");
-        group.append(shape);
-        svg.append(group);
+        svg.append(shape);
         document.body.append(svg);
         toggle.disabled = true;
 
-        if (reducedMotion.matches || !group.animate || !svg.animate) {
+        if (reducedMotion.matches || !window.requestAnimationFrame) {
           shape.setAttribute("d", `M0 0H${width}V${height}H0Z`);
-          applyTheme(theme);
-          const fade = svg.animate?.(
-            [{ opacity: 0.96 }, { opacity: 0 }],
-            { duration: reducedMotion.matches ? 240 : 320, easing: "ease-out" }
-          );
-          if (fade) {
-            fade.onfinish = () => {
-              svg.remove();
-              toggle.disabled = false;
+          svg.style.opacity = "0";
+          if (svg.animate) {
+            const fadeIn = svg.animate(
+              [{ opacity: 0 }, { opacity: 1 }],
+              { duration: 180, easing: "ease-out", fill: "forwards" }
+            );
+            fadeIn.onfinish = () => {
+              applyTheme(theme);
+              const fadeOut = svg.animate(
+                [{ opacity: 1 }, { opacity: 0 }],
+                { duration: 180, easing: "ease-in", fill: "forwards" }
+              );
+              fadeOut.onfinish = () => {
+                svg.remove();
+                toggle.disabled = false;
+              };
             };
           } else {
-            svg.style.transition = "opacity 240ms ease-out";
-            window.requestAnimationFrame(() => { svg.style.opacity = "0"; });
+            svg.style.transition = "opacity 180ms ease";
             window.setTimeout(() => {
-              svg.remove();
-              toggle.disabled = false;
-            }, 260);
+              svg.style.opacity = "1";
+              window.setTimeout(() => {
+                applyTheme(theme);
+                svg.style.opacity = "0";
+                window.setTimeout(() => {
+                  svg.remove();
+                  toggle.disabled = false;
+                }, 200);
+              }, 200);
+            }, 0);
           }
           return;
         }
 
-        const radius = Math.hypot(
-          Math.max(x, width - x),
-          Math.max(y, height - y)
-        ) * 1.35;
-        let themeApplied = false;
-        const transition = group.animate(
-          [
-            { transform: `translate(${x}px, ${y}px) scale(1.5)`, opacity: 1 },
-            { transform: `translate(${x}px, ${y}px) scale(${radius})`, opacity: 1, offset: 0.82 },
-            { transform: `translate(${x}px, ${y}px) scale(${radius})`, opacity: 0 }
-          ],
-          { duration: 1100, easing: "cubic-bezier(.16, 1, .3, 1)", fill: "forwards" }
-        );
-        const applyAtCoverage = window.setTimeout(() => {
+        if (!window.requestAnimationFrame) {
           applyTheme(theme);
-          themeApplied = true;
-        }, 900);
-        transition.onfinish = () => {
-          window.clearTimeout(applyAtCoverage);
-          if (!themeApplied) applyTheme(theme);
           svg.remove();
           toggle.disabled = false;
-        };
+          return;
+        }
+
+        const startedAt = performance.now();
+        const duration = 1250;
+        function frame(now) {
+          const progress = Math.min(1, (now - startedAt) / duration);
+          const eased = 1 - Math.pow(1 - progress, 3.2);
+          const radius = startRadius + (endRadius - startRadius) * eased;
+          shape.setAttribute("d", blobPathAt(x, y, radius));
+          if (progress < 1) {
+            window.requestAnimationFrame(frame);
+            return;
+          }
+          applyTheme(theme);
+          window.requestAnimationFrame(() => {
+            svg.remove();
+            toggle.disabled = false;
+          });
+        }
+        window.requestAnimationFrame(frame);
       }
 
       syncToggle();
