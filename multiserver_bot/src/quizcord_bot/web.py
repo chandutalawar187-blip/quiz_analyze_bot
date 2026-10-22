@@ -131,6 +131,7 @@ FACULTY_LOGIN_PAGE = _read_web_template("faculty_login.html")
 FACULTY_PASSWORD_PAGE = _read_web_template("faculty_password.html")
 FACULTY_ADMIN_PAGE = _read_web_template("faculty_password_admin.html")
 FACULTY_PAGE = _read_web_template("faculty_dashboard.html")
+FACULTY_STUDENT_PAGE = _read_web_template("faculty_student.html")
 PRIVACY_POLICY_PAGE = _read_web_template("privacy_policy.html")
 TERMS_OF_SERVICE_PAGE = _read_web_template("terms_of_service.html")
 
@@ -797,9 +798,22 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             raise HTTPException(status_code=404, detail="Student not found.")
         return HTMLResponse(HTML_PAGE)
 
-    @app.get("/faculty/students/{usn}", response_class=HTMLResponse)
-    async def faculty_student_page(usn: str, request: Request) -> HTMLResponse:
-        auth_session = await current_faculty(request)
+    @app.get(
+        "/faculty/students/{usn}",
+        response_class=HTMLResponse,
+        response_model=None,
+    )
+    async def faculty_student_page(
+        usn: str, request: Request
+    ) -> HTMLResponse | RedirectResponse:
+        try:
+            auth_session = await current_faculty(request)
+        except HTTPException as error:
+            if error.status_code == 401:
+                return RedirectResponse("/faculty/login", status_code=302)
+            if error.status_code == 428:
+                return RedirectResponse("/faculty/password", status_code=302)
+            raise
         if not usn.strip() or len(usn) > 100:
             raise HTTPException(status_code=404, detail="Student not found.")
         if usn.casefold() not in {
@@ -809,7 +823,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             )
         }:
             raise HTTPException(status_code=404, detail="Student not found.")
-        return HTMLResponse(HTML_PAGE)
+        return HTMLResponse(FACULTY_STUDENT_PAGE)
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(

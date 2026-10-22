@@ -590,8 +590,20 @@ class DashboardWebTests(unittest.TestCase):
         self.assertEqual(added.status_code, 204)
         students = self.client.get("/api/faculty/students").json()
         self.assertEqual([row["usn"] for row in students], ["4GM22CS001"])
+        student_page = self.client.get("/faculty/students/4GM22CS001")
+        self.assertEqual(student_page.status_code, 200)
+        self.assertIn("Quizcord Faculty", student_page.text)
+        self.assertIn('href="/faculty">Back to students', student_page.text)
+        self.assertIn("/static/faculty-student.js", student_page.text)
+        self.assertNotIn('id="faculty-password-link"', student_page.text)
+        self.assertNotIn("/admin/faculty-passwords", student_page.text)
+        self.assertNotIn('id="dashboard-tabs"', student_page.text)
         self.assertEqual(
             self.client.get("/api/faculty/students/NOTASSIGNED").status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.get("/faculty/students/NOTASSIGNED").status_code,
             404,
         )
         self.assertEqual(self.client.get("/api/sessions").status_code, 403)
@@ -635,6 +647,11 @@ class DashboardWebTests(unittest.TestCase):
                 "/static/faculty-dashboard.css",
                 "text/css",
                 ".candidate-warning",
+            ),
+            (
+                "/static/faculty-student.js",
+                "javascript",
+                "/api/faculty/students/",
             ),
             (
                 "/static/icons/moon.svg",
