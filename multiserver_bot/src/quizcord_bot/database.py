@@ -1325,10 +1325,30 @@ class Database:
             if old_id != quizcord_quiz_id:
                 connection.execute(
                     """
-                    UPDATE quiz_analytics SET quiz_id = ?
+                    INSERT INTO quiz_analytics (
+                        guild_id, usn, quiz_id, accuracy, time_taken, rank,
+                        quiz_date
+                    )
+                    SELECT guild_id, usn, ?, accuracy, time_taken, rank,
+                           quiz_date
+                    FROM quiz_analytics
                     WHERE guild_id = ? AND quiz_id = ?
+                    ON CONFLICT(guild_id, usn, quiz_id) DO UPDATE SET
+                        accuracy = excluded.accuracy,
+                        time_taken = excluded.time_taken,
+                        rank = excluded.rank,
+                        quiz_date = COALESCE(
+                            excluded.quiz_date, quiz_analytics.quiz_date
+                        )
                     """,
                     (quizcord_quiz_id, str(session.guild_id), old_id),
+                )
+                connection.execute(
+                    """
+                    DELETE FROM quiz_analytics
+                    WHERE guild_id = ? AND quiz_id = ?
+                    """,
+                    (str(session.guild_id), old_id),
                 )
             self._persist_session_results(connection, session_id, quizcord_quiz_id)
 

@@ -1099,6 +1099,56 @@ class DatabaseTests(unittest.TestCase):
             ("950 Points", "1"),
         )
 
+    def test_quiz_id_followup_merges_existing_analytics_row(self) -> None:
+        session = self.database.start_quiz_session(
+            67890, 222, 333, "2026-10-17T15:00:00+00:00"
+        )
+        self.database.record_quiz_leaderboard(
+            session.session_id,
+            444,
+            "revision-1",
+            [("1", "Student Nickname", "950")],
+            True,
+        )
+        self.database.save_quiz_results(
+            "quiz-followup",
+            [("2", "Student Nickname", "700")],
+        )
+        with self.database._connect() as connection:
+            connection.execute(
+                """
+                UPDATE quiz_analytics SET quiz_date = ?
+                WHERE guild_id = ? AND usn = ? AND quiz_id = ?
+                """,
+                ("2026-10-17T15:02:00+00:00", "67890", "ABC123", "quiz-followup"),
+            )
+
+        self.database.attach_quizcord_id(session.session_id, "quiz-followup")
+
+        self.assertEqual(
+            self.database.get_quiz_result("ABC123", "quiz-followup"),
+            ("950 Points", "1"),
+        )
+        self.assertEqual(self.database.count_attended_quizzes("ABC123"), 1)
+        with self.database._connect() as connection:
+            self.assertIsNone(
+                connection.execute(
+                    """
+                    SELECT 1 FROM quiz_analytics
+                    WHERE guild_id = ? AND usn = ? AND quiz_id = ?
+                    """,
+                    ("67890", "ABC123", session.session_id),
+                ).fetchone()
+            )
+            quiz_date = connection.execute(
+                """
+                SELECT quiz_date FROM quiz_analytics
+                WHERE guild_id = ? AND usn = ? AND quiz_id = ?
+                """,
+                ("67890", "ABC123", "quiz-followup"),
+            ).fetchone()[0]
+        self.assertEqual(quiz_date, "2026-10-17T15:02:00+00:00")
+
     def test_scorecard_shows_quizcord_attendance(self) -> None:
         self.database.save_quiz_results(
             "quiz-1", [("1", "student_one", "950")]
