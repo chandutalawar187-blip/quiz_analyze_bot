@@ -213,13 +213,21 @@ td, th { border-color: var(--line); }
 @media (prefers-reduced-motion: no-preference) {
   .card, .panel, .button, .theme-toggle { transition: box-shadow 160ms ease, background-color 160ms ease; }
 }
-.theme-liquid {
-  position: fixed;
-  inset: 0;
-  z-index: 9999;
-  width: 100vw;
-  height: 100vh;
-  overflow: hidden;
-  pointer-events: none;
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
 }
-.theme-liquid path { fill: var(--bg); }
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root) {
+    animation: theme-fade-out 180ms ease both;
+  }
+  ::view-transition-new(root) {
+    animation: theme-fade-in 180ms ease both;
+  }
+}
+@keyframes theme-fade-out {
+  to { opacity: 0; }
+}
+@keyframes theme-fade-in {
+  from { opacity: 0; }
+}

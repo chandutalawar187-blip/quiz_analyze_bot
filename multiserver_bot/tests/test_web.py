@@ -609,12 +609,17 @@ class DashboardWebTests(unittest.TestCase):
             (
                 "/static/dashboard-theme.css",
                 "text/css",
-                "--bg: #e7e9ed",
+                "::view-transition-new(root)",
             ),
             (
                 "/static/dashboard-theme.js",
                 "javascript",
-                "function blobPathAt",
+                "function blobClipAt",
+            ),
+            (
+                "/static/dashboard-theme.js",
+                "javascript",
+                "document.startViewTransition",
             ),
             (
                 "/static/admin-dashboard.css",
