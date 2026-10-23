@@ -326,6 +326,12 @@ class DashboardWebTests(unittest.TestCase):
             [guild["id"] for guild in available_guilds.json()],
             ["98765", "67890"],
         )
+        guild_access = {
+            guild["id"]: (guild["role"], guild["is_faculty"])
+            for guild in available_guilds.json()
+        }
+        self.assertEqual(guild_access["67890"], ("admin", True))
+        self.assertEqual(guild_access["98765"], ("admin", False))
         selected = self.client.post(
             "/api/guilds/select", json={"guild_id": "98765"}
         )

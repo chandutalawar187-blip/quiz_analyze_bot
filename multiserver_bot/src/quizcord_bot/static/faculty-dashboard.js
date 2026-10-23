@@ -81,7 +81,7 @@ let assignedUSNs=new Set(),searchTimer;
       const response=await api("/api/guilds");
       if(!response.ok)throw new Error("Could not load your Discord servers.");
       const guilds=await response.json();
-      const facultyGuilds=guilds.filter(guild=>guild.role==="faculty");
+      const facultyGuilds=guilds.filter(guild=>guild.is_faculty);
       if(!facultyGuilds.length)throw new Error("The bot is not installed in a server you can access.");
       selector.replaceChildren();
       facultyGuilds.forEach(guild=>{const option=document.createElement("option");option.value=guild.id;option.textContent=guild.name;selector.append(option);});

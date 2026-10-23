@@ -661,7 +661,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         return RedirectResponse("/", status_code=302)
 
     @app.get("/api/guilds")
-    async def available_guilds(request: Request) -> list[dict[str, str]]:
+    async def available_guilds(
+        request: Request,
+    ) -> list[dict[str, str | bool]]:
         auth_session = await current_authenticated(request)
         installed = dict(database.get_installed_guilds())
         guild_ids = auth_session.admin_guild_ids | auth_session.faculty_guild_ids
@@ -674,6 +676,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                     if guild_id in auth_session.admin_guild_ids
                     else "faculty"
                 ),
+                "is_faculty": guild_id in auth_session.faculty_guild_ids,
             }
             for guild_id, name in sorted(
                 installed.items(), key=lambda item: item[1].casefold()
