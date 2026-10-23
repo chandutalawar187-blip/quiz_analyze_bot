@@ -66,6 +66,7 @@ const el=(tag,className,text)=>{const node=document.createElement(tag);if(classN
         await loadAssigned();await loadCandidates();
       }catch(error){assigned.prepend(el("div","notice error",error.message));button.disabled=false;}
     }
+    function reloadForGuild(guildId){const url=new URL(location.href);url.searchParams.set("guild_id",guildId);url.searchParams.delete("session");location.assign(url);}
     search.addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(loadCandidates,200);});
     async function initializeGuildSelector(){
       const selector=document.getElementById("guild-select");
@@ -81,6 +82,6 @@ const el=(tag,className,text)=>{const node=document.createElement(tag);if(classN
       const selected=await api("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:selector.value})});
       if(!selected.ok)throw new Error("Could not select the Discord server.");
       localStorage.setItem("quizcord-selected-guild",selector.value);
-      selector.addEventListener("change",async()=>{selector.disabled=true;try{const changed=await api("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:selector.value})});if(!changed.ok)throw new Error("Could not select the Discord server.");localStorage.setItem("quizcord-selected-guild",selector.value);location.reload();}catch(error){assigned.replaceChildren(el("div","empty error",error.message));selector.disabled=false;}});
+      selector.addEventListener("change",async()=>{selector.disabled=true;try{const changed=await api("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:selector.value})});if(!changed.ok)throw new Error("Could not select the Discord server.");localStorage.setItem("quizcord-selected-guild",selector.value);reloadForGuild(selector.value);}catch(error){assigned.replaceChildren(el("div","empty error",error.message));selector.disabled=false;}});
     }
     initializeGuildSelector().then(()=>api("/api/me")).then(response=>{if(!response.ok)throw new Error("Sign-in expired.");return response.json();}).then(user=>{document.getElementById("account-name").textContent=user.username;loadAssigned();loadCandidates();}).catch(error=>assigned.replaceChildren(el("div","empty error",error.message)));

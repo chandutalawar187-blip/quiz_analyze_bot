@@ -11,6 +11,7 @@ const select = document.getElementById("session-select");
     const el = (tag, className, text) => { const node=document.createElement(tag); if(className)node.className=className; if(text!==undefined)node.textContent=text; return node; };
     const icon = name => { const node=el("span","icon icon-"+name); node.setAttribute("aria-hidden","true"); return node; };
     const actionContent = (iconName,label) => { const content=el("span","action-content"); content.append(icon(iconName),document.createTextNode(label)); return content; };
+    function reloadForGuild(guildId){const url=new URL(location.href);url.searchParams.set("guild_id",guildId);url.searchParams.delete("session");location.assign(url);}
     async function initializeGuildSelector(){
       const response=await fetch("/api/guilds",{cache:"no-store"});
       if(!response.ok)throw new Error("Could not load your Discord servers.");
@@ -25,7 +26,7 @@ const select = document.getElementById("session-select");
       const selected=await fetch("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:guildSelect.value}),cache:"no-store"});
       if(!selected.ok)throw new Error("Could not select the Discord server.");
       localStorage.setItem("quizcord-selected-guild",guildSelect.value);
-      guildSelect.addEventListener("change",async()=>{guildSelect.disabled=true;try{const changed=await fetch("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:guildSelect.value}),cache:"no-store"});if(!changed.ok)throw new Error("Could not select the Discord server.");localStorage.setItem("quizcord-selected-guild",guildSelect.value);location.reload();}catch(error){content.replaceChildren(el("div","empty error",error.message));guildSelect.disabled=false;}});
+      guildSelect.addEventListener("change",async()=>{guildSelect.disabled=true;try{const changed=await fetch("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:guildSelect.value}),cache:"no-store"});if(!changed.ok)throw new Error("Could not select the Discord server.");localStorage.setItem("quizcord-selected-guild",guildSelect.value);reloadForGuild(guildSelect.value);}catch(error){content.replaceChildren(el("div","empty error",error.message));guildSelect.disabled=false;}});
     }
     let activeSession = initialSession;
     let activeView = "sessions";
