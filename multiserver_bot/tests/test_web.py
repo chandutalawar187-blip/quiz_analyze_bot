@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -284,14 +285,32 @@ class DashboardWebTests(unittest.TestCase):
         client_context = Mock()
         client_context.__aenter__ = AsyncMock(return_value=discord_client)
         client_context.__aexit__ = AsyncMock(return_value=False)
-        with patch(
-            "quizcord_bot.web.httpx.AsyncClient", return_value=client_context
+        with (
+            patch(
+                "quizcord_bot.web.httpx.AsyncClient",
+                return_value=client_context,
+            ),
+            patch(
+                "quizcord_bot.telemetry.sentry_sdk.start_span",
+                return_value=nullcontext(),
+            ) as start_span,
         ):
             callback = self.client.get(
                 f"/auth/callback?code=admin-login&state={state}",
                 follow_redirects=False,
             )
 
+        span_names = {
+            call.kwargs["name"] for call in start_span.call_args_list
+        }
+        self.assertTrue(
+            {
+                "discord.oauth.token_exchange",
+                "discord.oauth.current_user",
+                "discord.oauth.list_guilds",
+                "discord.guild.member_lookup",
+            }.issubset(span_names)
+        )
         self.assertEqual(callback.status_code, 302)
         self.assertEqual(callback.headers["location"], "/faculty/password")
         self.assertEqual(self.client.get("/faculty/password").status_code, 200)

@@ -1,7 +1,8 @@
 """Optional Sentry error reporting and performance tracing."""
 
 import logging
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, Literal, TypeVar
 
 import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
@@ -18,6 +19,25 @@ _SAFE_LOG_ATTRIBUTES = {
     "sentry.origin",
 }
 _SAFE_METRIC_ATTRIBUTES = {"http.method", "http.route", "http.status_code"}
+_SAFE_EXTERNAL_SPAN_NAMES = {
+    "discord.oauth.token_exchange",
+    "discord.oauth.current_user",
+    "discord.oauth.list_guilds",
+    "discord.oauth.refresh_token",
+    "discord.oauth.revoke_token",
+    "discord.guild.member_lookup",
+    "cloudflare.turnstile.verify",
+}
+ExternalSpanName = Literal[
+    "discord.oauth.token_exchange",
+    "discord.oauth.current_user",
+    "discord.oauth.list_guilds",
+    "discord.oauth.refresh_token",
+    "discord.oauth.revoke_token",
+    "discord.guild.member_lookup",
+    "cloudflare.turnstile.verify",
+]
+_Result = TypeVar("_Result")
 
 
 def initialize_sentry(settings: Settings) -> bool:
@@ -65,6 +85,16 @@ def record_http_request(
     )
 
 
+async def trace_external_request(
+    name: ExternalSpanName,
+    request: Callable[..., Awaitable[_Result]],
+    *args: Any,
+    **kwargs: Any,
+) -> _Result:
+    with sentry_sdk.start_span(op="external.api", name=name):
+        return await request(*args, **kwargs)
+
+
 def _scrub_error_event(
     event: dict[str, Any], _hint: dict[str, Any]
 ) -> dict[str, Any]:
@@ -110,5 +140,11 @@ def _scrub_transaction(
         span.pop("data", None)
         operation = span.get("op")
         if isinstance(operation, str):
-            span["description"] = operation
+            description = span.get("description")
+            if not (
+                operation == "external.api"
+                and isinstance(description, str)
+                and description in _SAFE_EXTERNAL_SPAN_NAMES
+            ):
+                span["description"] = operation
     return event

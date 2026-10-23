@@ -27,7 +27,7 @@ from quizcord_bot.database import (
     matches_usn_format,
 )
 from quizcord_bot.exports import quiz_session_workbook, student_analytics_workbook
-from quizcord_bot.telemetry import record_http_request
+from quizcord_bot.telemetry import record_http_request, trace_external_request
 
 
 LOGGER = logging.getLogger("quizcord_analytics.dashboard")
@@ -521,7 +521,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         oauth_stage = "authorization-code exchange"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                token_response = await client.post(
+                token_response = await trace_external_request(
+                    "discord.oauth.token_exchange",
+                    client.post,
                     f"{DISCORD_API}/oauth2/token",
                     data={
                         "client_id": client_id,
@@ -536,14 +538,18 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 token = token_response.json()
                 access_token = token["access_token"]
                 oauth_stage = "Discord identity lookup"
-                user_response = await client.get(
+                user_response = await trace_external_request(
+                    "discord.oauth.current_user",
+                    client.get,
                     f"{DISCORD_API}/users/@me",
                     headers={"Authorization": f"Bearer {access_token}"},
                 )
                 user_response.raise_for_status()
                 user = user_response.json()
                 oauth_stage = "Discord server-membership lookup"
-                guilds_response = await client.get(
+                guilds_response = await trace_external_request(
+                    "discord.oauth.list_guilds",
+                    client.get,
                     f"{DISCORD_API}/users/@me/guilds",
                     headers={"Authorization": f"Bearer {access_token}"},
                 )
@@ -1238,7 +1244,9 @@ async def _verify_current_guild_access(
             raise HTTPException(status_code=401, detail="Please sign in again.")
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.post(
+                response = await trace_external_request(
+                    "discord.oauth.refresh_token",
+                    client.post,
                     f"{DISCORD_API}/oauth2/token",
                     data={
                         "client_id": settings.discord_oauth_client_id,
@@ -1265,7 +1273,9 @@ async def _verify_current_guild_access(
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(
+            response = await trace_external_request(
+                "discord.oauth.list_guilds",
+                client.get,
                 f"{DISCORD_API}/users/@me/guilds",
                 headers={"Authorization": f"Bearer {auth_session.access_token}"},
             )
@@ -1342,7 +1352,9 @@ async def _verify_turnstile_token(settings: Settings, token: str) -> bool:
         )
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.post(
+            response = await trace_external_request(
+                "cloudflare.turnstile.verify",
+                client.post,
                 "https://challenges.cloudflare.com/turnstile/v0/siteverify",
                 data={
                     "secret": settings.turnstile_secret_key,
@@ -1371,7 +1383,9 @@ async def _get_guild_member(
     user_id: int,
     guild_id: int,
 ) -> dict[str, Any] | None:
-    response = await client.get(
+    response = await trace_external_request(
+        "discord.guild.member_lookup",
+        client.get,
         f"{DISCORD_API}/guilds/{guild_id}/members/{user_id}",
         headers={"Authorization": f"Bot {settings.token}"},
     )
@@ -1430,7 +1444,9 @@ async def _revoke_oauth_token(
 ) -> None:
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.post(
+            response = await trace_external_request(
+                "discord.oauth.revoke_token",
+                client.post,
                 f"{DISCORD_API}/oauth2/token/revoke",
                 data={
                     "client_id": client_id,
