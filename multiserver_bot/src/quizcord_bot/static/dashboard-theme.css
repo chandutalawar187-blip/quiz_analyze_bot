@@ -139,10 +139,14 @@ select:focus-visible,
   outline-offset: 2px;
 }
 .directory-tools,
-.panel-head,
-th {
+.panel-head {
   color: var(--text-soft);
   background: transparent;
+  border-color: var(--line);
+}
+th {
+  color: var(--text-soft);
+  background: var(--panel-strong);
   border-color: var(--line);
 }
 table tr:hover td { background: var(--panel-strong); }

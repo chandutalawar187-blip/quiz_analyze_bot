@@ -99,6 +99,7 @@ th {
   position: sticky;
   top: 0;
   background: var(--panel-strong);
+  z-index: 1;
 }
 .usn { font-weight: 700; letter-spacing: 0.02em; }
 .student-link { color: var(--text); text-decoration: none; }

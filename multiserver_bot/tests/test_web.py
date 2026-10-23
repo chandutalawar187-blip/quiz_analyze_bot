@@ -132,10 +132,7 @@ class DashboardWebTests(unittest.TestCase):
         self.assertEqual(other_client.status_code, 302)
 
     def test_oauth_login_preserves_existing_dashboard_session(self) -> None:
-        signer = TimestampSigner(
-            self.settings.dashboard_session_secret,
-            salt="starlette.sessions",
-        )
+        signer = TimestampSigner(self.settings.dashboard_session_secret)
         original_session = {
             "dashboard_session": "existing-dashboard-session",
             "selected_guild_id": "67890",

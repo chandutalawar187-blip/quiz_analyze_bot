@@ -81,6 +81,7 @@ const select = document.getElementById("session-select");
       layout.append(roster,side);content.replaceChildren(grid,layout);
     }
     function renderUsers(users){
+      const scrollTop=content.querySelector(".table-wrap")?.scrollTop??0;
       const heading=el("section","heading"),title=el("div","");
       title.append(el("div","eyebrow","Server directory"),el("h1","","All users"));
       heading.append(title,el("div","panel-sub",users.length+" human members"));
@@ -107,6 +108,7 @@ const select = document.getElementById("session-select");
       search.addEventListener("blur",()=>{if(pendingDirectoryUsers!==null&&activeView==="users"){const updatedUsers=pendingDirectoryUsers;pendingDirectoryUsers=null;renderUsers(updatedUsers);}});
       filterRows();
       content.replaceChildren(heading,panel);
+      content.querySelector(".table-wrap").scrollTop=scrollTop;
     }
     function renderStudent(student){
       document.getElementById("back-link").hidden=false;

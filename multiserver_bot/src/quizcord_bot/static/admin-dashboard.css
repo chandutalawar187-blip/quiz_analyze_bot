@@ -206,6 +206,7 @@ th {
   position: sticky;
   top: 0;
   background: var(--panel-strong);
+  z-index: 1;
 }
 td.points {
   text-align: right;
