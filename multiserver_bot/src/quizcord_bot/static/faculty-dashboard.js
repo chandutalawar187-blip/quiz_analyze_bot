@@ -3,6 +3,12 @@ const el=(tag,className,text)=>{const node=document.createElement(tag);if(classN
     const actionContent=(iconName,label)=>{const content=el("span","action-content");content.append(icon(iconName),document.createTextNode(label));return content;};
     const assigned=document.getElementById("assigned"),candidates=document.getElementById("candidates"),search=document.getElementById("student-search");
     let assignedUSNs=new Set(),searchTimer;
+    function replaceTable(container,tableWrap){
+      const scrollTop=container.querySelector(".table-wrap")?.scrollTop??0;
+      container.replaceChildren(tableWrap);
+      const updatedTable=container.querySelector(".table-wrap");
+      if(updatedTable)updatedTable.scrollTop=scrollTop;
+    }
     async function api(path,options={}){
       const response=await fetch(path,{cache:"no-store",...options});
       if(response.status===401){location.replace("/faculty/login");throw new Error("Sign-in expired.");}
@@ -24,7 +30,7 @@ const el=(tag,className,text)=>{const node=document.createElement(tag);if(classN
           const removeCell=el("td","");removeCell.appendChild(remove);
           row.append(nameCell,el("td","row-metrics",student.quizzes_attended+" / "+student.completed_quizzes),el("td","row-metrics",Number(student.attendance_percentage).toFixed(1)+"%"),el("td","row-metrics",String(student.total_points)),removeCell);body.append(row);
         });
-        table.append(body);wrap.append(table);assigned.replaceChildren(wrap);
+        table.append(body);wrap.append(table);replaceTable(assigned,wrap);
       }catch(error){assigned.replaceChildren(el("div","empty error",error.message));}
     }
     async function loadCandidates(){
@@ -46,7 +52,7 @@ const el=(tag,className,text)=>{const node=document.createElement(tag);if(classN
           if(user.can_assign&&!user.assigned)button.addEventListener("click",()=>addStudent(user.usn,button));
           const actionCell=el("td","");actionCell.appendChild(button);row.append(actionCell);body.append(row);
         });
-        table.append(body);wrap.append(table);candidates.replaceChildren(wrap);
+        table.append(body);wrap.append(table);replaceTable(candidates,wrap);
       }catch(error){candidates.replaceChildren(el("div","empty error",error.message));}
     }
     async function addStudent(usn,button){

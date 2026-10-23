@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 from quizcord_bot.cogs.analytics import AnalyticsCog
 from quizcord_bot.database import Database, matches_usn_format
+from quizcord_bot.quizcord import parse_quiz_rows
 from quizcord_bot.views import result_embed
 
 
@@ -971,6 +972,74 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(summary.participants[0].usn, "ABC123")
         self.assertEqual(summary.participants[0].discord_id, "12345")
         self.assertEqual(summary.participants[0].points, 2702)
+
+    def test_grouped_leaderboard_members_are_independent_and_scores_update(self) -> None:
+        second_member = SimpleNamespace(
+            id=54321,
+            name="Student_Two",
+            display_name="Student Two",
+            global_name="4GM22CS002",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=SimpleNamespace(id=67890),
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.map_student(second_member, "DEF456", "Student Two")
+        self.database.sync_member(second_member)
+        session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-01T10:00:00+00:00"
+        )
+
+        first = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "question-1",
+            parse_quiz_rows("#2. @Student Nickname, <@54321> — **7**"),
+            False,
+        )
+        updated = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5002,
+            "question-2",
+            parse_quiz_rows("#1. <@12345>, <@54321> — **9**"),
+            False,
+        )
+        final = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5003,
+            "final",
+            parse_quiz_rows("#1. <@12345>, <@54321> — **9**"),
+            True,
+            "quiz-grouped",
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(updated)
+        self.assertIsNotNone(final)
+        for summary in (first, updated, final):
+            participants_by_id = {
+                participant.discord_id: participant
+                for participant in summary.participants
+            }
+            self.assertEqual(set(participants_by_id), {"12345", "54321"})
+        self.assertEqual(
+            {
+                participant.usn: (participant.rank, participant.points)
+                for participant in updated.participants
+            },
+            {"ABC123": (1, 9), "DEF456": (1, 9)},
+        )
+        self.assertEqual(
+            {
+                participant.usn: participant.points
+                for participant in final.participants
+            },
+            {"ABC123": 9, "DEF456": 9},
+        )
+        self.assertEqual(
+            self.database.get_student_quiz_analytics(67890, "ABC123").total_points,
+            9,
+        )
 
     def test_startup_repairs_existing_composite_mention_participant(self) -> None:
         session = self.database.start_quiz_session(

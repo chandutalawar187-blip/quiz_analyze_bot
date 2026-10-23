@@ -185,6 +185,25 @@ class QuizcordParserTests(unittest.TestCase):
             ],
         )
 
+    def test_splits_grouped_names_and_mentions_for_each_rank(self) -> None:
+        self.assertEqual(
+            parse_quiz_rows(
+                "1. Final leaderboard\n"
+                "#1. @Nandeesh.R — **9**\n"
+                "#2. <@1552201816094015530>, <@!1443969026320764928> — **7**\n"
+                "#3. @Jagadeesh b, @4GM25CS045 — **5** "
+                "![:Gain:](https://cdn.discordapp.com/emojis/example.webp)\n"
+                "Total players\n126"
+            ),
+            [
+                ("1", "@Nandeesh.R", "9"),
+                ("2", "<@1552201816094015530>", "7"),
+                ("2", "<@!1443969026320764928>", "7"),
+                ("3", "@Jagadeesh b", "5"),
+                ("3", "@4GM25CS045", "5"),
+            ],
+        )
+
 
 class SimpleField:
     def __init__(self, name: str, value: str) -> None:

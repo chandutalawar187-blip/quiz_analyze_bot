@@ -312,6 +312,15 @@ class DashboardWebTests(unittest.TestCase):
         )
         self.assertEqual(selected.status_code, 200)
         self.assertEqual(self.client.get("/api/me").json()["guild_id"], "98765")
+        missing_faculty_role = self.client.post(
+            "/api/admin/faculty-passwords/1550724138765783102"
+        )
+        self.assertEqual(missing_faculty_role.status_code, 409)
+        self.assertEqual(
+            missing_faculty_role.json()["detail"],
+            "Set this server's faculty role before provisioning passwords "
+            "with /set_faculty_role.",
+        )
         rejected_guild = self.client.post(
             "/api/guilds/select", json={"guild_id": "11111"}
         )

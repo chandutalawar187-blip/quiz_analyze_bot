@@ -41,6 +41,7 @@ const select = document.getElementById("session-select");
     function statusLabel(status){return status==="completed"?"Complete":status==="interrupted"?"Interrupted":"Live";}
     function dateLabel(value,withTime=false){if(!value)return"Date unavailable";if(/^\d{4}-\d{2}-\d{2}$/.test(value)){const [year,month,day]=value.split("-").map(Number);return new Date(year,month-1,day).toLocaleDateString();}return new Date(value).toLocaleString(undefined,withTime?{}:{dateStyle:"short"});}
     function render(summary){
+      const scrollTop=content.querySelector(".table-wrap")?.scrollTop??0;
       const session=summary.session;
       const complete=session.status==="completed";
       const participants=summary.participants||[];
@@ -79,6 +80,8 @@ const select = document.getElementById("session-select");
       side.append(rows,el("div","note","Attendance includes human members regardless of server permissions. Bot accounts are excluded."));
       if(complete){const link=document.createElement("a");link.className="export-link";link.href="/api/sessions/"+encodeURIComponent(session.session_id)+"/export.xlsx";link.append(actionContent("download","Download Excel"));link.style.display="flex";link.style.margin="0 20px 20px";side.append(link);}
       layout.append(roster,side);content.replaceChildren(grid,layout);
+      const tableWrap=content.querySelector(".table-wrap");
+      if(tableWrap)tableWrap.scrollTop=scrollTop;
     }
     function renderUsers(users){
       const scrollTop=content.querySelector(".table-wrap")?.scrollTop??0;
@@ -111,6 +114,7 @@ const select = document.getElementById("session-select");
       content.querySelector(".table-wrap").scrollTop=scrollTop;
     }
     function renderStudent(student){
+      const scrollTop=content.querySelector(".table-wrap")?.scrollTop??0;
       document.getElementById("back-link").hidden=false;
       document.getElementById("back-link").href=facultyStudentPath?"/faculty":"/";
       select.hidden=true;
@@ -137,6 +141,8 @@ const select = document.getElementById("session-select");
       if(!student.history.length){historyPanel.append(el("div","empty","No quiz attendance has been recorded for this student."));}
       else{const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),headRow=el("tr");["Date","Quiz ID","Status","Rank","Points"].forEach(label=>headRow.append(el("th","",label)));thead.append(headRow);table.append(thead);const body=el("tbody");student.history.forEach(item=>{const row=el("tr"),date=dateLabel(item.started_at,true),status=item.status==="completed"?"Complete":item.status==="active"?"Live":item.status==="historical"?"Historical import":"Interrupted";row.append(el("td","",date),el("td","",item.quizcord_quiz_id||"Not provided"),el("td","",status),el("td","rank",item.rank?"#"+safe(item.rank):"—"),el("td","points",safe(item.points)));body.append(row);});table.append(body);wrap.append(table);historyPanel.append(wrap);}
       content.replaceChildren(heading,grid,profile,historyPanel);
+      const tableWrap=content.querySelector(".table-wrap");
+      if(tableWrap)tableWrap.scrollTop=scrollTop;
     }
     async function refresh(){
       if(pollBusy||activeView!=="sessions")return;pollBusy=true;

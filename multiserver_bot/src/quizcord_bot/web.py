@@ -1014,9 +1014,14 @@ _read_web_template("admin_login.html").replace(
         guild_id = request.state.guild_id
         faculty_role_id = database.get_faculty_role_id(guild_id)
         if faculty_role_id is None:
-            raise HTTPException(
-                status_code=503,
-                detail="Set this server's faculty role before provisioning passwords with /set_faculty_role.",
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": (
+                        "Set this server's faculty role before provisioning "
+                        "passwords with /set_faculty_role."
+                    )
+                },
             )
         try:
             async with httpx.AsyncClient(timeout=10) as client:

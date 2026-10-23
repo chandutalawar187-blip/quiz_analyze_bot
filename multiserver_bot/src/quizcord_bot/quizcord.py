@@ -47,12 +47,14 @@ def parse_quiz_rows(payload: str) -> list[tuple[str, str, str]]:
         for pattern in QUIZ_ROW_PATTERNS:
             match = pattern.search(line.strip())
             if match:
-                rows.append(
-                    (
-                        match.group("rank"),
-                        match.group("username").strip().strip("*_`"),
-                        match.group("score"),
-                    )
+                usernames = (
+                    username.strip().strip("*_`")
+                    for username in match.group("username").split(",")
+                )
+                rows.extend(
+                    (match.group("rank"), username, match.group("score"))
+                    for username in usernames
+                    if username
                 )
                 if len(rows) > MAX_LEADERBOARD_ROWS:
                     raise ValueError(
