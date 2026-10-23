@@ -46,7 +46,7 @@ const select = document.getElementById("session-select");
       const complete=session.status==="completed";
       const participants=summary.participants||[];
       const grid=el("section","grid");
-      const statusCard=el("div","card");
+      const statusCard=el("div","card status-card");
       statusCard.append(el("div","metric-label","Session status"));
       const state=el("div","metric status");
       const dot=el("span","dot"+(complete?" complete":session.status==="interrupted"?" interrupted":""));
