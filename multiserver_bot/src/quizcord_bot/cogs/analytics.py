@@ -242,6 +242,53 @@ class AnalyticsCog(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(
+        name="clear_quiz_history",
+        description="Permanently clear this server's saved quiz results and sessions.",
+    )
+    @app_commands.describe(
+        confirmation='Type "DELETE" to confirm clearing this server’s quiz data.'
+    )
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.checks.cooldown(1, 300)
+    async def clear_quiz_history(
+        self,
+        interaction: discord.Interaction,
+        confirmation: str,
+    ) -> None:
+        if confirmation != "DELETE":
+            await interaction.response.send_message(
+                'No data was deleted. To confirm, run this command again and '
+                'enter exactly "DELETE".',
+                ephemeral=True,
+            )
+            return
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        analytics_count, session_count = (
+            self.database.clear_guild_quiz_history(interaction.guild_id)
+        )
+        LOGGER.warning(
+            "Cleared quiz history for guild %s: %d analytics rows and "
+            "%d quiz sessions.",
+            interaction.guild_id,
+            analytics_count,
+            session_count,
+        )
+        await interaction.response.send_message(
+            f"Cleared this server’s quiz history: {session_count:,} sessions "
+            f"and {analytics_count:,} saved student results. Student mappings "
+            "and faculty settings were kept. This cannot be undone.",
+            ephemeral=True,
+        )
+
     @commands.Cog.listener()
     async def on_ready(self) -> None:
         for guild in self.bot.guilds:

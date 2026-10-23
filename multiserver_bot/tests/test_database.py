@@ -145,6 +145,79 @@ class DatabaseTests(unittest.TestCase):
             ("400 Points", "1"),
         )
 
+    def test_clear_guild_quiz_history_preserves_other_guild_and_mappings(self) -> None:
+        self.database.register_guild(98765, "Another server")
+        other_member = SimpleNamespace(
+            id=54321,
+            name="Student_Two",
+            display_name="Student Two",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+        )
+        self.database.map_student(
+            other_member, "XYZ789", "Student Two", guild_id=98765
+        )
+        sessions = {}
+        for guild_id, channel_id, quiz_id, nickname in (
+            (67890, 1001, "college-quiz", "Student Nickname"),
+            (98765, 1002, "other-quiz", "Student Two"),
+        ):
+            session = self.database.start_quiz_session(
+                guild_id, channel_id, 12345, "2026-10-05T10:00:00+00:00"
+            )
+            sessions[guild_id] = session
+            self.database.record_quiz_leaderboard(
+                session.session_id,
+                channel_id + 100,
+                "revision-1",
+                [("1", nickname, "900")],
+                True,
+                quiz_id,
+            )
+        self.database.save_quiz_results(
+            "manual-college-quiz",
+            [("1", "Student Nickname", "700")],
+            guild_id=67890,
+        )
+
+        deleted_analytics, deleted_sessions = (
+            self.database.clear_guild_quiz_history(67890)
+        )
+
+        self.assertEqual(deleted_analytics, 2)
+        self.assertEqual(deleted_sessions, 1)
+        self.assertEqual(
+            self.database.get_student_quiz_analytics(67890, "ABC123").history,
+            (),
+        )
+        self.assertEqual(
+            self.database.get_student_quiz_analytics(98765, "XYZ789").total_points,
+            900,
+        )
+        self.assertIsNone(
+            self.database.get_quiz_session(sessions[67890].session_id)
+        )
+        self.assertIsNotNone(
+            self.database.get_quiz_session(sessions[98765].session_id)
+        )
+        self.assertEqual(
+            self.database.get_student_quiz_analytics(67890, "ABC123").student_name,
+            "Student One",
+        )
+        with self.database._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM quiz_session_updates"
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM quiz_session_participants"
+                ).fetchone()[0],
+                1,
+            )
+
     def test_student_profile_includes_manual_imports_with_recorded_import_dates(
         self,
     ) -> None:
@@ -1311,6 +1384,47 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("quizcord_username", registry_columns)
         self.assertEqual(registry, ("67890", "ABC123"))
         self.assertEqual(analytics, ("67890", "ABC123", "legacy-quiz"))
+
+
+class ClearQuizHistoryCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_requires_typed_confirmation_before_deleting(self) -> None:
+        database = SimpleNamespace(clear_guild_quiz_history=Mock())
+        cog = AnalyticsCog(SimpleNamespace(), SimpleNamespace(), database)
+        interaction = SimpleNamespace(
+            guild_id=67890,
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        await cog.clear_quiz_history.callback(cog, interaction, "delete")
+
+        database.clear_guild_quiz_history.assert_not_called()
+        interaction.response.send_message.assert_awaited_once()
+        self.assertIn(
+            "No data was deleted",
+            interaction.response.send_message.await_args.args[0],
+        )
+
+    async def test_clears_only_current_server_after_confirmation(self) -> None:
+        database = SimpleNamespace(
+            clear_guild_quiz_history=Mock(return_value=(12, 4))
+        )
+        cog = AnalyticsCog(SimpleNamespace(), SimpleNamespace(), database)
+        interaction = SimpleNamespace(
+            guild_id=67890,
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        await cog.clear_quiz_history.callback(cog, interaction, "DELETE")
+
+        database.clear_guild_quiz_history.assert_called_once_with(67890)
+        interaction.response.send_message.assert_awaited_once()
+        self.assertIn(
+            "4 sessions and 12 saved student results",
+            interaction.response.send_message.await_args.args[0],
+        )
+        self.assertTrue(
+            interaction.response.send_message.await_args.kwargs["ephemeral"]
+        )
 
 
 if __name__ == "__main__":

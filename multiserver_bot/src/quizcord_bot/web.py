@@ -470,7 +470,10 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         for key in expired_sessions:
             del oauth_sessions[key]
         state = secrets.token_urlsafe(32)
-        request.session.clear()
+        request.session.pop("oauth_state", None)
+        request.session.pop("login_destination", None)
+        request.session.pop("return_to", None)
+        request.session.pop("requested_guild_id", None)
         request.session["oauth_state"] = state
         if destination == "faculty":
             request.session["login_destination"] = "faculty"

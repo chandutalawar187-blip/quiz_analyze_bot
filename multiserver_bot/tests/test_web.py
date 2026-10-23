@@ -1,5 +1,7 @@
 """Authentication and authorization tests for the web dashboard."""
 
+import base64
+import json
 import os
 import tempfile
 import unittest
@@ -11,6 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 from fastapi.testclient import TestClient
+from itsdangerous import TimestampSigner
 
 from quizcord_bot.config import Settings
 from quizcord_bot.database import (
@@ -127,6 +130,39 @@ class DashboardWebTests(unittest.TestCase):
             headers={"X-Real-IP": "203.0.113.11"},
         )
         self.assertEqual(other_client.status_code, 302)
+
+    def test_oauth_login_preserves_existing_dashboard_session(self) -> None:
+        signer = TimestampSigner(
+            self.settings.dashboard_session_secret,
+            salt="starlette.sessions",
+        )
+        original_session = {
+            "dashboard_session": "existing-dashboard-session",
+            "selected_guild_id": "67890",
+        }
+        encoded_session = base64.b64encode(
+            json.dumps(original_session).encode("utf-8")
+        )
+        self.client.cookies.set(
+            "quizcord_dashboard",
+            signer.sign(encoded_session).decode("utf-8"),
+        )
+
+        response = self.client.get("/auth/login", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 302)
+        cookie_header = response.headers["set-cookie"]
+        cookie_value = cookie_header.split(";", 1)[0].split("=", 1)[1]
+        signed_payload = signer.unsign(cookie_value)
+        session_payload = json.loads(
+            base64.b64decode(signed_payload).decode("utf-8")
+        )
+        self.assertEqual(
+            session_payload["dashboard_session"],
+            "existing-dashboard-session",
+        )
+        self.assertEqual(session_payload["selected_guild_id"], "67890")
+        self.assertIn("oauth_state", session_payload)
 
     def test_general_page_requests_are_rate_limited(self) -> None:
         with patch("quizcord_bot.web.DEFAULT_REQUEST_RATE_LIMIT", (2, 60)):

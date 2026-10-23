@@ -1075,6 +1075,42 @@ class Database:
             except LookupError:
                 return None
 
+    def clear_guild_quiz_history(self, guild_id: int) -> tuple[int, int]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            guild_filter = str(guild_id)
+            session_count = connection.execute(
+                "SELECT COUNT(*) FROM quiz_sessions WHERE guild_id = ?",
+                (guild_filter,),
+            ).fetchone()[0]
+            analytics_count = connection.execute(
+                "SELECT COUNT(*) FROM quiz_analytics WHERE guild_id = ?",
+                (guild_filter,),
+            ).fetchone()[0]
+            session_filter = """
+                session_id IN (
+                    SELECT session_id FROM quiz_sessions WHERE guild_id = ?
+                )
+            """
+            for table in (
+                "quiz_session_updates",
+                "quiz_session_participants",
+                "quiz_session_nickname_reminders",
+            ):
+                connection.execute(
+                    f"DELETE FROM {table} WHERE {session_filter}",
+                    (guild_filter,),
+                )
+            connection.execute(
+                "DELETE FROM quiz_analytics WHERE guild_id = ?",
+                (guild_filter,),
+            )
+            connection.execute(
+                "DELETE FROM quiz_sessions WHERE guild_id = ?",
+                (guild_filter,),
+            )
+        return int(analytics_count), int(session_count)
+
     @staticmethod
     def _get_session(
         connection: sqlite3.Connection, session_id: str

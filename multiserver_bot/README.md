@@ -445,6 +445,10 @@ continues to use its private Discord dashboard.
   accepts `YYYY-MM-DD` for a date override; if the start was not tracked and
   no override is provided, the import timestamp is saved.
 - `/export_analytics`: Download the private aggregate Excel workbook (`.xlsx`).
+- `/clear_quiz_history`: Permanently delete saved quiz sessions, leaderboard
+  results, and analytics for the current server after entering `DELETE`.
+  Student mappings, faculty assignments/passwords, and other servers' data are
+  preserved.
 - Detect the Quizcord question-one/start signal and privately notify the server
   owner with the web dashboard link when configured. If no start signal is
   visible, monitoring begins at the first leaderboard. The same leaderboard
