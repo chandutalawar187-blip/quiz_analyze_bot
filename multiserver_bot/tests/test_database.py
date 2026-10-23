@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from quizcord_bot.cogs.analytics import AnalyticsCog
 from quizcord_bot.database import Database, matches_usn_format

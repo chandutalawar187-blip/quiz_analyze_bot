@@ -49,7 +49,7 @@ def parse_quiz_rows(payload: str) -> list[tuple[str, str, str]]:
             if match:
                 usernames = (
                     username.strip().strip("*_`")
-                    for username in match.group("username").split(",")
+                    for username in re.split(r",\s*(?=@|<@)", match.group("username"))
                 )
                 rows.extend(
                     (match.group("rank"), username, match.group("score"))
