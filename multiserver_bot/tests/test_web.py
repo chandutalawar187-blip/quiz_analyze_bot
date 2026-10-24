@@ -502,6 +502,14 @@ class DashboardWebTests(unittest.TestCase):
             password_page.text,
         )
         self.assertIn(
+            'let mustChange=false,turnstileWidgetId=null,captchaToken="",verifiedTemporaryPassword="";',
+            password_page.text,
+        )
+        self.assertIn("password.readOnly=true", password_page.text)
+        self.assertIn(
+            "current_password:verifiedTemporaryPassword", password_page.text
+        )
+        self.assertIn(
             "initializeGuildSelector().then(showCaptcha).catch",
             password_page.text,
         )
@@ -735,7 +743,7 @@ class DashboardWebTests(unittest.TestCase):
             (
                 "/static/faculty-dashboard.js",
                 "javascript",
-                "loadAssigned",
+                'guild.is_faculty||guild.role==="admin"',
             ),
         ):
             with self.subTest(path=path):
