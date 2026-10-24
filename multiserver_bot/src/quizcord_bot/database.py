@@ -797,25 +797,19 @@ class Database:
         channel_id: int,
         admin_user_id: int,
         started_at: str,
-        force_new: bool = False,
         eligible_student_count: int | None = None,
     ) -> QuizSession:
         with self._connect() as connection:
             active = connection.execute(
                 """
-                SELECT session_id, question_count
+                SELECT session_id
                 FROM quiz_sessions
                 WHERE channel_id = ? AND status = 'active'
                 """,
                 (str(channel_id),),
             ).fetchone()
-            if active and not (force_new and int(active[1]) > 0):
-                return self._get_session(connection, active[0])
             if active:
-                connection.execute(
-                    "UPDATE quiz_sessions SET status = 'interrupted' WHERE session_id = ?",
-                    (active[0],),
-                )
+                return self._get_session(connection, active[0])
 
             session_id = uuid.uuid4().hex
             connection.execute(

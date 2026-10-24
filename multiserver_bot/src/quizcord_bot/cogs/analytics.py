@@ -17,7 +17,6 @@ from quizcord_bot.quizcord import (
     extract_leaderboard,
     extract_quizcord_id,
     is_final_leaderboard,
-    is_first_question_message,
     is_quizcord_author,
     is_quiz_start_message,
     leaderboard_structure,
@@ -462,7 +461,6 @@ class AnalyticsCog(commands.Cog):
                 message.channel.id,
                 message.guild.owner_id,
                 message.created_at.isoformat(),
-                force_new=is_first_question_message(message),
                 eligible_student_count=self.database.get_human_member_count(
                     message.guild.id
                 ),

@@ -368,6 +368,42 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(len(analytics.history), 1)
         self.assertEqual(analytics.history[0].quizcord_quiz_id, "quiz-123")
 
+    def test_repeated_start_signal_keeps_active_quiz_until_final_leaderboard(
+        self,
+    ) -> None:
+        started_at = "2026-10-24T19:00:00+00:00"
+        session = self.database.start_quiz_session(
+            67890, 1001, 12345, started_at
+        )
+        self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "question-1",
+            [("1", "Student Nickname", "900")],
+            False,
+        )
+
+        repeated_start = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-24T19:05:00+00:00"
+        )
+        self.assertEqual(repeated_start.session_id, session.session_id)
+        self.assertEqual(repeated_start.status, "active")
+
+        completed = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5002,
+            "final",
+            [("1", "Student Nickname", "950")],
+            True,
+            "quiz-2026-10-24",
+        )
+        self.assertIsNotNone(completed)
+        next_session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-24T20:00:00+00:00"
+        )
+        self.assertNotEqual(next_session.session_id, session.session_id)
+        self.assertEqual(next_session.status, "active")
+
     def test_student_history_collapses_legacy_duplicate_session_with_and_without_id(
         self,
     ) -> None:
@@ -994,7 +1030,7 @@ class DatabaseTests(unittest.TestCase):
             session.session_id,
             5001,
             "question-1",
-            parse_quiz_rows("#2. @Student Nickname, <@54321> — **7**"),
+            parse_quiz_rows("#2. @Student Nickname, <@54321> 7"),
             False,
         )
         updated = self.database.record_quiz_leaderboard(
