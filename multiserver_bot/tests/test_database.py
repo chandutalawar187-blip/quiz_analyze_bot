@@ -404,6 +404,109 @@ class DatabaseTests(unittest.TestCase):
         self.assertNotEqual(next_session.session_id, session.session_id)
         self.assertEqual(next_session.status, "active")
 
+    def test_initialize_merges_split_same_day_sessions_and_preserves_history(
+        self,
+    ) -> None:
+        started_at = "2026-10-24T19:00:00+00:00"
+        sessions = []
+        for index, (score, quiz_id) in enumerate(
+            ((900, None), (950, None), (1000, "3228337"), (1100, None))
+        ):
+            session = self.database.start_quiz_session(
+                67890,
+                1001,
+                12345,
+                f"2026-10-24T19:{index:02}:00+00:00",
+            )
+            self.database.set_quiz_dashboard_message(
+                session.session_id, 9999, 6000 + index
+            )
+            self.database.record_quiz_leaderboard(
+                session.session_id,
+                5001 + index,
+                f"revision-{index}",
+                [("1", "Student Nickname", str(score))],
+                True,
+                quiz_id,
+                f"2026-10-24T19:{index:02}:30+00:00",
+            )
+            sessions.append(session)
+
+        self.database.initialize()
+        self.database.initialize()
+
+        [summary] = self.database.get_quiz_session_summaries(67890)
+        self.assertEqual(summary.session.session_id, sessions[2].session_id)
+        self.assertEqual(summary.session.quizcord_quiz_id, "3228337")
+        self.assertEqual(summary.session.started_at, started_at)
+        self.assertEqual(summary.session.question_count, 4)
+        self.assertEqual(len(summary.participants), 1)
+        self.assertEqual(summary.participants[0].points, 1100)
+        self.assertEqual(
+            self.database.get_quiz_session_summary(
+                sessions[0].session_id
+            ).session.session_id,
+            sessions[2].session_id,
+        )
+        self.assertEqual(len(self.database.get_dashboard_sessions()), 1)
+        analytics = self.database.get_student_quiz_analytics(67890, "ABC123")
+        self.assertEqual(analytics.quizzes_attended, 1)
+        self.assertEqual(analytics.completed_quizzes, 1)
+        self.assertEqual(analytics.total_points, 1100)
+        with self.database._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM quiz_session_updates"
+                ).fetchone()[0],
+                4,
+            )
+            self.assertEqual(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM quiz_analytics
+                    WHERE guild_id = ? AND usn = ? AND quiz_id IS NOT NULL
+                    """,
+                    ("67890", "ABC123"),
+                ).fetchone()[0],
+                1,
+            )
+        analytics_count, session_count = self.database.clear_guild_quiz_history(
+            67890
+        )
+        self.assertEqual(session_count, 1)
+        self.assertGreater(analytics_count, 0)
+        with self.database._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM quiz_session_aliases"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_initialize_does_not_merge_sessions_with_conflicting_quiz_ids(
+        self,
+    ) -> None:
+        for index, quiz_id in enumerate(("quiz-one", "quiz-two")):
+            session = self.database.start_quiz_session(
+                67890,
+                1001,
+                12345,
+                f"2026-10-24T19:{index:02}:00+00:00",
+            )
+            self.database.record_quiz_leaderboard(
+                session.session_id,
+                5001 + index,
+                f"revision-{index}",
+                [("1", "Student Nickname", "900")],
+                True,
+                quiz_id,
+            )
+
+        with self.assertLogs("quizcord_analytics.database", level="WARNING"):
+            self.database.initialize()
+
+        self.assertEqual(len(self.database.get_quiz_session_summaries(67890)), 2)
+
     def test_student_history_collapses_legacy_duplicate_session_with_and_without_id(
         self,
     ) -> None:

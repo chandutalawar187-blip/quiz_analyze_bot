@@ -4,6 +4,7 @@ import sqlite3
 import re
 import hashlib
 import hmac
+import logging
 import secrets
 import unicodedata
 import uuid
@@ -28,6 +29,7 @@ USER_MENTION_IDS_PATTERN = re.compile(r"<@!?(\d+)>")
 USN_FORMAT_PATTERN = re.compile(
     r"(?:4GM\d{2}CS\d{3}|U\d{2}E\d{2}CS\d{3})", re.IGNORECASE
 )
+LOGGER = logging.getLogger("quizcord_analytics.database")
 
 
 def matches_usn_format(value: str) -> bool:
@@ -477,6 +479,14 @@ class Database:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS quiz_session_aliases (
+                    alias_session_id TEXT PRIMARY KEY,
+                    canonical_session_id TEXT NOT NULL
+                )
+                """
+            )
             participant_columns = {
                 row[1]
                 for row in connection.execute(
@@ -488,12 +498,260 @@ class Database:
                     "ALTER TABLE quiz_session_participants "
                     "ADD COLUMN eligible INTEGER NOT NULL DEFAULT 1"
                 )
+            self._merge_same_day_quiz_sessions(connection)
             self._reconcile_composite_mention_participants(connection)
             connection.execute(
                 """
                 DELETE FROM processed_quizcord_messages
                 WHERE processed_at < datetime('now', '-30 days')
                 """
+            )
+
+    @staticmethod
+    def _merge_same_day_quiz_sessions(
+        connection: sqlite3.Connection,
+    ) -> None:
+        groups = connection.execute(
+            """
+            SELECT guild_id, channel_id, substr(started_at, 1, 10) AS quiz_day
+            FROM quiz_sessions
+            WHERE status != 'merged'
+            GROUP BY guild_id, channel_id, quiz_day
+            HAVING COUNT(*) > 1
+            """
+        ).fetchall()
+        for guild_id, channel_id, quiz_day in groups:
+            sessions = connection.execute(
+                """
+                SELECT session_id, status, question_count, started_at,
+                       completed_at, quizcord_quiz_id, admin_user_id,
+                       admin_dm_channel_id, admin_dm_message_id,
+                       eligible_student_count,
+                       COALESCE(
+                           (SELECT MAX(CAST(message_id AS INTEGER))
+                            FROM quiz_session_updates
+                            WHERE session_id = quiz_sessions.session_id),
+                           0
+                       ) AS latest_message_id
+                FROM quiz_sessions
+                WHERE guild_id = ? AND channel_id = ?
+                  AND substr(started_at, 1, 10) = ?
+                  AND status != 'merged'
+                ORDER BY started_at, session_id
+                """,
+                (guild_id, channel_id, quiz_day),
+            ).fetchall()
+            quiz_ids = {
+                str(row[5]) for row in sessions if row[5] is not None
+            }
+            if len(quiz_ids) > 1:
+                LOGGER.warning(
+                    "Keeping separate quiz sessions for guild %s, channel %s "
+                    "on %s because they have conflicting Quizcord IDs: %s.",
+                    guild_id,
+                    channel_id,
+                    quiz_day,
+                    sorted(quiz_ids),
+                )
+                continue
+
+            identified_sessions = [
+                row for row in sessions if row[5] is not None
+            ]
+            canonical = (
+                identified_sessions[0]
+                if identified_sessions
+                else sessions[0]
+            )
+            canonical_id = str(canonical[0])
+            session_ids = [str(row[0]) for row in sessions]
+            duplicate_ids = [
+                session_id
+                for session_id in session_ids
+                if session_id != canonical_id
+            ]
+            source_sessions = sorted(
+                sessions,
+                key=lambda row: (int(row[10]), str(row[3]), str(row[0])),
+            )
+
+            for source in source_sessions:
+                source_id = str(source[0])
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO quiz_session_updates (
+                        session_id, message_id, revision_key, question_number
+                    )
+                    SELECT ?, message_id, revision_key, question_number
+                    FROM quiz_session_updates
+                    WHERE session_id = ?
+                    """,
+                    (canonical_id, source_id),
+                )
+                participants = connection.execute(
+                    """
+                    SELECT usn, rank, points, discord_id, eligible
+                    FROM quiz_session_participants
+                    WHERE session_id = ?
+                    """,
+                    (source_id,),
+                ).fetchall()
+                for participant in participants:
+                    connection.execute(
+                        """
+                        INSERT INTO quiz_session_participants (
+                            session_id, usn, rank, points, discord_id, eligible
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(session_id, usn) DO UPDATE SET
+                            rank = excluded.rank,
+                            points = excluded.points,
+                            discord_id = COALESCE(
+                                excluded.discord_id,
+                                quiz_session_participants.discord_id
+                            ),
+                            eligible = excluded.eligible
+                        """,
+                        (canonical_id, *participant),
+                    )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO quiz_session_nickname_reminders (
+                        session_id, discord_id, sent_at
+                    )
+                    SELECT ?, discord_id, sent_at
+                    FROM quiz_session_nickname_reminders
+                    WHERE session_id = ?
+                    """,
+                    (canonical_id, source_id),
+                )
+
+            completed_at_values = [
+                str(row[4]) for row in sessions if row[4] is not None
+            ]
+            status = (
+                "completed"
+                if any(row[1] == "completed" for row in sessions)
+                else (
+                    "active"
+                    if any(row[1] == "active" for row in sessions)
+                    else str(sessions[-1][1])
+                )
+            )
+            latest_session = max(
+                sessions,
+                key=lambda row: (int(row[10]), str(row[3]), str(row[0])),
+            )
+            quiz_id = next(iter(quiz_ids), None)
+            dashboard_message = next(
+                (
+                    row
+                    for row in sessions
+                    if row[7] is not None and row[8] is not None
+                ),
+                None,
+            )
+            for source_id in duplicate_ids:
+                connection.execute(
+                    """
+                    INSERT INTO quiz_session_aliases (
+                        alias_session_id, canonical_session_id
+                    )
+                    VALUES (?, ?)
+                    ON CONFLICT(alias_session_id) DO UPDATE SET
+                        canonical_session_id = excluded.canonical_session_id
+                    """,
+                    (source_id, canonical_id),
+                )
+                connection.execute(
+                    "UPDATE quiz_sessions SET status = 'merged' WHERE session_id = ?",
+                    (source_id,),
+                )
+            connection.execute(
+                """
+                UPDATE quiz_sessions
+                SET started_at = ?,
+                    completed_at = ?,
+                    quizcord_quiz_id = ?,
+                    status = ?,
+                    question_count = (
+                        SELECT COUNT(*) FROM quiz_session_updates
+                        WHERE session_id = ?
+                    ),
+                    eligible_student_count = ?,
+                    admin_dm_channel_id = ?,
+                    admin_dm_message_id = ?
+                WHERE session_id = ?
+                """,
+                (
+                    min(str(row[3]) for row in sessions),
+                    max(completed_at_values) if completed_at_values else None,
+                    quiz_id,
+                    status,
+                    canonical_id,
+                    latest_session[9],
+                    dashboard_message[7] if dashboard_message else None,
+                    dashboard_message[8] if dashboard_message else None,
+                    canonical_id,
+                ),
+            )
+
+            connection.execute(
+                """
+                DELETE FROM quiz_session_participants
+                WHERE session_id != ? AND session_id IN (
+                    SELECT alias_session_id FROM quiz_session_aliases
+                    WHERE canonical_session_id = ?
+                )
+                """,
+                (canonical_id, canonical_id),
+            )
+            connection.execute(
+                """
+                DELETE FROM quiz_session_updates
+                WHERE session_id != ? AND session_id IN (
+                    SELECT alias_session_id FROM quiz_session_aliases
+                    WHERE canonical_session_id = ?
+                )
+                """,
+                (canonical_id, canonical_id),
+            )
+            connection.execute(
+                """
+                DELETE FROM quiz_session_nickname_reminders
+                WHERE session_id != ? AND session_id IN (
+                    SELECT alias_session_id FROM quiz_session_aliases
+                    WHERE canonical_session_id = ?
+                )
+                """,
+                (canonical_id, canonical_id),
+            )
+            analytics_ids = duplicate_ids + (
+                [canonical_id] if quiz_id and quiz_id != canonical_id else []
+            )
+            if analytics_ids:
+                placeholders = ",".join("?" for _ in analytics_ids)
+                connection.execute(
+                    f"""
+                    DELETE FROM quiz_analytics
+                    WHERE guild_id = ? AND quiz_id IN ({placeholders})
+                    """,
+                    (guild_id, *analytics_ids),
+                )
+            if status == "completed":
+                Database._persist_session_results(
+                    connection,
+                    canonical_id,
+                    quiz_id or canonical_id,
+                )
+            LOGGER.info(
+                "Merged %d same-day quiz sessions for guild %s, channel %s "
+                "on %s into session %s.",
+                len(sessions),
+                guild_id,
+                channel_id,
+                quiz_day,
+                canonical_id,
             )
 
     @staticmethod
@@ -847,7 +1105,7 @@ class Database:
             row = connection.execute(
                 """
                 SELECT session_id FROM quiz_sessions
-                WHERE channel_id = ?
+                WHERE channel_id = ? AND status != 'merged'
                 ORDER BY started_at DESC
                 LIMIT 1
                 """,
@@ -901,6 +1159,7 @@ class Database:
                 SELECT session_id FROM quiz_sessions
                 WHERE admin_dm_channel_id IS NOT NULL
                   AND admin_dm_message_id IS NOT NULL
+                  AND status != 'merged'
                 ORDER BY started_at DESC
                 """
             ).fetchall()
@@ -915,7 +1174,7 @@ class Database:
             session_ids = connection.execute(
                 """
                 SELECT session_id FROM quiz_sessions
-                WHERE guild_id = ?
+                WHERE guild_id = ? AND status != 'merged'
                 ORDER BY started_at DESC
                 LIMIT ?
                 """,
@@ -1074,7 +1333,10 @@ class Database:
             connection.execute("BEGIN IMMEDIATE")
             guild_filter = str(guild_id)
             session_count = connection.execute(
-                "SELECT COUNT(*) FROM quiz_sessions WHERE guild_id = ?",
+                """
+                SELECT COUNT(*) FROM quiz_sessions
+                WHERE guild_id = ? AND status != 'merged'
+                """,
                 (guild_filter,),
             ).fetchone()[0]
             analytics_count = connection.execute(
@@ -1096,6 +1358,15 @@ class Database:
                     (guild_filter,),
                 )
             connection.execute(
+                """
+                DELETE FROM quiz_session_aliases
+                WHERE canonical_session_id IN (
+                    SELECT session_id FROM quiz_sessions WHERE guild_id = ?
+                )
+                """,
+                (guild_filter,),
+            )
+            connection.execute(
                 "DELETE FROM quiz_analytics WHERE guild_id = ?",
                 (guild_filter,),
             )
@@ -1109,6 +1380,7 @@ class Database:
     def _get_session(
         connection: sqlite3.Connection, session_id: str
     ) -> QuizSession:
+        session_id = Database._canonical_session_id(connection, session_id)
         row = connection.execute(
             """
             SELECT session_id, guild_id, channel_id, status, question_count,
@@ -1135,10 +1407,25 @@ class Database:
             eligible_student_count=int(row[11]) if row[11] is not None else None,
         )
 
+    @staticmethod
+    def _canonical_session_id(
+        connection: sqlite3.Connection, session_id: str
+    ) -> str:
+        row = connection.execute(
+            """
+            SELECT canonical_session_id
+            FROM quiz_session_aliases
+            WHERE alias_session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        return str(row[0]) if row else session_id
+
     def set_quiz_dashboard_message(
         self, session_id: str, channel_id: int, message_id: int
     ) -> None:
         with self._connect() as connection:
+            session_id = self._canonical_session_id(connection, session_id)
             connection.execute(
                 """
                 UPDATE quiz_sessions
@@ -1160,6 +1447,7 @@ class Database:
     ) -> QuizSessionSummary | None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            session_id = self._canonical_session_id(connection, session_id)
             session = self._get_session(connection, session_id)
             cursor = connection.execute(
                 """
@@ -1340,6 +1628,7 @@ class Database:
 
     def attach_quizcord_id(self, session_id: str, quizcord_quiz_id: str) -> None:
         with self._connect() as connection:
+            session_id = self._canonical_session_id(connection, session_id)
             session = self._get_session(connection, session_id)
             old_id = session.quizcord_quiz_id or session.session_id
             connection.execute(
@@ -1386,6 +1675,7 @@ class Database:
     def _persist_session_results(
         connection: sqlite3.Connection, session_id: str, quiz_id: str
     ) -> None:
+        session_id = Database._canonical_session_id(connection, session_id)
         session = Database._get_session(connection, session_id)
         participants = connection.execute(
             """
@@ -1425,6 +1715,7 @@ class Database:
         cls, connection: sqlite3.Connection, session_id: str
     ) -> QuizSessionSummary:
         session = cls._get_session(connection, session_id)
+        session_id = session.session_id
         rows = connection.execute(
             """
             SELECT p.usn, p.rank, p.points, p.discord_id, p.eligible,
@@ -1765,6 +2056,7 @@ class Database:
         self, session_id: str, discord_id: int
     ) -> str | None:
         with self._connect() as connection:
+            session_id = self._canonical_session_id(connection, session_id)
             session = self._get_session(connection, session_id)
             row = connection.execute(
                 """
