@@ -146,10 +146,10 @@ const select = document.getElementById("session-select");
       const scrollTop=content.querySelector(".table-wrap")?.scrollTop??0;
       document.getElementById("back-link").hidden=false;
       document.getElementById("back-link").href=facultyStudentPath?"/faculty":"/";
-      select.hidden=true;
-      leaderboardSearch.closest(".session-search-field").hidden=true;
-      document.querySelector(".eyebrow").textContent="Student analytics";
-      document.querySelector("h1").textContent=student.student_name;
+      const pageHeading=el("section","heading student-page-heading");
+      const pageTitle=el("div","");
+      pageTitle.append(el("div","eyebrow","Student analytics"),el("h1","",student.student_name));
+      pageHeading.append(pageTitle);
       const heading=el("div","profile-heading");
       const headingDetails=el("div","");
       headingDetails.append(el("div","eyebrow",student.usn),el("div","panel-sub","Quiz attendance and performance across completed quizzes tracked by this bot."));
@@ -170,7 +170,7 @@ const select = document.getElementById("session-select");
       const historyPanel=el("article","panel"),historyHead=el("div","panel-head");historyHead.append(el("div","","Date-wise attendance and results"));historyPanel.append(historyHead);
       if(!student.history.length){historyPanel.append(el("div","empty","No quiz attendance has been recorded for this student."));}
       else{const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),headRow=el("tr");["Date","Quiz ID","Status","Rank","Points"].forEach(label=>headRow.append(el("th","",label)));thead.append(headRow);table.append(thead);const body=el("tbody");student.history.forEach(item=>{const row=el("tr"),date=dateLabel(item.started_at,true),status=item.status==="completed"?"Complete":item.status==="active"?"Live":item.status==="historical"?"Historical import":"Interrupted";row.append(el("td","",date),el("td","",item.quizcord_quiz_id||"Not provided"),el("td","",status),el("td","rank",item.rank?"#"+safe(item.rank):"—"),el("td","points",safe(item.points)));body.append(row);});table.append(body);wrap.append(table);historyPanel.append(wrap);}
-      content.replaceChildren(heading,grid,profile,historyPanel);
+      content.replaceChildren(pageHeading,heading,grid,profile,historyPanel);
       const tableWrap=content.querySelector(".table-wrap");
       if(tableWrap)tableWrap.scrollTop=scrollTop;
     }
@@ -222,7 +222,10 @@ const select = document.getElementById("session-select");
     }).then(()=>{
     if(studentUSN){
       dashboardTabs.hidden=true;
-      select.hidden=true;
+      sessionHeading.hidden=true;
+      const backLink=document.getElementById("back-link");
+      backLink.hidden=false;
+      backLink.href=facultyStudentPath?"/faculty":"/";
       async function refreshStudent(){try{const endpoint=facultyStudentPath?"/api/faculty/students/":"/api/students/";const response=await fetch(endpoint+encodeURIComponent(studentUSN),{cache:"no-store"});if(response.status===401){location.replace(facultyStudentPath?"/faculty/login":"/");return;}if(!response.ok)throw new Error("Could not load student analytics.");renderStudent(await response.json());}catch(error){content.replaceChildren(el("div","empty error",error.message));}}
       refreshStudent();setInterval(refreshStudent,10000);
     }else{refresh();setInterval(()=>{if(activeView==="users")refreshUsers();else refresh();},3000);}

@@ -726,6 +726,11 @@ class DashboardWebTests(unittest.TestCase):
                 ".session-search-field",
             ),
             (
+                "/static/admin-dashboard.css",
+                "text/css",
+                "[hidden] { display: none !important; }",
+            ),
+            (
                 "/static/admin-dashboard.js",
                 "javascript",
                 "Participant leaderboard",
@@ -734,6 +739,16 @@ class DashboardWebTests(unittest.TestCase):
                 "/static/admin-dashboard.js",
                 "javascript",
                 "No leaderboard entries match your search.",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "student-page-heading",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "sessionHeading.hidden=true",
             ),
             (
                 "/static/admin-dashboard.js",
