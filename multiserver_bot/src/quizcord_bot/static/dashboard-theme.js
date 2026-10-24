@@ -25,20 +25,6 @@
           }
       }
 
-      function blobClipAt(x, y, radius) {
-          const points = Array.from({ length: 32 }, (_, index) => {
-            const angle = (Math.PI * 2 * index) / 32;
-            const factor =
-              1 + 0.055 * Math.sin(3 * angle + 0.4) + 0.035 * Math.sin(7 * angle + 1.2);
-            const distance = radius * factor;
-            return {
-              x: x + Math.cos(angle) * distance,
-              y: y + Math.sin(angle) * distance
-            };
-          });
-          return `polygon(${points.map(point => `${point.x}px ${point.y}px`).join(",")})`;
-      }
-
       function spillFrom(button, theme) {
           if (transitionRunning) return;
           if (!document.startViewTransition) {
@@ -77,11 +63,11 @@
             .then(() => {
               const animation = root.animate(
                 [
-                  { clipPath: blobClipAt(x, y, 0) },
-                  { clipPath: blobClipAt(x, y, endRadius) }
+                  { clipPath: `circle(0px at ${x}px ${y}px)` },
+                  { clipPath: `circle(${endRadius}px at ${x}px ${y}px)` }
                 ],
                 {
-                  duration: 1250,
+                  duration: 800,
                   easing: "cubic-bezier(0.22, 0.72, 0.25, 1)",
                   fill: "both",
                   pseudoElement: "::view-transition-new(root)"

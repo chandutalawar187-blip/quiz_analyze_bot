@@ -687,7 +687,7 @@ class DashboardWebTests(unittest.TestCase):
             (
                 "/static/dashboard-theme.js",
                 "javascript",
-                "function blobClipAt",
+                "circle(0px at",
             ),
             (
                 "/static/dashboard-theme.js",
