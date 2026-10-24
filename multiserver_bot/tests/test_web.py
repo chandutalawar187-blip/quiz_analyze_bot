@@ -326,6 +326,14 @@ class DashboardWebTests(unittest.TestCase):
             [guild["id"] for guild in available_guilds.json()],
             ["98765", "67890"],
         )
+        guild_access = {
+            guild["id"]: (guild["role"], guild["is_faculty"])
+            for guild in available_guilds.json()
+        }
+        self.assertEqual(guild_access["67890"], ("admin", True))
+        self.assertEqual(guild_access["98765"], ("admin", False))
+        self.assertIs(guild_access["67890"][1], True)
+        self.assertIs(guild_access["98765"][1], False)
         selected = self.client.post(
             "/api/guilds/select", json={"guild_id": "98765"}
         )
@@ -492,6 +500,14 @@ class DashboardWebTests(unittest.TestCase):
         self.assertIn(
             'id="password" type="password" autocomplete="current-password" disabled',
             password_page.text,
+        )
+        self.assertIn(
+            'let mustChange=false,turnstileWidgetId=null,captchaToken="",verifiedTemporaryPassword="";',
+            password_page.text,
+        )
+        self.assertIn("password.readOnly=true", password_page.text)
+        self.assertIn(
+            "current_password:verifiedTemporaryPassword", password_page.text
         )
         self.assertIn(
             "initializeGuildSelector().then(showCaptcha).catch",
@@ -727,7 +743,7 @@ class DashboardWebTests(unittest.TestCase):
             (
                 "/static/faculty-dashboard.js",
                 "javascript",
-                "loadAssigned",
+                'guild.is_faculty||guild.role==="admin"',
             ),
         ):
             with self.subTest(path=path):

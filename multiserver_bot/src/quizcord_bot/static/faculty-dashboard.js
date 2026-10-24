@@ -1,8 +1,10 @@
 const el=(tag,className,text)=>{const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node;};
     const icon=name=>{const node=el("span","icon icon-"+name);node.setAttribute("aria-hidden","true");return node;};
     const actionContent=(iconName,label)=>{const content=el("span","action-content");content.append(icon(iconName),document.createTextNode(label));return content;};
-    const assigned=document.getElementById("assigned"),candidates=document.getElementById("candidates"),search=document.getElementById("student-search");
-    let assignedUSNs=new Set(),searchTimer;
+const getSavedGuild = () => { try { return localStorage.getItem("quizcord-selected-guild"); } catch { return null; } };
+const setSavedGuild = guildId => { try { localStorage.setItem("quizcord-selected-guild", guildId); } catch {} };
+const assigned=document.getElementById("assigned"),candidates=document.getElementById("candidates"),search=document.getElementById("student-search");
+let assignedUSNs=new Set(),searchTimer;
     function replaceTable(container,tableWrap){
       const scrollTop=container.querySelector(".table-wrap")?.scrollTop??0;
       container.replaceChildren(tableWrap);
@@ -79,15 +81,21 @@ const el=(tag,className,text)=>{const node=document.createElement(tag);if(classN
       const response=await api("/api/guilds");
       if(!response.ok)throw new Error("Could not load your Discord servers.");
       const guilds=await response.json();
-      if(!guilds.length)throw new Error("The bot is not installed in a server you can access.");
+      const dashboardGuilds=guilds.filter(guild=>guild.is_faculty||guild.role==="admin");
+      if(!dashboardGuilds.length)throw new Error("The bot is not installed in a server you can access.");
       selector.replaceChildren();
-      guilds.forEach(guild=>{const option=document.createElement("option");option.value=guild.id;option.textContent=guild.name;selector.append(option);});
-      const saved=localStorage.getItem("quizcord-selected-guild");
-      selector.value=guilds.some(guild=>guild.id===saved)?saved:guilds[0].id;
-      selector.hidden=guilds.length<2;
+      dashboardGuilds.forEach(guild=>{const option=document.createElement("option");option.value=guild.id;option.textContent=guild.name;selector.append(option);});
+      const currentResponse=await api("/api/me");
+      const currentGuildId=currentResponse.ok? (await currentResponse.json()).guild_id : null;
+      const saved=getSavedGuild();
+      const requested=new URLSearchParams(location.search).get("guild_id");
+      const isDashboardGuild=guildId=>dashboardGuilds.some(guild=>guild.id===guildId);
+      const preferred=requested && isDashboardGuild(requested)?requested: saved && isDashboardGuild(saved)?saved: currentGuildId && isDashboardGuild(currentGuildId)?currentGuildId: dashboardGuilds[0].id;
+      selector.value=preferred;
+      selector.hidden=dashboardGuilds.length<2;
       const selected=await api("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:selector.value})});
       if(!selected.ok)throw new Error("Could not select the Discord server.");
-      localStorage.setItem("quizcord-selected-guild",selector.value);
-      selector.addEventListener("change",async()=>{selector.disabled=true;try{const changed=await api("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:selector.value})});if(!changed.ok)throw new Error("Could not select the Discord server.");localStorage.setItem("quizcord-selected-guild",selector.value);reloadForGuild(selector.value);}catch(error){assigned.replaceChildren(el("div","empty error",error.message));selector.disabled=false;}});
+      setSavedGuild(selector.value);
+      selector.addEventListener("change",async()=>{selector.disabled=true;try{const changed=await api("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:selector.value})});if(!changed.ok)throw new Error("Could not select the Discord server.");setSavedGuild(selector.value);reloadForGuild(selector.value);}catch(error){assigned.replaceChildren(el("div","empty error",error.message));selector.disabled=false;}});
     }
     initializeGuildSelector().then(()=>api("/api/me")).then(response=>{if(!response.ok)throw new Error("Sign-in expired.");return response.json();}).then(user=>{document.getElementById("account-name").textContent=user.username;loadAssigned();loadCandidates();}).catch(error=>assigned.replaceChildren(el("div","empty error",error.message)));

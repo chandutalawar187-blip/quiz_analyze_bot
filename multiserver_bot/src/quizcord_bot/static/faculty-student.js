@@ -72,7 +72,7 @@
           el("td", "", record.quizcord_quiz_id || "Not provided"),
           el("td", "", status),
           el("td", "rank", record.rank ? `#${record.rank}` : "—"),
-          el("td", "points", record.points || "—"),
+          el("td", "points", record.points ?? "—"),
         );
         body.append(row);
       });
