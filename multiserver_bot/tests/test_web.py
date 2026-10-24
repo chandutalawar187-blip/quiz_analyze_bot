@@ -716,9 +716,34 @@ class DashboardWebTests(unittest.TestCase):
                 ".dashboard-tabs",
             ),
             (
+                "/static/admin-dashboard.css",
+                "text/css",
+                ".directory-search-field",
+            ),
+            (
+                "/static/admin-dashboard.css",
+                "text/css",
+                ".session-search-field",
+            ),
+            (
                 "/static/admin-dashboard.js",
                 "javascript",
                 "Participant leaderboard",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "No leaderboard entries match your search.",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "Search names or USN",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "View analytics",
             ),
             (
                 "/static/faculty-dashboard.css",

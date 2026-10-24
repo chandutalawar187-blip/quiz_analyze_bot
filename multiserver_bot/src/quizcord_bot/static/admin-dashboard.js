@@ -2,6 +2,7 @@ const select = document.getElementById("session-select");
     const content = document.getElementById("content");
     const dashboardTabs = document.getElementById("dashboard-tabs");
     const sessionHeading = document.getElementById("session-heading");
+    const leaderboardSearch = document.getElementById("leaderboard-search");
     const initialSession = new URLSearchParams(location.search).get("session");
     const facultyStudentPath = location.pathname.startsWith("/faculty/students/");
     const studentPath = facultyStudentPath ? location.pathname.slice("/faculty/students/".length) : location.pathname.startsWith("/students/") ? location.pathname.slice("/students/".length) : null;
@@ -37,6 +38,18 @@ const select = document.getElementById("session-select");
     let pollBusy = false;
     let userSearchQuery = "";
     let pendingDirectoryUsers = null;
+    let leaderboardSearchQuery = "";
+    function filterLeaderboard(){
+      const query=leaderboardSearchQuery.trim().toLocaleLowerCase();
+      const rows=content.querySelectorAll(".leaderboard-row");
+      let visibleCount=0;
+      rows.forEach(row=>{
+        row.hidden=!row.dataset.search.includes(query);
+        if(!row.hidden)visibleCount++;
+      });
+      const emptyState=content.querySelector(".leaderboard-no-results");
+      if(emptyState)emptyState.hidden=visibleCount>0||rows.length===0;
+    }
     function metric(label,value){
       const iconName=label.includes("Student")||label.includes("Quizzes attended")?"users":label.includes("rate")||label.includes("points")?"chart-bar":label.includes("updates")?"clock":"book-2";
       const labelNode=el("div","metric-label");labelNode.append(icon(iconName),document.createTextNode(label));
@@ -70,7 +83,8 @@ const select = document.getElementById("session-select");
         const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),tr=el("tr");
         ["Rank","Student USN","Quizcord points"].forEach(label=>tr.append(el("th","",label)));
         thead.append(tr);table.append(thead);const tbody=el("tbody");
-        participants.forEach(person=>{const row=el("tr"),link=document.createElement("a");link.className="student-link";link.href="/students/"+encodeURIComponent(person.usn);link.textContent=person.usn;row.append(el("td","rank","#"+safe(person.rank)));const studentCell=el("td","usn");studentCell.append(link);if(person.name_matches_usn_format===false)studentCell.append(el("div","name-warning","Name not updated to USN"));row.append(studentCell,el("td","points",safe(person.points)));tbody.append(row);});
+        participants.forEach(person=>{const row=el("tr","leaderboard-row"),link=document.createElement("a");link.className="student-link";link.href="/students/"+encodeURIComponent(person.usn);link.textContent=person.usn;row.append(el("td","rank","#"+safe(person.rank)));const studentCell=el("td","usn");studentCell.append(link);if(person.name_matches_usn_format===false)studentCell.append(el("div","name-warning","Name not updated to USN"));row.append(studentCell,el("td","points",safe(person.points)));row.dataset.search=[person.name,person.usn,person.rank,person.points].filter(Boolean).join(" ").toLocaleLowerCase();tbody.append(row);});
+        const noResults=el("tr","leaderboard-no-results");noResults.hidden=true;const message=el("td","empty","No leaderboard entries match your search.");message.colSpan=3;noResults.append(message);tbody.append(noResults);
         table.append(tbody);wrap.append(table);roster.append(wrap);
       }
       const side=el("article","panel");const sideHead=el("div","panel-head");sideHead.append(el("h2","","Student attendance"));side.append(sideHead);
@@ -83,7 +97,7 @@ const select = document.getElementById("session-select");
       [["Human server members",eligibleCount??"Unavailable"],["Started",new Date(session.started_at).toLocaleString()]].forEach(([label,value])=>{const row=el("div","summary-row");row.append(el("span","",label),el("strong","",safe(value)));rows.append(row);});
       side.append(rows,el("div","note","Attendance includes human members regardless of server permissions. Bot accounts are excluded."));
       if(complete){const link=document.createElement("a");link.className="export-link";link.href="/api/sessions/"+encodeURIComponent(session.session_id)+"/export.xlsx";link.append(actionContent("download","Download Excel"));link.style.display="flex";link.style.margin="0 20px 20px";side.append(link);}
-      layout.append(roster,side);content.replaceChildren(grid,layout);
+      layout.append(roster,side);content.replaceChildren(grid,layout);filterLeaderboard();
       const tableWrap=content.querySelector(".table-wrap");
       if(tableWrap)tableWrap.scrollTop=scrollTop;
     }
@@ -98,13 +112,24 @@ const select = document.getElementById("session-select");
       const searchField=el("label","directory-search-field");searchField.append(icon("search"),search);
       tools.append(el("span","","Names marked below need a USN-format global display name."),searchField);panel.append(tools);
       const wrap=el("div","table-wrap"),table=el("table","directory-table"),thead=el("thead"),headRow=el("tr");
-      ["Global display name","Account username","Server nickname","USN"].forEach(label=>headRow.append(el("th","",label)));
+      ["Global display name","Account username","Server nickname","USN","Analytics"].forEach(label=>headRow.append(el("th","",label)));
       thead.append(headRow);table.append(thead);const body=el("tbody");
       const rows=[];
       users.forEach(user=>{const row=el("tr"),globalCell=el("td","");
         globalCell.append(el("span","",user.global_name||"Not set"));
         if(!user.name_matches_usn_format)globalCell.append(el("div","directory-warning","Name not updated to USN"));
-        row.append(globalCell,el("td","",user.account_name),el("td","",user.server_nickname||"—"),el("td","usn",user.usn||"—"));
+        const analyticsCell=el("td","");
+        if(user.usn){
+          const analyticsLink=document.createElement("a");
+          analyticsLink.className="directory-analytics-link";
+          analyticsLink.href="/students/"+encodeURIComponent(user.usn);
+          analyticsLink.textContent="View analytics";
+          analyticsLink.setAttribute("aria-label","View analytics for "+user.usn);
+          analyticsCell.append(analyticsLink);
+        }else{
+          analyticsCell.append(el("span","directory-analytics-unavailable","USN required"));
+        }
+        row.append(globalCell,el("td","",user.account_name),el("td","",user.server_nickname||"—"),el("td","usn",user.usn||"—"),analyticsCell);
         row.dataset.search=[user.global_name,user.account_name,user.server_nickname,user.student_name,user.usn].filter(Boolean).join(" ").toLocaleLowerCase();
         rows.push(row);body.append(row);
       });
@@ -122,6 +147,7 @@ const select = document.getElementById("session-select");
       document.getElementById("back-link").hidden=false;
       document.getElementById("back-link").href=facultyStudentPath?"/faculty":"/";
       select.hidden=true;
+      leaderboardSearch.closest(".session-search-field").hidden=true;
       document.querySelector(".eyebrow").textContent="Student analytics";
       document.querySelector("h1").textContent=student.student_name;
       const heading=el("div","profile-heading");
@@ -189,6 +215,7 @@ const select = document.getElementById("session-select");
       if(view==="users")refreshUsers();else refresh();
     }
     dashboardTabs.addEventListener("click",event=>{const button=event.target.closest("button[data-view]");if(button)switchView(button.dataset.view);});
+    leaderboardSearch.addEventListener("input",()=>{leaderboardSearchQuery=leaderboardSearch.value;filterLeaderboard();});
     select.addEventListener("change",()=>{activeSession=select.value;refresh();});
     initializeGuildSelector().then(()=>{
     return fetch("/api/me").then(response=>{if(!response.ok)throw new Error("Sign-in expired.");return response.json();}).then(user=>{document.getElementById("account-name").textContent=user.username;document.getElementById("faculty-password-link").hidden=user.role!=="admin";});
