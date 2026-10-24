@@ -1,5 +1,6 @@
 """Commands and event handlers for Quizcord analytics."""
 
+import asyncio
 import logging
 import sqlite3
 from datetime import date, datetime, timezone
@@ -272,8 +273,9 @@ class AnalyticsCog(commands.Cog):
             )
             return
 
-        analytics_count, session_count = (
-            self.database.clear_guild_quiz_history(interaction.guild_id)
+        await interaction.response.defer(ephemeral=True)
+        analytics_count, session_count = await asyncio.to_thread(
+            self.database.clear_guild_quiz_history, interaction.guild_id
         )
         LOGGER.warning(
             "Cleared quiz history for guild %s: %d analytics rows and "
@@ -282,7 +284,7 @@ class AnalyticsCog(commands.Cog):
             analytics_count,
             session_count,
         )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Cleared this server’s quiz history: {session_count:,} sessions "
             f"and {analytics_count:,} saved student results. Student mappings "
             "and faculty settings were kept. This cannot be undone.",

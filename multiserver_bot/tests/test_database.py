@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from quizcord_bot.cogs.analytics import AnalyticsCog
 from quizcord_bot.database import Database, matches_usn_format
@@ -1462,6 +1462,7 @@ class ClearQuizHistoryCommandTests(unittest.IsolatedAsyncioTestCase):
         interaction = SimpleNamespace(
             guild_id=67890,
             response=SimpleNamespace(send_message=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
         )
 
         await cog.clear_quiz_history.callback(cog, interaction, "delete")
@@ -1478,21 +1479,46 @@ class ClearQuizHistoryCommandTests(unittest.IsolatedAsyncioTestCase):
             clear_guild_quiz_history=Mock(return_value=(12, 4))
         )
         cog = AnalyticsCog(SimpleNamespace(), SimpleNamespace(), database)
+        events = []
+
+        async def defer(**kwargs):
+            events.append(("defer", kwargs))
+
+        def clear_history(guild_id):
+            events.append(("clear", guild_id))
+            return 12, 4
+
+        database.clear_guild_quiz_history.side_effect = clear_history
         interaction = SimpleNamespace(
             guild_id=67890,
-            response=SimpleNamespace(send_message=AsyncMock()),
+            response=SimpleNamespace(
+                defer=AsyncMock(side_effect=defer),
+                send_message=AsyncMock(),
+            ),
+            followup=SimpleNamespace(
+                send=AsyncMock(
+                    side_effect=lambda *args, **kwargs: events.append(
+                        ("followup", args, kwargs)
+                    )
+                )
+            ),
         )
 
         await cog.clear_quiz_history.callback(cog, interaction, "DELETE")
 
         database.clear_guild_quiz_history.assert_called_once_with(67890)
-        interaction.response.send_message.assert_awaited_once()
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        interaction.response.send_message.assert_not_awaited()
+        interaction.followup.send.assert_awaited_once()
+        self.assertEqual(
+            [event[0] for event in events], ["defer", "clear", "followup"]
+        )
         self.assertIn(
             "4 sessions and 12 saved student results",
-            interaction.response.send_message.await_args.args[0],
+            interaction.followup.send.await_args.args[0],
         )
         self.assertTrue(
-            interaction.response.send_message.await_args.kwargs["ephemeral"]
+            interaction.followup.send.await_args.kwargs["ephemeral"]
         )
 
 
