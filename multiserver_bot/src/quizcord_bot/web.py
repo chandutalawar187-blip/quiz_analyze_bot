@@ -14,6 +14,7 @@ from urllib.parse import urlencode, urlsplit
 import httpx
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
@@ -108,6 +109,13 @@ def _wants_json_error(request: Request) -> bool:
         return True
     accept = request.headers.get("accept", "").casefold()
     return "application/json" in accept and "text/html" not in accept
+
+
+class GuildResponse(BaseModel):
+    id: str
+    name: str
+    role: str
+    is_faculty: bool
 
 
 @dataclass
@@ -660,24 +668,24 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         request.session.clear()
         return RedirectResponse("/", status_code=302)
 
-    @app.get("/api/guilds")
+    @app.get("/api/guilds", response_model=list[GuildResponse])
     async def available_guilds(
         request: Request,
-    ) -> list[dict[str, str | bool]]:
+    ) -> list[GuildResponse]:
         auth_session = await current_authenticated(request)
         installed = dict(database.get_installed_guilds())
         guild_ids = auth_session.admin_guild_ids | auth_session.faculty_guild_ids
         return [
-            {
-                "id": str(guild_id),
-                "name": name,
-                "role": (
+            GuildResponse(
+                id=str(guild_id),
+                name=name,
+                role=(
                     "admin"
                     if guild_id in auth_session.admin_guild_ids
                     else "faculty"
                 ),
-                "is_faculty": guild_id in auth_session.faculty_guild_ids,
-            }
+                is_faculty=guild_id in auth_session.faculty_guild_ids,
+            )
             for guild_id, name in sorted(
                 installed.items(), key=lambda item: item[1].casefold()
             )

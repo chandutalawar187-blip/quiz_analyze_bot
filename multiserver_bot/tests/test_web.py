@@ -332,6 +332,8 @@ class DashboardWebTests(unittest.TestCase):
         }
         self.assertEqual(guild_access["67890"], ("admin", True))
         self.assertEqual(guild_access["98765"], ("admin", False))
+        self.assertIs(guild_access["67890"][1], True)
+        self.assertIs(guild_access["98765"][1], False)
         selected = self.client.post(
             "/api/guilds/select", json={"guild_id": "98765"}
         )
