@@ -33,8 +33,17 @@ USN_FORMAT_PATTERN = re.compile(
 LOGGER = logging.getLogger("quizcord_analytics.database")
 
 
+def normalize_usn(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    return "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) != "Cf"
+    )
+
+
 def matches_usn_format(value: str) -> bool:
-    return bool(USN_FORMAT_PATTERN.fullmatch(value.strip()))
+    return bool(USN_FORMAT_PATTERN.fullmatch(normalize_usn(value)))
 
 
 def normalize_member_alias(value: str) -> str:
@@ -2049,7 +2058,7 @@ class Database:
                     str(usn)
                     if usn
                     else (
-                        str(global_name).strip()
+                        normalize_usn(str(global_name))
                         if global_name
                         and matches_usn_format(str(global_name))
                         else None
@@ -2081,13 +2090,14 @@ class Database:
     def add_faculty_student(
         self, guild_id: int, faculty_discord_id: int, usn: str
     ) -> bool:
-        normalized_usn = usn.strip().upper()
+        normalized_usn = normalize_usn(usn).upper()
         candidate = next(
             (
                 user
                 for user in self.get_dashboard_users(guild_id)
                 if user.usn is not None
-                and user.usn.casefold() == normalized_usn.casefold()
+                and normalize_usn(user.usn).casefold()
+                == normalized_usn.casefold()
             ),
             None,
         )
@@ -2095,7 +2105,7 @@ class Database:
             candidate is None
             or not matches_usn_format(candidate.global_name or "")
             or normalized_usn.casefold()
-            != (candidate.global_name or "").strip().casefold()
+            != normalize_usn(candidate.global_name or "").casefold()
         ):
             return False
         with self._connect() as connection:

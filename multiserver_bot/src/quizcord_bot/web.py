@@ -27,6 +27,7 @@ from quizcord_bot.database import (
     QuizSessionSummary,
     StudentQuizAnalytics,
     matches_usn_format,
+    normalize_usn,
 )
 from quizcord_bot.exports import quiz_session_workbook, student_analytics_workbook
 from quizcord_bot.telemetry import record_http_request, trace_external_request
@@ -1137,8 +1138,8 @@ _read_web_template("admin_login.html").replace(
                     "can_assign": (
                         user.usn is not None
                         and matches_usn_format(user.global_name or "")
-                        and user.usn.casefold()
-                        == (user.global_name or "").strip().casefold()
+                        and normalize_usn(user.usn).casefold()
+                        == normalize_usn(user.global_name or "").casefold()
                     ),
                     "name_matches_usn_format": user.name_matches_usn_format,
                     "assigned": (
@@ -1173,8 +1174,8 @@ _read_web_template("admin_login.html").replace(
             )
         if (
             not matches_usn_format(matching_user.global_name or "")
-            or usn.casefold()
-            != (matching_user.global_name or "").strip().casefold()
+            or normalize_usn(usn).casefold()
+            != normalize_usn(matching_user.global_name or "").casefold()
         ):
             raise HTTPException(
                 status_code=422,

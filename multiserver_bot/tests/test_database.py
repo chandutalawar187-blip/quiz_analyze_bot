@@ -1169,6 +1169,9 @@ class DatabaseTests(unittest.TestCase):
     def test_usn_format_accepts_both_configured_patterns(self) -> None:
         self.assertTrue(matches_usn_format("4GM22CS001"))
         self.assertTrue(matches_usn_format("U22E22CS001"))
+        self.assertTrue(matches_usn_format("U26E\u200b01CS027"))
+        self.assertTrue(matches_usn_format("4GM23CS055\u200b"))
+        self.assertTrue(matches_usn_format("４ＧＭ２３ＣＳ０５５"))
         self.assertFalse(matches_usn_format("Student Nickname"))
         self.assertFalse(matches_usn_format("4GM22CS01"))
 
@@ -1182,7 +1185,7 @@ class DatabaseTests(unittest.TestCase):
             manage_channels=False,
             manage_messages=False,
         )
-        self.member.global_name = "4GM22CS001"
+        self.member.global_name = "4GM22CS\u200b001"
         self.database.sync_member(self.member)
         session = self.database.start_quiz_session(
             guild.id, 1001, 12345, "2026-10-01T10:00:00+00:00"
@@ -1199,6 +1202,23 @@ class DatabaseTests(unittest.TestCase):
         if summary is None:
             self.fail("Expected the final leaderboard summary.")
         self.assertTrue(summary.participants[0].name_matches_usn_format)
+
+    def test_faculty_assignment_accepts_unicode_formatted_usn(self) -> None:
+        member = SimpleNamespace(
+            id=54321,
+            name="student_account",
+            display_name="Student Nickname",
+            global_name="4GM22CS\u200b001",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=SimpleNamespace(id=67890),
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.sync_member(member)
+
+        self.assertTrue(
+            self.database.add_faculty_student(67890, 111, "4GM22CS001")
+        )
 
     def test_global_name_reminder_is_limited_to_once_per_registered_student_per_quiz(
         self,
