@@ -83,6 +83,9 @@
       script.onload = resolve;
       script.onerror = () => reject(new Error("Sentry SDK failed to load."));
       document.head.append(script);
+    }).catch((error) => {
+      sdkPromise = undefined;
+      throw error;
     });
     return sdkPromise;
   }
@@ -121,6 +124,8 @@
         defaultIntegrations: false,
         sendDefaultPii: false,
         dataCollection: {
+          httpHeaders: [],
+          httpBodies: [],
           urlQueryParams: false,
         },
         tracesSampler: () => (readChoice() === "accepted" ? 0.1 : 0),

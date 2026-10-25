@@ -106,7 +106,7 @@ const select = document.getElementById("session-select");
       }
       tbody.append(noResults);table.append(tbody);wrap.append(table);roster.append(wrap);
       const side=el("article","panel");const sideHead=el("div","panel-head");sideHead.append(el("h2","","Student attendance"));side.append(sideHead);
-      const ringWrap=el("div","ring-wrap"),ring=el("div","ring"+(complete?" complete":""));
+      const ringWrap=el("div","ring-wrap"),ring=el("div","ring");
       ring.innerHTML='<svg viewBox="0 0 120 120" aria-hidden="true"><circle class="track" cx="60" cy="60" r="52"></circle><circle class="value" cx="60" cy="60" r="52"></circle></svg>';
       const ringValue=ring.querySelector(".value");
       if(ringValue&&attendanceRate!==null)ringValue.style.strokeDashoffset=String(326.7*(1-Math.min(100,attendanceRate)/100));

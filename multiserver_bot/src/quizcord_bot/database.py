@@ -1868,8 +1868,8 @@ class Database:
                 ORDER BY
                     COALESCE(
                         NULLIF(r.student_name, ''),
-                        NULLIF(e.global_name, ''),
                         NULLIF(e.display_name, ''),
+                        NULLIF(e.global_name, ''),
                         u.name
                     ) COLLATE NOCASE
                 """,

@@ -759,6 +759,11 @@ class DashboardWebTests(unittest.TestCase):
                 "overflow-y: auto",
             ),
             (
+                "/static/admin-dashboard.css",
+                "text/css",
+                ".ring .value",
+            ),
+            (
                 "/static/admin-dashboard.js",
                 "javascript",
                 "Students who attended",
@@ -831,6 +836,21 @@ class DashboardWebTests(unittest.TestCase):
             (
                 "/static/cookie-preferences.js",
                 "javascript",
+                "httpHeaders: []",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                "httpBodies: []",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                "sdkPromise = undefined",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
                 "beforeSendSpan: scrubSpan",
             ),
             (
@@ -871,7 +891,17 @@ class DashboardWebTests(unittest.TestCase):
             (
                 "/static/faculty-dashboard.js",
                 "javascript",
+                "if(query!==search.value.trim())return;",
+            ),
+            (
+                "/static/faculty-dashboard.js",
+                "javascript",
                 "loadAssigned();}).catch",
+            ),
+            (
+                "/static/faculty-student.js",
+                "javascript",
+                "new Date(year, month - 1, day)",
             ),
         ):
             with self.subTest(path=path):

@@ -930,6 +930,40 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(absentees[0].display_name, "Absent Nickname")
         self.assertEqual(absentees[0].usn, "4GM22CS002")
 
+    def test_quiz_session_absentees_sort_by_the_displayed_name(self) -> None:
+        guild = SimpleNamespace(id=67890)
+        first = SimpleNamespace(
+            id=54321,
+            name="first_account",
+            display_name="Zulu Nickname",
+            global_name="A Global Name",
+            status=SimpleNamespace(name="offline"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(),
+        )
+        second = SimpleNamespace(
+            id=54322,
+            name="second_account",
+            display_name="Alpha Nickname",
+            global_name="Z Global Name",
+            status=SimpleNamespace(name="offline"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.sync_members((first, second))
+        session = self.database.start_quiz_session(
+            guild.id, 1001, 12345, "2026-10-25T10:00:00+00:00"
+        )
+
+        absentees = self.database.get_quiz_session_absentees(session.session_id)
+
+        self.assertEqual(
+            [student.display_name for student in absentees],
+            ["Alpha Nickname", "Zulu Nickname"],
+        )
+
     def test_faculty_student_assignments_are_private_and_require_a_known_usn(
         self,
     ) -> None:

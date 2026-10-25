@@ -42,6 +42,7 @@ let assignedUSNs=new Set(),searchTimer;
         const response=await api("/api/faculty/candidates?search="+encodeURIComponent(query));
         if(!response.ok)throw new Error("Could not search students.");
         const users=await response.json();
+        if(query!==search.value.trim())return;
         if(!users.length){candidates.replaceChildren(el("div","empty","No students found for that USN."));return;}
         const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),head=el("tr");
         ["Student","USN",""].forEach(label=>head.append(el("th","",label)));
@@ -56,7 +57,7 @@ let assignedUSNs=new Set(),searchTimer;
           const actionCell=el("td","");actionCell.appendChild(button);row.append(actionCell);body.append(row);
         });
         table.append(body);wrap.append(table);replaceTable(candidates,wrap);
-      }catch(error){candidates.replaceChildren(el("div","empty error",error.message));}
+      }catch(error){if(query===search.value.trim())candidates.replaceChildren(el("div","empty error",error.message));}
     }
     async function addStudent(usn,button){
       button.disabled=true;
