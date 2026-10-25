@@ -155,7 +155,6 @@ const select = document.getElementById("session-select");
       if(!users.length)panel.append(el("div","empty","No synchronized human members found."));
       const filterRows=()=>{const query=search.value.trim().toLocaleLowerCase();rows.forEach(row=>{row.hidden=!row.dataset.search.includes(query);});};
       search.addEventListener("input",()=>{userSearchQuery=search.value;filterRows();});
-      search.addEventListener("blur",()=>{if(pendingDirectoryUsers!==null&&activeView==="users"){const updatedUsers=pendingDirectoryUsers;pendingDirectoryUsers=null;renderUsers(updatedUsers);}});
       filterRows();
       content.replaceChildren(heading,panel);
       content.querySelector(".table-wrap").scrollTop=scrollTop;
@@ -220,7 +219,7 @@ const select = document.getElementById("session-select");
         const users=await response.json();
         if(activeView==="users"){
           if(content.querySelector(".directory-search")===document.activeElement)pendingDirectoryUsers=users;
-          else renderUsers(users);
+          else{pendingDirectoryUsers=null;renderUsers(users);}
         }
       }catch(error){content.replaceChildren(el("div","empty error",error.message));}
       finally{pollBusy=false;}

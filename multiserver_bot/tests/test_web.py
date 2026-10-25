@@ -523,6 +523,9 @@ class DashboardWebTests(unittest.TestCase):
             '"error-callback":()=>{if(mustChange)return;captchaToken="";',
             password_page.text,
         )
+        self.assertIn(
+            '.filter(guild=>guild.is_faculty)', password_page.text
+        )
         self.assertEqual(self.client.get("/faculty").status_code, 200)
         self.assertEqual(
             self.client.get("/api/faculty/students").status_code, 428
@@ -746,6 +749,16 @@ class DashboardWebTests(unittest.TestCase):
                 ".attendance-toggle",
             ),
             (
+                "/static/admin-dashboard.css",
+                "text/css",
+                "max-height: calc(100dvh - 40px)",
+            ),
+            (
+                "/static/admin-dashboard.css",
+                "text/css",
+                "overflow-y: auto",
+            ),
+            (
                 "/static/admin-dashboard.js",
                 "javascript",
                 "Students who attended",
@@ -779,6 +792,11 @@ class DashboardWebTests(unittest.TestCase):
                 "/static/admin-dashboard.js",
                 "javascript",
                 "View analytics",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                'else{pendingDirectoryUsers=null;renderUsers(users);}',
             ),
             (
                 "/static/cookie-preferences.js",

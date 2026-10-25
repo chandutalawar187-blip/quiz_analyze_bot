@@ -1883,6 +1883,39 @@ class ClearQuizHistoryCommandTests(unittest.IsolatedAsyncioTestCase):
             interaction.followup.send.await_args.kwargs["ephemeral"]
         )
 
+    async def test_reports_history_clear_failure_after_deferring(self) -> None:
+        database = SimpleNamespace(
+            clear_guild_quiz_history=Mock(
+                side_effect=sqlite3.OperationalError("database is locked")
+            )
+        )
+        cog = AnalyticsCog(SimpleNamespace(), SimpleNamespace(), database)
+        interaction = SimpleNamespace(
+            guild_id=67890,
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        with self.assertLogs(
+            "quizcord_analytics", level="ERROR"
+        ) as captured:
+            await cog.clear_quiz_history.callback(cog, interaction, "DELETE")
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        interaction.followup.send.assert_awaited_once()
+        self.assertIn(
+            "Could not clear this server’s quiz history",
+            interaction.followup.send.await_args.args[0],
+        )
+        self.assertNotIn(
+            "Cleared this server’s quiz history",
+            interaction.followup.send.await_args.args[0],
+        )
+        self.assertTrue(
+            interaction.followup.send.await_args.kwargs["ephemeral"]
+        )
+        self.assertIn("database is locked", captured.output[0])
+
 
 if __name__ == "__main__":
     unittest.main()

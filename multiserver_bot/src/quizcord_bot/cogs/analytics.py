@@ -273,9 +273,22 @@ class AnalyticsCog(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
-        analytics_count, session_count = await asyncio.to_thread(
-            self.database.clear_guild_quiz_history, interaction.guild_id
-        )
+        try:
+            analytics_count, session_count = await asyncio.to_thread(
+                self.database.clear_guild_quiz_history, interaction.guild_id
+            )
+        except Exception:
+            LOGGER.exception(
+                "Could not clear quiz history for guild %s.",
+                interaction.guild_id,
+            )
+            await interaction.followup.send(
+                "Could not clear this server’s quiz history. No success was "
+                "reported; please retry later or contact an administrator "
+                "if the problem continues.",
+                ephemeral=True,
+            )
+            return
         LOGGER.warning(
             "Cleared quiz history for guild %s: %d analytics rows and "
             "%d quiz sessions.",

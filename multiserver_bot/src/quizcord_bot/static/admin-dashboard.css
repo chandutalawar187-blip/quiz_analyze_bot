@@ -65,6 +65,9 @@ button, a, input, select { font: inherit; }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
   gap: 24px;
   max-width: 980px;
   margin: 0 auto;
@@ -555,6 +558,6 @@ td.points {
   .directory-tools{ align-items:stretch; flex-direction:column; }
   .directory-search-field{ flex-basis:auto; min-width:0; }
   .attendance-controls{ align-items:flex-start; flex-direction:column; }
-  .cookie-preferences-panel{ inset: auto 10px 10px; align-items:stretch; flex-direction:column; gap:14px; padding:16px; }
+  .cookie-preferences-panel{ inset: auto 10px 10px; max-height:calc(100vh - 20px); max-height:calc(100dvh - 20px); align-items:stretch; flex-direction:column; gap:14px; padding:16px; }
   .cookie-preferences-actions{ flex-wrap:wrap; }
 }
