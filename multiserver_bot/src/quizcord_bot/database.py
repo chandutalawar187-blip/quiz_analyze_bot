@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 import time
@@ -24,6 +24,7 @@ POINTS_PATTERN = re.compile(r"^\s*(?P<points>\d+)(?:\s+Points?)?\s*$", re.IGNORE
 APP_PASSWORD_HASH_ITERATIONS = 310_000
 APP_PASSWORD_MAX_ATTEMPTS = 5
 APP_PASSWORD_LOCK_SECONDS = 900
+DISCORD_EPOCH_MILLISECONDS = 1_420_070_400_000
 USER_MENTION_PATTERN = re.compile(r"^<@!?(\d+)>$")
 USER_MENTION_IDS_PATTERN = re.compile(r"<@!?(\d+)>")
 USN_FORMAT_PATTERN = re.compile(
@@ -560,6 +561,71 @@ class Database:
                     sorted(quiz_ids),
                 )
                 continue
+            if (
+                len({str(row[1]) for row in sessions}) != 1
+                or any(row[1] == "completed" for row in sessions)
+            ):
+                LOGGER.warning(
+                    "Keeping separate quiz sessions for guild %s, channel %s "
+                    "on %s because their completion states differ or are "
+                    "already completed.",
+                    guild_id,
+                    channel_id,
+                    quiz_day,
+                )
+                continue
+            session_ids = [str(row[0]) for row in sessions]
+            message_rows = connection.execute(
+                """
+                SELECT u.session_id, u.message_id
+                FROM quiz_session_updates AS u
+                JOIN quiz_sessions AS s ON s.session_id = u.session_id
+                WHERE s.guild_id = ? AND s.channel_id = ?
+                  AND substr(s.started_at, 1, 10) = ?
+                  AND s.status != 'merged'
+                """,
+                (guild_id, channel_id, quiz_day),
+            ).fetchall()
+            message_ids_by_session = {
+                session_id: set() for session_id in session_ids
+            }
+            for session_id, message_id in message_rows:
+                message_ids_by_session[str(session_id)].add(str(message_id))
+            session_message_sets = list(message_ids_by_session.values())
+            if (
+                not session_message_sets[0]
+                or any(
+                    message_ids != session_message_sets[0]
+                    for message_ids in session_message_sets[1:]
+                )
+            ):
+                LOGGER.warning(
+                    "Keeping separate quiz sessions for guild %s, channel %s "
+                    "on %s because their leaderboard message histories differ.",
+                    guild_id,
+                    channel_id,
+                    quiz_day,
+                )
+                continue
+            analytics_ids = set(session_ids) | quiz_ids
+            placeholders = ",".join("?" for _ in analytics_ids)
+            existing_analytics = connection.execute(
+                f"""
+                SELECT 1 FROM quiz_analytics
+                WHERE guild_id = ? AND quiz_id IN ({placeholders})
+                LIMIT 1
+                """,
+                (str(guild_id), *sorted(analytics_ids)),
+            ).fetchone()
+            if existing_analytics:
+                LOGGER.warning(
+                    "Keeping separate quiz sessions for guild %s, channel %s "
+                    "on %s because analytics rows already exist.",
+                    guild_id,
+                    channel_id,
+                    quiz_day,
+                )
+                continue
 
             identified_sessions = [
                 row for row in sessions if row[5] is not None
@@ -570,7 +636,6 @@ class Database:
                 else sessions[0]
             )
             canonical_id = str(canonical[0])
-            session_ids = [str(row[0]) for row in sessions]
             duplicate_ids = [
                 session_id
                 for session_id in session_ids
@@ -1066,14 +1131,68 @@ class Database:
         with self._connect() as connection:
             active = connection.execute(
                 """
-                SELECT session_id
+                SELECT session_id, started_at,
+                       (SELECT MAX(CAST(message_id AS INTEGER))
+                        FROM quiz_session_updates
+                        WHERE session_id = quiz_sessions.session_id)
                 FROM quiz_sessions
                 WHERE channel_id = ? AND status = 'active'
                 """,
                 (str(channel_id),),
             ).fetchone()
             if active:
-                return self._get_session(connection, active[0])
+                try:
+                    active_started_at = datetime.fromisoformat(str(active[1]))
+                    new_started_at = datetime.fromisoformat(started_at)
+                except ValueError:
+                    LOGGER.warning(
+                        "Keeping active quiz session %s because its start time "
+                        "could not be compared with a new start signal.",
+                        active[0],
+                    )
+                    return self._get_session(connection, active[0])
+                if active_started_at.tzinfo is None:
+                    active_started_at = active_started_at.replace(
+                        tzinfo=timezone.utc
+                    )
+                if new_started_at.tzinfo is None:
+                    new_started_at = new_started_at.replace(
+                        tzinfo=timezone.utc
+                    )
+                last_activity_at = active_started_at
+                if active[2] is not None:
+                    try:
+                        message_snowflake = int(active[2])
+                    except (TypeError, ValueError):
+                        message_snowflake = 0
+                    if message_snowflake > 0:
+                        activity_timestamp_ms = (
+                            (message_snowflake >> 22)
+                            + DISCORD_EPOCH_MILLISECONDS
+                        )
+                        message_activity_at = datetime.fromtimestamp(
+                            activity_timestamp_ms / 1000,
+                            timezone.utc,
+                        )
+                        if message_activity_at >= active_started_at:
+                            last_activity_at = message_activity_at
+                elapsed = new_started_at - last_activity_at
+                if elapsed < timedelta(hours=1):
+                    return self._get_session(connection, active[0])
+                connection.execute(
+                    """
+                    UPDATE quiz_sessions
+                    SET status = 'interrupted'
+                    WHERE session_id = ? AND status = 'active'
+                    """,
+                    (active[0],),
+                )
+                LOGGER.warning(
+                    "Marking stale quiz session %s interrupted before starting "
+                    "a new quiz in channel %s.",
+                    active[0],
+                    channel_id,
+                )
 
             session_id = uuid.uuid4().hex
             connection.execute(

@@ -404,10 +404,66 @@ class DatabaseTests(unittest.TestCase):
         self.assertNotEqual(next_session.session_id, session.session_id)
         self.assertEqual(next_session.status, "active")
 
-    def test_initialize_merges_split_same_day_sessions_and_preserves_history(
+    def test_stale_active_session_is_interrupted_before_next_quiz(self) -> None:
+        session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-24T19:00:00+00:00"
+        )
+        self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "question-1",
+            [("1", "Student Nickname", "900")],
+            False,
+        )
+
+        next_session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-24T20:00:00+00:00"
+        )
+
+        self.assertNotEqual(next_session.session_id, session.session_id)
+        self.assertEqual(next_session.status, "active")
+        previous_summary = self.database.get_quiz_session_summary(
+            session.session_id
+        )
+        self.assertEqual(previous_summary.session.status, "interrupted")
+        self.assertEqual(previous_summary.session.question_count, 1)
+        self.assertEqual(previous_summary.participants[0].points, 900)
+
+    def test_recent_leaderboard_keeps_long_running_quiz_active(self) -> None:
+        session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-24T19:00:00+00:00"
+        )
+        activity_time = datetime.fromisoformat("2026-10-24T19:50:00+00:00")
+        activity_snowflake = (
+            int(activity_time.timestamp() * 1000) - 1_420_070_400_000
+        ) << 22
+        self.database.record_quiz_leaderboard(
+            session.session_id,
+            activity_snowflake,
+            "question-1",
+            [("1", "Student Nickname", "900")],
+            False,
+        )
+
+        repeated_start = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-24T20:30:00+00:00"
+        )
+        next_quiz = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-24T20:51:00+00:00"
+        )
+
+        self.assertEqual(repeated_start.session_id, session.session_id)
+        self.assertNotEqual(next_quiz.session_id, session.session_id)
+        self.assertEqual(
+            self.database.get_quiz_session_summary(
+                session.session_id
+            ).session.status,
+            "interrupted",
+        )
+
+    def test_initialize_preserves_ambiguous_completed_same_day_sessions(
         self,
     ) -> None:
-        started_at = "2026-10-24T19:00:00+00:00"
         sessions = []
         for index, (score, quiz_id) in enumerate(
             ((900, None), (950, None), (1000, "3228337"), (1100, None))
@@ -435,24 +491,19 @@ class DatabaseTests(unittest.TestCase):
         self.database.initialize()
         self.database.initialize()
 
-        [summary] = self.database.get_quiz_session_summaries(67890)
-        self.assertEqual(summary.session.session_id, sessions[2].session_id)
-        self.assertEqual(summary.session.quizcord_quiz_id, "3228337")
-        self.assertEqual(summary.session.started_at, started_at)
-        self.assertEqual(summary.session.question_count, 4)
-        self.assertEqual(len(summary.participants), 1)
-        self.assertEqual(summary.participants[0].points, 1100)
+        summaries = self.database.get_quiz_session_summaries(67890)
+        self.assertEqual(len(summaries), 4)
         self.assertEqual(
-            self.database.get_quiz_session_summary(
-                sessions[0].session_id
-            ).session.session_id,
-            sessions[2].session_id,
+            {summary.session.session_id for summary in summaries},
+            {session.session_id for session in sessions},
         )
-        self.assertEqual(len(self.database.get_dashboard_sessions()), 1)
+        self.assertTrue(
+            all(summary.session.status == "completed" for summary in summaries)
+        )
         analytics = self.database.get_student_quiz_analytics(67890, "ABC123")
-        self.assertEqual(analytics.quizzes_attended, 1)
-        self.assertEqual(analytics.completed_quizzes, 1)
-        self.assertEqual(analytics.total_points, 1100)
+        self.assertEqual(analytics.quizzes_attended, 4)
+        self.assertEqual(analytics.completed_quizzes, 4)
+        self.assertEqual(analytics.total_points, 3950)
         with self.database._connect() as connection:
             self.assertEqual(
                 connection.execute(
@@ -468,12 +519,18 @@ class DatabaseTests(unittest.TestCase):
                     """,
                     ("67890", "ABC123"),
                 ).fetchone()[0],
-                1,
+                4,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM quiz_session_aliases"
+                ).fetchone()[0],
+                0,
             )
         analytics_count, session_count = self.database.clear_guild_quiz_history(
             67890
         )
-        self.assertEqual(session_count, 1)
+        self.assertEqual(session_count, 4)
         self.assertGreater(analytics_count, 0)
         with self.database._connect() as connection:
             self.assertEqual(
@@ -482,6 +539,121 @@ class DatabaseTests(unittest.TestCase):
                 ).fetchone()[0],
                 0,
             )
+
+    def test_initialize_merges_only_sessions_with_shared_uncompleted_message(
+        self,
+    ) -> None:
+        sessions = []
+        for index in range(2):
+            session = self.database.start_quiz_session(
+                67890,
+                1001,
+                12345,
+                f"2026-10-24T19:0{index}:00+00:00",
+            )
+            self.database.record_quiz_leaderboard(
+                session.session_id,
+                5001,
+                f"revision-{index}",
+                [("1", "Student Nickname", str(900 + index * 50))],
+                False,
+                "same-quiz-id",
+            )
+            with self.database._connect() as connection:
+                connection.execute(
+                    "UPDATE quiz_sessions SET status = 'interrupted' "
+                    "WHERE session_id = ?",
+                    (session.session_id,),
+                )
+            sessions.append(session)
+
+        self.database.initialize()
+
+        summaries = self.database.get_quiz_session_summaries(67890)
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0].session.status, "interrupted")
+        self.assertEqual(summaries[0].session.question_count, 2)
+        self.assertEqual(summaries[0].participants[0].points, 950)
+        with self.database._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM quiz_session_aliases"
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM quiz_session_updates"
+                ).fetchone()[0],
+                2,
+            )
+
+    def test_initialize_keeps_completed_sessions_even_with_shared_message(
+        self,
+    ) -> None:
+        sessions = []
+        for index in range(2):
+            session = self.database.start_quiz_session(
+                67890,
+                1001,
+                12345,
+                f"2026-10-24T19:0{index}:00+00:00",
+            )
+            self.database.record_quiz_leaderboard(
+                session.session_id,
+                5001,
+                f"final-{index}",
+                [("1", "Student Nickname", str(900 + index * 50))],
+                True,
+                "same-quiz-id",
+            )
+            sessions.append(session)
+
+        self.database.initialize()
+
+        summaries = self.database.get_quiz_session_summaries(67890)
+        self.assertEqual(len(summaries), 2)
+        self.assertEqual(
+            {summary.session.session_id for summary in summaries},
+            {session.session_id for session in sessions},
+        )
+        self.assertTrue(
+            all(summary.session.status == "completed" for summary in summaries)
+        )
+
+    def test_initialize_keeps_sessions_with_different_message_histories(
+        self,
+    ) -> None:
+        for index, message_ids in enumerate(((5001, 5002), (5001, 5003))):
+            session = self.database.start_quiz_session(
+                67890,
+                1001,
+                12345,
+                f"2026-10-24T19:0{index}:00+00:00",
+            )
+            for message_id in message_ids:
+                self.database.record_quiz_leaderboard(
+                    session.session_id,
+                    message_id,
+                    f"revision-{message_id}",
+                    [("1", "Student Nickname", str(message_id))],
+                    False,
+                    "same-quiz-id",
+                )
+            with self.database._connect() as connection:
+                connection.execute(
+                    "UPDATE quiz_sessions SET status = 'interrupted' "
+                    "WHERE session_id = ?",
+                    (session.session_id,),
+                )
+
+        self.database.initialize()
+
+        summaries = self.database.get_quiz_session_summaries(67890)
+        self.assertEqual(len(summaries), 2)
+        self.assertTrue(
+            all(summary.session.status == "interrupted" for summary in summaries)
+        )
 
     def test_initialize_does_not_merge_sessions_with_conflicting_quiz_ids(
         self,

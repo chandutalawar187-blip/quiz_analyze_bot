@@ -515,6 +515,14 @@ class DashboardWebTests(unittest.TestCase):
             "initializeGuildSelector().then(showCaptcha).catch",
             password_page.text,
         )
+        self.assertIn(
+            '"expired-callback":()=>{if(mustChange)return;captchaToken="";',
+            password_page.text,
+        )
+        self.assertIn(
+            '"error-callback":()=>{if(mustChange)return;captchaToken="";',
+            password_page.text,
+        )
         self.assertEqual(self.client.get("/faculty").status_code, 200)
         self.assertEqual(
             self.client.get("/api/faculty/students").status_code, 428
@@ -788,6 +796,21 @@ class DashboardWebTests(unittest.TestCase):
                 "maxReplayDuration: 900000",
             ),
             (
+                "/static/cookie-preferences.js",
+                "javascript",
+                "startRevision !== consentRevision",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                'tracesSampler: () => (readChoice() === "accepted" ? 0.1 : 0)',
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                'if (readChoice() !== "accepted")',
+            ),
+            (
                 "/static/faculty-dashboard.css",
                 "text/css",
                 ".candidate-warning",
@@ -811,6 +834,16 @@ class DashboardWebTests(unittest.TestCase):
                 "/static/faculty-dashboard.js",
                 "javascript",
                 'guild.is_faculty||guild.role==="admin"',
+            ),
+            (
+                "/static/faculty-dashboard.js",
+                "javascript",
+                'if(!query){candidates.replaceChildren(el("div","empty","Enter a USN to find students."));return;}',
+            ),
+            (
+                "/static/faculty-dashboard.js",
+                "javascript",
+                "loadAssigned();}).catch",
             ),
         ):
             with self.subTest(path=path):

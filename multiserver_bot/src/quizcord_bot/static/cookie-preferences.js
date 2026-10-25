@@ -24,6 +24,7 @@
     "sha384-zYqfHw4dRfd9q2US/rvKBTjujKInadFZPKcy2snfUBxf8h33manb/r85y0QNFgwe";
   let sdkPromise;
   let initialized = false;
+  let consentRevision = 0;
 
   function report(messageText) {
     message.textContent = messageText;
@@ -57,6 +58,7 @@
         report("Your browser could not save this choice. Optional analytics remains off.");
         return false;
       }
+      consentRevision += 1;
       return true;
     } catch (error) {
       console.warn("Could not save analytics cookie preference.", error);
@@ -86,6 +88,9 @@
   }
 
   function scrubTransaction(event) {
+    if (readChoice() !== "accepted") {
+      return null;
+    }
     delete event.request;
     event.transaction = "admin-dashboard";
     for (const span of event.spans || []) {
@@ -106,7 +111,14 @@
   }
 
   async function startAnalytics() {
+    const startRevision = consentRevision;
     await loadSdk();
+    if (
+      readChoice() !== "accepted" ||
+      startRevision !== consentRevision
+    ) {
+      return;
+    }
     if (!window.Sentry) {
       throw new Error("Sentry SDK did not initialize.");
     }
@@ -115,7 +127,7 @@
         dsn,
         defaultIntegrations: false,
         sendDefaultPii: false,
-        tracesSampleRate: 0.1,
+        tracesSampler: () => (readChoice() === "accepted" ? 0.1 : 0),
         replaysSessionSampleRate: 0,
         replaysOnErrorSampleRate: 0,
         integrations: [
@@ -138,7 +150,6 @@
       throw new Error("Sentry Replay integration is unavailable.");
     }
     replay.start();
-    setStatus("Optional analytics is enabled for this dashboard.");
   }
 
   function openPreferences() {
@@ -185,7 +196,7 @@
       if (replay) {
         await replay.stop({ flush: false });
       }
-      setStatus("Optional analytics is off.");
+      setStatus("");
       panel.hidden = true;
       report("");
       preferences.focus();

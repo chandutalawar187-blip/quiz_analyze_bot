@@ -37,6 +37,7 @@ let assignedUSNs=new Set(),searchTimer;
     }
     async function loadCandidates(){
       const query=search.value.trim();
+      if(!query){candidates.replaceChildren(el("div","empty","Enter a USN to find students."));return;}
       try{
         const response=await api("/api/faculty/candidates?search="+encodeURIComponent(query));
         if(!response.ok)throw new Error("Could not search students.");
@@ -98,4 +99,4 @@ let assignedUSNs=new Set(),searchTimer;
       setSavedGuild(selector.value);
       selector.addEventListener("change",async()=>{selector.disabled=true;try{const changed=await api("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:selector.value})});if(!changed.ok)throw new Error("Could not select the Discord server.");setSavedGuild(selector.value);reloadForGuild(selector.value);}catch(error){assigned.replaceChildren(el("div","empty error",error.message));selector.disabled=false;}});
     }
-    initializeGuildSelector().then(()=>api("/api/me")).then(response=>{if(!response.ok)throw new Error("Sign-in expired.");return response.json();}).then(user=>{document.getElementById("account-name").textContent=user.username;loadAssigned();loadCandidates();}).catch(error=>assigned.replaceChildren(el("div","empty error",error.message)));
+    initializeGuildSelector().then(()=>api("/api/me")).then(response=>{if(!response.ok)throw new Error("Sign-in expired.");return response.json();}).then(user=>{document.getElementById("account-name").textContent=user.username;loadAssigned();}).catch(error=>assigned.replaceChildren(el("div","empty error",error.message)));
