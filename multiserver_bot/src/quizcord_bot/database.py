@@ -118,6 +118,12 @@ class DashboardUser:
     name_matches_usn_format: bool
 
 
+@dataclass(frozen=True)
+class QuizSessionAbsentStudent:
+    display_name: str
+    usn: str | None
+
+
 @dataclass
 class _StudentAggregate:
     discord_id: str
@@ -1709,6 +1715,84 @@ class Database:
     def get_quiz_session_summary(self, session_id: str) -> QuizSessionSummary:
         with self._connect() as connection:
             return self._get_quiz_session_summary(connection, session_id)
+
+    def get_quiz_session_absentees(
+        self, session_id: str
+    ) -> tuple[QuizSessionAbsentStudent, ...]:
+        with self._connect() as connection:
+            session = self._get_session(connection, session_id)
+            participant_rows = connection.execute(
+                """
+                SELECT usn, discord_id
+                FROM quiz_session_participants
+                WHERE session_id = ?
+                """,
+                (session.session_id,),
+            ).fetchall()
+            participant_usns = {
+                str(row[0]).strip().casefold()
+                for row in participant_rows
+                if row[0]
+            }
+            participant_discord_ids = {
+                str(row[1]) for row in participant_rows if row[1]
+            }
+            member_rows = connection.execute(
+                """
+                SELECT e.discord_id, u.name, e.global_name, e.display_name,
+                       r.usn, r.student_name
+                FROM guild_member_eligibility AS e
+                JOIN users AS u ON u.id = e.discord_id
+                LEFT JOIN student_registry AS r
+                    ON r.guild_id = e.guild_id AND r.discord_id = e.discord_id
+                WHERE e.guild_id = ? AND e.eligible = 1 AND e.is_bot = 0
+                ORDER BY
+                    COALESCE(
+                        NULLIF(r.student_name, ''),
+                        NULLIF(e.global_name, ''),
+                        NULLIF(e.display_name, ''),
+                        u.name
+                    ) COLLATE NOCASE
+                """,
+                (str(session.guild_id),),
+            ).fetchall()
+
+        absentees = []
+        for discord_id, account_name, global_name, display_name, usn, student_name in member_rows:
+            resolved_usn = (
+                str(usn).strip()
+                if usn
+                else (
+                    str(global_name).strip()
+                    if global_name and matches_usn_format(str(global_name))
+                    else None
+                )
+            )
+            member_identities = {
+                str(value).strip().casefold()
+                for value in (
+                    resolved_usn,
+                    student_name,
+                    global_name,
+                    display_name,
+                    account_name,
+                )
+                if value
+            }
+            if (
+                str(discord_id) in participant_discord_ids
+                or member_identities.intersection(participant_usns)
+            ):
+                continue
+            absentees.append(
+                QuizSessionAbsentStudent(
+                    display_name=str(
+                        student_name or display_name or global_name or account_name
+                    ),
+                    usn=resolved_usn,
+                )
+            )
+        return tuple(absentees)
 
     @classmethod
     def _get_quiz_session_summary(

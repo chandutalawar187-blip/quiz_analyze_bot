@@ -23,6 +23,7 @@ from quizcord_bot.config import Settings
 from quizcord_bot.database import (
     Database,
     DashboardUser,
+    QuizSessionAbsentStudent,
     QuizSessionSummary,
     StudentQuizAnalytics,
     matches_usn_format,
@@ -1217,7 +1218,10 @@ _read_web_template("admin_login.html").replace(
         summary = database.get_quiz_session(session_id)
         if summary is None or summary.guild_id != request.state.guild_id:
             raise HTTPException(status_code=404, detail="Quiz session not found.")
-        return _summary_detail(database.get_quiz_session_summary(session_id))
+        return _summary_detail(
+            database.get_quiz_session_summary(session_id),
+            database.get_quiz_session_absentees(session_id),
+        )
 
     @app.get("/api/sessions/{session_id}/export.xlsx")
     async def export_session(session_id: str, request: Request) -> Response:
@@ -1489,7 +1493,10 @@ def _summary_overview(summary: QuizSessionSummary) -> dict[str, Any]:
     }
 
 
-def _summary_detail(summary: QuizSessionSummary) -> dict[str, Any]:
+def _summary_detail(
+    summary: QuizSessionSummary,
+    absentees: tuple[QuizSessionAbsentStudent, ...] = (),
+) -> dict[str, Any]:
     session = summary.session
     return {
         "session": {
@@ -1513,6 +1520,13 @@ def _summary_detail(summary: QuizSessionSummary) -> dict[str, Any]:
                 "name_matches_usn_format": participant.name_matches_usn_format,
             }
             for participant in summary.participants
+        ],
+        "not_attended": [
+            {
+                "display_name": student.display_name,
+                "usn": student.usn,
+            }
+            for student in absentees
         ],
     }
 

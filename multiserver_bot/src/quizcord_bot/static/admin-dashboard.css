@@ -252,6 +252,30 @@ select {
   align-items: center;
   background: rgba(250, 249, 247, 0.6);
 }
+.attendance-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+.attendance-toggle {
+  padding: 8px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.attendance-toggle:hover {
+  border-color: var(--accent-strong);
+  background: var(--panel-strong);
+}
+.attendance-toggle:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+}
 .panel h2 { font-size: 16px; margin: 0; }
 .panel-sub {
   font-size: 12px;
@@ -442,4 +466,5 @@ td.points {
   th, td{ padding:12px 14px; }
   .directory-tools{ align-items:stretch; flex-direction:column; }
   .directory-search-field{ flex-basis:auto; min-width:0; }
+  .attendance-controls{ align-items:flex-start; flex-direction:column; }
 }

@@ -707,6 +707,57 @@ class DatabaseTests(unittest.TestCase):
         self.assertIsNone(alternate_user.student_name)
         self.assertTrue(alternate_user.name_matches_usn_format)
 
+    def test_quiz_session_absentees_exclude_attending_members_and_bots(self) -> None:
+        guild = SimpleNamespace(id=67890)
+        attendee = SimpleNamespace(
+            id=12345,
+            name="attendee_account",
+            display_name="Attendee Nickname",
+            global_name="4GM22CS001",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(),
+        )
+        absent = SimpleNamespace(
+            id=54321,
+            name="absent_account",
+            display_name="Absent Nickname",
+            global_name="4GM22CS002",
+            status=SimpleNamespace(name="offline"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(),
+        )
+        bot = SimpleNamespace(
+            id=99999,
+            name="quizcord_bot",
+            display_name="Quizcord",
+            global_name="Quizcord Bot",
+            status=SimpleNamespace(name="online"),
+            bot=True,
+            guild=guild,
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.map_student(attendee, "4GM22CS001", "Attendee Student")
+        self.database.sync_members((attendee, absent, bot))
+        session = self.database.start_quiz_session(
+            guild.id, 1001, 12345, "2026-10-25T10:00:00+00:00"
+        )
+        self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "revision-1",
+            [("1", "Attendee Nickname", "900")],
+            False,
+        )
+
+        absentees = self.database.get_quiz_session_absentees(session.session_id)
+
+        self.assertEqual(len(absentees), 1)
+        self.assertEqual(absentees[0].display_name, "Absent Nickname")
+        self.assertEqual(absentees[0].usn, "4GM22CS002")
+
     def test_faculty_student_assignments_are_private_and_require_a_known_usn(
         self,
     ) -> None:

@@ -20,6 +20,7 @@ from quizcord_bot.config import Settings
 from quizcord_bot.database import (
     Database,
     QuizParticipant,
+    QuizSessionAbsentStudent,
     QuizSession,
     QuizSessionSummary,
     StudentQuizAnalytics,
@@ -731,14 +732,24 @@ class DashboardWebTests(unittest.TestCase):
                 "[hidden] { display: none !important; }",
             ),
             (
-                "/static/admin-dashboard.js",
-                "javascript",
-                "Participant leaderboard",
+                "/static/admin-dashboard.css",
+                "text/css",
+                ".attendance-toggle",
             ),
             (
                 "/static/admin-dashboard.js",
                 "javascript",
-                "No leaderboard entries match your search.",
+                "Students who attended",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "No students match your search.",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "Show not attended (",
             ),
             (
                 "/static/admin-dashboard.js",
@@ -939,11 +950,18 @@ class DashboardWebTests(unittest.TestCase):
             question_count=1,
         )
 
-        detail = _summary_detail(summary)
+        detail = _summary_detail(
+            summary,
+            (QuizSessionAbsentStudent("Student Two", "4GM22CS002"),),
+        )
 
         self.assertEqual(detail["participants"][0]["usn"], "ABC123")
         self.assertFalse(detail["participants"][0]["name_matches_usn_format"])
         self.assertNotIn("discord_id", detail["participants"][0])
+        self.assertEqual(
+            detail["not_attended"],
+            [{"display_name": "Student Two", "usn": "4GM22CS002"}],
+        )
 
 
 if __name__ == "__main__":

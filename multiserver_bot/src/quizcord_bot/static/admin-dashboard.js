@@ -39,6 +39,7 @@ const select = document.getElementById("session-select");
     let userSearchQuery = "";
     let pendingDirectoryUsers = null;
     let leaderboardSearchQuery = "";
+    let attendanceView = "attended";
     function filterLeaderboard(){
       const query=leaderboardSearchQuery.trim().toLocaleLowerCase();
       const rows=content.querySelectorAll(".leaderboard-row");
@@ -48,7 +49,14 @@ const select = document.getElementById("session-select");
         if(!row.hidden)visibleCount++;
       });
       const emptyState=content.querySelector(".leaderboard-no-results");
-      if(emptyState)emptyState.hidden=visibleCount>0||rows.length===0;
+      if(emptyState){
+        emptyState.hidden=visibleCount>0;
+        emptyState.querySelector("td").textContent=query
+          ?"No students match your search."
+          :attendanceView==="attended"
+            ?"No students attended this quiz."
+            :"No students are absent from this quiz.";
+      }
     }
     function metric(label,value){
       const iconName=label.includes("Student")||label.includes("Quizzes attended")?"users":label.includes("rate")||label.includes("points")?"chart-bar":label.includes("updates")?"clock":"book-2";
@@ -62,6 +70,7 @@ const select = document.getElementById("session-select");
       const session=summary.session;
       const complete=session.status==="completed";
       const participants=summary.participants||[];
+      const absentStudents=summary.not_attended||[];
       const grid=el("section","grid");
       const statusCard=el("div","card status-card");
       statusCard.append(el("div","metric-label","Session status"));
@@ -76,17 +85,24 @@ const select = document.getElementById("session-select");
       const layout=el("section","main-grid");
       const roster=el("article","panel");
       const header=el("div","panel-head");
-      const title=el("div");title.append(el("h2","", "Participant leaderboard"),el("div","panel-sub",complete?"Final leaderboard snapshot":"Latest leaderboard snapshot"));
-      header.append(title,el("span","refresh","Updates automatically"));roster.append(header);
-      if(!participants.length){roster.append(el("div","empty","No participant rows have arrived yet."));}
-      else{
-        const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),tr=el("tr");
-        ["Rank","Student USN","Quizcord points"].forEach(label=>tr.append(el("th","",label)));
-        thead.append(tr);table.append(thead);const tbody=el("tbody");
+      const title=el("div");title.append(el("h2","",attendanceView==="attended"?"Students who attended":"Students who did not attend"),el("div","panel-sub",attendanceView==="attended"?(complete?"Final leaderboard snapshot":"Latest leaderboard snapshot"):"Based on the current synced human server roster"));
+      const controls=el("div","attendance-controls");
+      const toggle=el("button","attendance-toggle",attendanceView==="attended"?"Show not attended ("+absentStudents.length+")":"Show attended ("+participants.length+")");
+      toggle.type="button";
+      toggle.setAttribute("aria-pressed",String(attendanceView==="not-attended"));
+      toggle.addEventListener("click",()=>{attendanceView=attendanceView==="attended"?"not-attended":"attended";render(summary);});
+      controls.append(toggle,el("span","refresh","Updates automatically"));
+      header.append(title,controls);roster.append(header);
+      const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),tr=el("tr");
+      ["Rank","Student / USN","Quizcord points"].forEach(label=>tr.append(el("th","",label)));
+      thead.append(tr);table.append(thead);const tbody=el("tbody");
+      const noResults=el("tr","leaderboard-no-results");noResults.hidden=true;const message=el("td","empty");message.colSpan=3;noResults.append(message);
+      if(attendanceView==="attended"){
         participants.forEach(person=>{const row=el("tr","leaderboard-row"),link=document.createElement("a");link.className="student-link";link.href="/students/"+encodeURIComponent(person.usn);link.textContent=person.usn;row.append(el("td","rank","#"+safe(person.rank)));const studentCell=el("td","usn");studentCell.append(link);if(person.name_matches_usn_format===false)studentCell.append(el("div","name-warning","Name not updated to USN"));row.append(studentCell,el("td","points",safe(person.points)));row.dataset.search=[person.name,person.usn,person.rank,person.points].filter(Boolean).join(" ").toLocaleLowerCase();tbody.append(row);});
-        const noResults=el("tr","leaderboard-no-results");noResults.hidden=true;const message=el("td","empty","No leaderboard entries match your search.");message.colSpan=3;noResults.append(message);tbody.append(noResults);
-        table.append(tbody);wrap.append(table);roster.append(wrap);
+      }else{
+        absentStudents.forEach(student=>{const row=el("tr","leaderboard-row"),studentCell=el("td","usn"),label=student.usn||student.display_name;if(student.usn){const link=document.createElement("a");link.className="student-link";link.href="/students/"+encodeURIComponent(student.usn);link.textContent=student.display_name;studentCell.append(link);studentCell.append(el("div","panel-sub",student.usn));}else{studentCell.textContent=student.display_name;}row.append(el("td","rank","—"),studentCell,el("td","points","—"));row.dataset.search=[student.display_name,student.usn,label].filter(Boolean).join(" ").toLocaleLowerCase();tbody.append(row);});
       }
+      tbody.append(noResults);table.append(tbody);wrap.append(table);roster.append(wrap);
       const side=el("article","panel");const sideHead=el("div","panel-head");sideHead.append(el("h2","","Student attendance"));side.append(sideHead);
       const ringWrap=el("div","ring-wrap"),ring=el("div","ring"+(complete?" complete":""));
       ring.innerHTML='<svg viewBox="0 0 120 120" aria-hidden="true"><circle class="track" cx="60" cy="60" r="52"></circle><circle class="value" cx="60" cy="60" r="52"></circle></svg>';
