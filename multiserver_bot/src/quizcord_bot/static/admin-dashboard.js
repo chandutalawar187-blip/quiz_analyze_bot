@@ -2,6 +2,8 @@ const select = document.getElementById("session-select");
     const content = document.getElementById("content");
     const dashboardTabs = document.getElementById("dashboard-tabs");
     const sessionHeading = document.getElementById("session-heading");
+    const newerSessions = document.getElementById("sessions-newer");
+    const olderSessions = document.getElementById("sessions-older");
     const leaderboardSearch = document.getElementById("leaderboard-search");
     const initialSession = new URLSearchParams(location.search).get("session");
     const facultyStudentPath = location.pathname.startsWith("/faculty/students/");
@@ -36,6 +38,7 @@ const select = document.getElementById("session-select");
       guildSelect.addEventListener("change",async()=>{guildSelect.disabled=true;try{const changed=await fetch("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:guildSelect.value}),cache:"no-store"});if(!changed.ok)throw new Error("Could not select the Discord server.");setSavedGuild(guildSelect.value);reloadForGuild(guildSelect.value);}catch(error){content.replaceChildren(el("div","empty error",error.message));guildSelect.disabled=false;}});
     }
     let activeSession = initialSession;
+    let sessionOffset = 0;
     let activeView = "sessions";
     let pollBusy = false;
     let userSearchQuery = "";
@@ -194,18 +197,21 @@ const select = document.getElementById("session-select");
     async function refresh(){
       if(pollBusy||activeView!=="sessions")return;pollBusy=true;
       try{
-        const response=await fetch("/api/sessions",{cache:"no-store"});
+        const response=await fetch("/api/sessions?offset="+sessionOffset,{cache:"no-store"});
         if(response.status===401){location.replace("/");return;}
         if(!response.ok)throw new Error("Could not load quiz sessions.");
         const sessions=await response.json();
-        const old=activeSession||select.value;
-        select.replaceChildren();
-        sessions.forEach(session=>{const option=document.createElement("option");option.value=session.session_id;option.textContent=(session.quizcord_quiz_id||"Quiz session")+" · "+statusLabel(session.status)+" · "+new Date(session.started_at).toLocaleString();select.append(option);});
-        if(!sessions.length){content.replaceChildren(el("div","empty","No quiz sessions have been recorded yet. Start a Quizcord quiz to see its live dashboard."));return;}
-        activeSession=sessions.some(s=>s.session_id===old)?old:sessions[0].session_id;select.value=activeSession;
+        newerSessions.disabled=sessionOffset===0;
+        olderSessions.disabled=sessions.length<50;
+        activeSession=activeSession||sessions[0]?.session_id;
+        if(!activeSession){content.replaceChildren(el("div","empty","No quiz sessions have been recorded yet. Start a Quizcord quiz to see its live dashboard."));return;}
         const detail=await fetch("/api/sessions/"+encodeURIComponent(activeSession),{cache:"no-store"});
         if(!detail.ok)throw new Error("Could not load the selected quiz.");
         const summary=await detail.json();
+        if(!sessions.some(session=>session.session_id===activeSession))sessions.push(summary.session);
+        select.replaceChildren();
+        sessions.forEach(session=>{const option=document.createElement("option");option.value=session.session_id;option.textContent=(session.quizcord_quiz_id||"Quiz session")+" · "+statusLabel(session.status)+" · "+new Date(session.started_at).toLocaleString();select.append(option);});
+        select.value=activeSession;
         if(activeView==="sessions")render(summary);
       }catch(error){content.replaceChildren(el("div","empty error",error.message));}
       finally{pollBusy=false;}
@@ -234,6 +240,9 @@ const select = document.getElementById("session-select");
     dashboardTabs.addEventListener("click",event=>{const button=event.target.closest("button[data-view]");if(button)switchView(button.dataset.view);});
     leaderboardSearch.addEventListener("input",()=>{leaderboardSearchQuery=leaderboardSearch.value;filterLeaderboard();});
     select.addEventListener("change",()=>{activeSession=select.value;refresh();});
+    function changeSessionPage(direction){if(pollBusy)return;sessionOffset=Math.max(0,sessionOffset+direction*50);activeSession=null;refresh();}
+    newerSessions.addEventListener("click",()=>changeSessionPage(-1));
+    olderSessions.addEventListener("click",()=>changeSessionPage(1));
     initializeGuildSelector().then(()=>{
     return fetch("/api/me").then(response=>{if(!response.ok)throw new Error("Sign-in expired.");return response.json();}).then(user=>{document.getElementById("account-name").textContent=user.username;document.getElementById("faculty-password-link").hidden=user.role!=="admin";});
     }).then(()=>{

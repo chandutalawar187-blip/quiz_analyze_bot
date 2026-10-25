@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 import httpx
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
@@ -920,12 +920,14 @@ _read_web_template("admin_login.html").replace(
         }
 
     @app.get("/api/sessions")
-    async def sessions(request: Request) -> list[dict[str, Any]]:
+    async def sessions(
+        request: Request, offset: int = Query(default=0, ge=0)
+    ) -> list[dict[str, Any]]:
         await current_admin(request)
         return [
             _summary_overview(summary)
             for summary in database.get_quiz_session_summaries(
-                request.state.guild_id, limit=50
+                request.state.guild_id, limit=50, offset=offset
             )
         ]
 

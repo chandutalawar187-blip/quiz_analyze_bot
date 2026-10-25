@@ -323,6 +323,11 @@ class DashboardWebTests(unittest.TestCase):
         )
         self.assertEqual(self.client.get("/", follow_redirects=False).status_code, 200)
         self.assertEqual(self.client.get("/api/sessions").status_code, 200)
+        with patch.object(self.database, "get_quiz_session_summaries", return_value=()) as summaries:
+            page = self.client.get("/api/sessions?guild_id=67890&offset=50")
+            self.assertEqual(page.status_code, 200)
+            summaries.assert_called_once_with(67890, limit=50, offset=50)
+        self.assertEqual(self.client.get("/api/sessions?offset=-1").status_code, 422)
         available_guilds = self.client.get("/api/guilds")
         self.assertEqual(
             [guild["id"] for guild in available_guilds.json()],
@@ -678,6 +683,37 @@ class DashboardWebTests(unittest.TestCase):
         self.assertIn("Ask them to update", rejected_add.json()["detail"])
         added = self.client.post("/api/faculty/students/4GM22CS001")
         self.assertEqual(added.status_code, 204)
+        # Explicit guild selection takes precedence over a stale shared cookie.
+        signer = TimestampSigner(self.settings.dashboard_session_secret)
+        signed = self.client.cookies.get("quizcord_dashboard")
+        payload = json.loads(base64.b64decode(signer.unsign(signed)))
+        payload["selected_guild_id"] = "99999"
+        stale = signer.sign(base64.b64encode(json.dumps(payload).encode())).decode()
+        self.client.cookies.clear()
+        self.client.cookies.set("quizcord_dashboard", stale)
+        explicit = self.client.get("/api/faculty/students?guild_id=67890")
+        self.assertEqual(explicit.status_code, 200)
+        self.assertEqual([row["usn"] for row in explicit.json()], ["4GM22CS001"])
+        self.assertEqual(
+            self.client.delete("/api/faculty/students/4GM22CS001?guild_id=67890").status_code,
+            204,
+        )
+        self.assertEqual(
+            self.client.post("/api/faculty/students/4GM22CS001?guild_id=67890").status_code,
+            204,
+        )
+        self.database.register_guild(99999, "Other server", None)
+        for method, endpoint in (
+            ("get", "/api/faculty/students"),
+            ("get", "/api/faculty/candidates"),
+            ("post", "/api/faculty/students/4GM22CS001"),
+            ("delete", "/api/faculty/students/4GM22CS001"),
+        ):
+            with self.subTest(method=method, endpoint=endpoint):
+                response = getattr(self.client, method)(endpoint + "?guild_id=99999")
+                self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.database.get_faculty_student_usns(67890, 123456), ("4GM22CS001",))
+        self.client.post("/api/guilds/select", json={"guild_id": "67890"})
         students = self.client.get("/api/faculty/students").json()
         self.assertEqual([row["usn"] for row in students], ["4GM22CS001"])
         student_page = self.client.get("/faculty/students/4GM22CS001")
@@ -826,7 +862,7 @@ class DashboardWebTests(unittest.TestCase):
             (
                 "/static/cookie-preferences.js",
                 "javascript",
-                'tracesSampler: () => (readChoice() === "accepted" ? 0.1 : 0)',
+                'tracesSampler: () => (!declinedInMemory && readChoice() === "accepted" ? 0.1 : 0)',
             ),
             (
                 "/static/cookie-preferences.js",

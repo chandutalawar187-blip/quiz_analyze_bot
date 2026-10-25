@@ -74,6 +74,27 @@ class AnalyticsCog(commands.Cog):
         self.bot = bot
         self.settings = settings
         self.database = database
+        self._reminder_tasks: set[asyncio.Task[USNReminderResult]] = set()
+
+    async def cog_unload(self) -> None:
+        tasks = tuple(self._reminder_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _schedule_global_name_updates(
+        self, guild: discord.Guild, summary: QuizSessionSummary
+    ) -> None:
+        task = asyncio.create_task(self._notify_global_name_updates(guild, summary))
+        self._reminder_tasks.add(task)
+        task.add_done_callback(self._global_name_updates_done)
+
+    def _global_name_updates_done(self, task: asyncio.Task[USNReminderResult]) -> None:
+        self._reminder_tasks.discard(task)
+        if not task.cancelled():
+            error = task.exception()
+            if error is not None:
+                LOGGER.error("Automatic USN reminders failed.", exc_info=error)
 
     def restore_dashboard_views(self) -> None:
         if self.settings.dashboard_public_url:
@@ -550,7 +571,7 @@ class AnalyticsCog(commands.Cog):
                 summary = self.database.get_quiz_session_summary(
                     recent_session.session_id
                 )
-                await self._notify_global_name_updates(message.guild, summary)
+                self._schedule_global_name_updates(message.guild, summary)
                 await self._refresh_quiz_dashboard(
                     message.guild, recent_session.session_id
                 )
@@ -610,7 +631,7 @@ class AnalyticsCog(commands.Cog):
                     summary = self.database.get_quiz_session_summary(
                         recent_session.session_id
                     )
-                    await self._notify_global_name_updates(
+                    self._schedule_global_name_updates(
                         message.guild, summary
                     )
                     await self._refresh_quiz_dashboard(
@@ -649,7 +670,7 @@ class AnalyticsCog(commands.Cog):
             )
             return
         if is_final:
-            await self._notify_global_name_updates(message.guild, summary)
+            self._schedule_global_name_updates(message.guild, summary)
         LOGGER.info(
             "Recorded Quizcord leaderboard revision for session %s: %d rows.",
             session.session_id,

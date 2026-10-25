@@ -24,6 +24,19 @@ async def _iterate_members(members):
 
 
 class DatabaseTests(unittest.TestCase):
+    def test_session_pages_reach_older_sessions_and_stay_in_guild(self) -> None:
+        self.database.register_guild(67890, "Primary", None)
+        for i in range(52):
+            self.database.start_quiz_session(67890, 100 + i, 3, f"2026-10-01T00:{i:02d}:00+00:00")
+        self.database.start_quiz_session(99999, 4, 5, "2026-10-02T00:00:00+00:00")
+        first = self.database.get_quiz_session_summaries(67890)
+        older = self.database.get_quiz_session_summaries(67890, offset=50)
+        self.assertEqual(len(first), 50)
+        self.assertEqual(len(older), 2)
+        self.assertFalse({row.session.session_id for row in first} & {row.session.session_id for row in older})
+        self.assertTrue(all(row.session.guild_id == 67890 for row in (*first, *older)))
+        self.assertGreater(first[-1].session.started_at, older[0].session.started_at)
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.temp_dir.name) / "results.db")

@@ -1318,17 +1318,17 @@ class Database:
             )
 
     def get_quiz_session_summaries(
-        self, guild_id: int, limit: int = 50
+        self, guild_id: int, limit: int = 50, offset: int = 0
     ) -> tuple[QuizSessionSummary, ...]:
         with self._connect() as connection:
             session_ids = connection.execute(
                 """
                 SELECT session_id FROM quiz_sessions
                 WHERE guild_id = ? AND status != 'merged'
-                ORDER BY started_at DESC
-                LIMIT ?
+                ORDER BY started_at DESC, session_id DESC
+                LIMIT ? OFFSET ?
                 """,
-                (str(guild_id), limit),
+                (str(guild_id), limit, offset),
             ).fetchall()
             return tuple(
                 self._get_quiz_session_summary(connection, row[0])

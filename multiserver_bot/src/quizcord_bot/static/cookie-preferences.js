@@ -25,6 +25,7 @@
   let sdkPromise;
   let initialized = false;
   let consentRevision = 0;
+  let declinedInMemory = false;
 
   function report(messageText) {
     message.textContent = messageText;
@@ -110,7 +111,7 @@
     const startRevision = consentRevision;
     await loadSdk();
     if (
-      readChoice() !== "accepted" ||
+      declinedInMemory || readChoice() !== "accepted" ||
       startRevision !== consentRevision
     ) {
       return;
@@ -128,7 +129,8 @@
           httpBodies: [],
           urlQueryParams: false,
         },
-        tracesSampler: () => (readChoice() === "accepted" ? 0.1 : 0),
+        tracesSampler: () => (!declinedInMemory && readChoice() === "accepted" ? 0.1 : 0),
+        beforeSendTransaction: event => (declinedInMemory ? null : event),
         replaysSessionSampleRate: 0,
         replaysOnErrorSampleRate: 0,
         integrations: [
@@ -154,7 +156,7 @@
   }
 
   function openPreferences() {
-    analyticsEnabled.checked = readChoice() === "accepted";
+    analyticsEnabled.checked = !declinedInMemory && readChoice() === "accepted";
     panel.hidden = false;
     report("");
     analyticsEnabled.focus();
@@ -165,6 +167,7 @@
       if (!saveChoice("accepted")) {
         return;
       }
+      declinedInMemory = false;
       save.disabled = true;
       reject.disabled = true;
       report("Enabling optional analytics…");
@@ -187,9 +190,9 @@
   }
 
   async function disableAnalytics() {
-    if (!saveChoice("declined")) {
-      return;
-    }
+    declinedInMemory = true;
+    consentRevision += 1;
+    let saved = false;
     save.disabled = true;
     reject.disabled = true;
     try {
@@ -197,13 +200,21 @@
       if (replay) {
         await replay.stop({ flush: false });
       }
+      saved = saveChoice("declined");
+      if (!saved) {
+        const warning = "Optional analytics is off for this page, but your browser could not save the declined choice. It may not survive a reload.";
+        setStatus(warning);
+        report(warning);
+        return;
+      }
       setStatus("");
       panel.hidden = true;
       report("");
       preferences.focus();
     } catch (error) {
       console.error("Could not stop optional analytics.", error);
-      report("Optional analytics was turned off, but the browser could not confirm recording stopped. Reload this page.");
+      saved = saveChoice("declined");
+      report("Optional analytics was turned off, but the browser could not confirm recording stopped. Reload this page." + (saved ? "" : " Your browser could not save the declined choice; it may not survive a reload."));
     } finally {
       save.disabled = false;
       reject.disabled = false;

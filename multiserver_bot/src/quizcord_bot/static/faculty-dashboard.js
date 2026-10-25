@@ -5,6 +5,7 @@ const getSavedGuild = () => { try { return localStorage.getItem("quizcord-select
 const setSavedGuild = guildId => { try { localStorage.setItem("quizcord-selected-guild", guildId); } catch {} };
 const assigned=document.getElementById("assigned"),candidates=document.getElementById("candidates"),search=document.getElementById("student-search");
 let assignedUSNs=new Set(),searchTimer;
+let displayedGuildId=null;
     function replaceTable(container,tableWrap){
       const scrollTop=container.querySelector(".table-wrap")?.scrollTop??0;
       container.replaceChildren(tableWrap);
@@ -12,7 +13,10 @@ let assignedUSNs=new Set(),searchTimer;
       if(updatedTable)updatedTable.scrollTop=scrollTop;
     }
     async function api(path,options={}){
-      const response=await fetch(path,{cache:"no-store",...options});
+      const url=new URL(path,location.origin);
+      if(!displayedGuildId&&url.pathname.startsWith("/api/faculty/"))throw new Error("Select a Discord server before loading students.");
+      if(displayedGuildId)url.searchParams.set("guild_id",displayedGuildId);
+      const response=await fetch(url.pathname+url.search,{cache:"no-store",...options});
       if(response.status===401){location.replace("/faculty/login");throw new Error("Sign-in expired.");}
       if(response.status===428){location.replace("/faculty/password");throw new Error("Faculty password verification required.");}
       return response;
@@ -95,6 +99,7 @@ let assignedUSNs=new Set(),searchTimer;
       const isDashboardGuild=guildId=>dashboardGuilds.some(guild=>guild.id===guildId);
       const preferred=requested && isDashboardGuild(requested)?requested: saved && isDashboardGuild(saved)?saved: currentGuildId && isDashboardGuild(currentGuildId)?currentGuildId: dashboardGuilds[0].id;
       selector.value=preferred;
+      displayedGuildId=preferred;
       selector.hidden=dashboardGuilds.length<2;
       const selected=await api("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:selector.value})});
       if(!selected.ok)throw new Error("Could not select the Discord server.");
