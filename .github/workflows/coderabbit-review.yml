@@ -1,7 +1,8 @@
 name: Request CodeRabbit review
 
 on:
-  pull_request:
+  # Use the trusted base context for writes; this workflow never runs PR code.
+  pull_request_target:
     types: [opened, reopened, synchronize]
   issue_comment:
     types: [created]
@@ -17,7 +18,7 @@ permissions:
 
 jobs:
   request-review:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - name: Request a full review for the latest commit
