@@ -190,6 +190,15 @@ and stack traces are retained for debugging and may still contain information
 emitted by the application. The privacy notice at `/privacy` describes this
 processing.
 
+Optional browser analytics reuses this DSN and is available only on the admin
+quiz-session dashboard. Enable Replay for the Sentry project in its Client Keys
+settings. The browser SDK is not loaded until an administrator enables optional
+analytics in **Cookie settings**; text and inputs are masked, media is blocked,
+request and response bodies and headers are excluded, and each interaction
+recording is limited to 15 minutes. Student analytics, faculty, and sign-in
+pages are excluded. Administrators can withdraw consent in **Cookie settings**;
+the dashboard privacy notice describes the data collected.
+
 ### Faculty dashboard
 
 Create a dedicated `Faculty` role in each server and assign it only to faculty

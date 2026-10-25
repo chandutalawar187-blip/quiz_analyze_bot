@@ -145,6 +145,22 @@ PRIVACY_POLICY_PAGE = _read_web_template("privacy_policy.html")
 TERMS_OF_SERVICE_PAGE = _read_web_template("terms_of_service.html")
 
 
+def _render_admin_dashboard(
+    sentry_dsn: str | None, enable_session_replay: bool
+) -> str:
+    replay_enabled = enable_session_replay and sentry_dsn is not None
+    return (
+        HTML_PAGE.replace(
+            "__SESSION_REPLAY_DSN__",
+            html.escape(sentry_dsn if replay_enabled else "", quote=True),
+        )
+        .replace(
+            "__SESSION_REPLAY_ENABLED__",
+            "true" if replay_enabled else "false",
+        )
+    )
+
+
 def _dashboard_user(user: DashboardUser) -> dict[str, Any]:
     return {
         "account_name": user.account_name,
@@ -156,8 +172,22 @@ def _dashboard_user(user: DashboardUser) -> dict[str, Any]:
     }
 
 
+def _sentry_origin(dsn: str | None) -> str:
+    if dsn is None:
+        return ""
+    parsed = urlsplit(dsn)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("SENTRY_DSN must be an absolute HTTP(S) URL.")
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    return f" {parsed.scheme}://{parsed.hostname}{port}"
+
+
 def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
     app = FastAPI(title="Quizcord Analytics", docs_url=None, redoc_url=None)
+    sentry_origin = _sentry_origin(settings.sentry_dsn)
+    sentry_script = (
+        " https://browser.sentry-cdn.com" if settings.sentry_dsn else ""
+    )
     if settings.dashboard_session_secret:
         app.add_middleware(
             SessionMiddleware,
@@ -280,9 +310,13 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; "
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com"
+            f"{sentry_script}; "
             "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-            "connect-src 'self' https://challenges.cloudflare.com; "
+            "connect-src 'self' https://challenges.cloudflare.com"
+            f"{sentry_origin}; "
+            "worker-src 'self' blob:; "
             "frame-src https://challenges.cloudflare.com; "
             "base-uri 'none'; frame-ancestors 'none'"
         )
@@ -736,7 +770,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 suffix = f"?{urlencode(login_params)}" if login_params else ""
                 return RedirectResponse(f"/login{suffix}", status_code=302)
             raise
-        return HTMLResponse(HTML_PAGE)
+        return HTMLResponse(
+            _render_admin_dashboard(settings.sentry_dsn, enable_session_replay=True)
+        )
 
     @app.get("/faculty", response_class=HTMLResponse, response_model=None)
     async def faculty_page(request: Request) -> HTMLResponse | RedirectResponse:
@@ -817,7 +853,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             raise
         if not usn.strip() or len(usn) > 100:
             raise HTTPException(status_code=404, detail="Student not found.")
-        return HTMLResponse(HTML_PAGE)
+        return HTMLResponse(
+            _render_admin_dashboard(settings.sentry_dsn, enable_session_replay=False)
+        )
 
     @app.get(
         "/faculty/students/{usn}",

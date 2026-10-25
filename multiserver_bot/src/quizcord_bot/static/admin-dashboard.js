@@ -31,6 +31,8 @@ const select = document.getElementById("session-select");
       const selected=await fetch("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:guildSelect.value}),cache:"no-store"});
       if(!selected.ok)throw new Error("Could not select the Discord server.");
       setSavedGuild(guildSelect.value);
+      // Remove server and session identifiers from the URL before replay starts.
+      if(location.pathname==="/"&&location.search)history.replaceState(history.state,"",location.pathname);
       guildSelect.addEventListener("change",async()=>{guildSelect.disabled=true;try{const changed=await fetch("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:guildSelect.value}),cache:"no-store"});if(!changed.ok)throw new Error("Could not select the Discord server.");setSavedGuild(guildSelect.value);reloadForGuild(guildSelect.value);}catch(error){content.replaceChildren(el("div","empty error",error.message));guildSelect.disabled=false;}});
     }
     let activeSession = initialSession;

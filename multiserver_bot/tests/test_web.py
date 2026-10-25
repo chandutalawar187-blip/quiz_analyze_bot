@@ -30,6 +30,7 @@ from quizcord_bot.web import (
     _is_guild_admin,
     _is_guild_faculty,
     _oauth_failure_detail,
+    _render_admin_dashboard,
     _summary_detail,
     _student_analytics,
     create_dashboard_app,
@@ -772,6 +773,21 @@ class DashboardWebTests(unittest.TestCase):
                 "View analytics",
             ),
             (
+                "/static/cookie-preferences.js",
+                "javascript",
+                "maskAllText: true",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                'replay.stop({ flush: false })',
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                "maxReplayDuration: 900000",
+            ),
+            (
                 "/static/faculty-dashboard.css",
                 "text/css",
                 ".candidate-warning",
@@ -845,9 +861,51 @@ class DashboardWebTests(unittest.TestCase):
         self.assertIn("request bodies", privacy.text)
         self.assertIn("generic severity labels", privacy.text)
         self.assertIn("route templates", privacy.text)
+        self.assertIn("Cookies and optional analytics", privacy.text)
+        self.assertIn("Cookie settings", privacy.text)
+        self.assertIn("quizcord_analytics_consent", privacy.text)
+        self.assertIn("All page text and input values are masked", privacy.text)
+        self.assertIn(
+            "Faculty pages and individual student analytics pages are excluded",
+            privacy.text,
+        )
         self.assertEqual(terms.status_code, 200)
         self.assertIn("Terms of Service", terms.text)
         self.assertIn('href="/privacy"', terms.text)
+
+    def test_session_replay_html_is_enabled_only_for_admin_dashboard(self) -> None:
+        enabled = _render_admin_dashboard(
+            "https://public@example.ingest.sentry.io/123", True
+        )
+        disabled = _render_admin_dashboard(
+            "https://public@example.ingest.sentry.io/123", False
+        )
+
+        self.assertIn('data-session-replay-enabled="true"', enabled)
+        self.assertIn("Cookie preferences", enabled)
+        self.assertIn("cookie-analytics-enabled", enabled)
+        self.assertIn("Optional analytics and performance", enabled)
+        self.assertIn(
+            'data-session-replay-dsn="https://public@example.ingest.sentry.io/123"',
+            enabled,
+        )
+        self.assertIn('data-session-replay-enabled="false"', disabled)
+        self.assertIn('data-session-replay-dsn=""', disabled)
+
+    def test_sentry_browser_csp_allows_only_configured_ingest_origin(self) -> None:
+        settings = replace(
+            self.settings,
+            sentry_dsn="https://public@example.ingest.sentry.io/123",
+        )
+        app = create_dashboard_app(settings, self.database)
+
+        with TestClient(app, base_url="https://testserver") as client:
+            response = client.get("/health")
+
+        policy = response.headers["Content-Security-Policy"]
+        self.assertIn("https://browser.sentry-cdn.com", policy)
+        self.assertIn("https://example.ingest.sentry.io", policy)
+        self.assertIn("worker-src 'self' blob:", policy)
 
     def test_student_analytics_endpoint_requires_discord_sign_in(self) -> None:
         response = self.client.get("/api/students/ABC123")
