@@ -426,9 +426,10 @@ class AnalyticsCog(commands.Cog):
 
     @app_commands.command(
         name="remind_usn",
-        description="DM quiz participants who need to update their Discord name.",
+        description="DM server members who need to update their Discord name to their USN.",
     )
     @app_commands.guild_only()
+    @app_commands.checks.cooldown(1, 60, key=lambda interaction: interaction.guild_id)
     async def remind_usn(self, interaction: discord.Interaction) -> None:
         if (
             interaction.guild_id is None

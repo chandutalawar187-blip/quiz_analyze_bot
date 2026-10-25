@@ -5,10 +5,12 @@ import sqlite3
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+
+from discord import app_commands
 
 from quizcord_bot.cogs.analytics import AnalyticsCog
 from quizcord_bot.database import Database, matches_usn_format
@@ -2309,6 +2311,33 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("quizcord_username", registry_columns)
         self.assertEqual(registry, ("67890", "ABC123"))
         self.assertEqual(analytics, ("67890", "ABC123", "legacy-quiz"))
+
+
+class USNReminderCooldownTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cooldown_is_shared_by_guild_and_expires(self) -> None:
+        interaction = SimpleNamespace(
+            guild_id=67890,
+            channel_id=1001,
+            user=SimpleNamespace(id=22222),
+            created_at=datetime.fromisoformat("2026-10-01T10:00:00+00:00"),
+        )
+
+        async def run_checks() -> None:
+            for check in AnalyticsCog.remind_usn.checks:
+                self.assertTrue(await check(interaction))
+
+        await run_checks()
+        interaction.user = SimpleNamespace(id=33333)
+        interaction.channel_id = 1002
+        with self.assertRaises(app_commands.CommandOnCooldown):
+            await run_checks()
+
+        interaction.guild_id = 98765
+        await run_checks()
+
+        interaction.guild_id = 67890
+        interaction.created_at += timedelta(seconds=61)
+        await run_checks()
 
 
 class ClearQuizHistoryCommandTests(unittest.IsolatedAsyncioTestCase):

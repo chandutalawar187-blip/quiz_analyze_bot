@@ -14,6 +14,7 @@ let assignedUSNs=new Set(),searchTimer;
     async function api(path,options={}){
       const response=await fetch(path,{cache:"no-store",...options});
       if(response.status===401){location.replace("/faculty/login");throw new Error("Sign-in expired.");}
+      if(response.status===428){location.replace("/faculty/password");throw new Error("Faculty password verification required.");}
       return response;
     }
     async function loadAssigned(){
