@@ -2287,7 +2287,7 @@ class Database:
                 raise LookupError("Faculty password has not been provisioned.")
 
     def claim_global_name_reminder(
-        self, session_id: str, discord_id: int
+        self, session_id: str, discord_id: int, fallback_usn: str | None = None
     ) -> str | None:
         with self._connect() as connection:
             session_id = self._canonical_session_id(connection, session_id)
@@ -2299,7 +2299,7 @@ class Database:
                 """,
                 (str(session.guild_id), str(discord_id)),
             ).fetchone()
-            if row is None:
+            if row is None and fallback_usn is None:
                 return None
             cursor = connection.execute(
                 """
@@ -2310,7 +2310,24 @@ class Database:
                 """,
                 (session_id, str(discord_id)),
             )
-            return str(row[0]) if cursor.rowcount else None
+            if not cursor.rowcount:
+                return None
+            if row is not None:
+                return str(row[0])
+            return fallback_usn or ""
+
+    def release_global_name_reminder(
+        self, session_id: str, discord_id: int
+    ) -> None:
+        with self._connect() as connection:
+            session_id = self._canonical_session_id(connection, session_id)
+            connection.execute(
+                """
+                DELETE FROM quiz_session_nickname_reminders
+                WHERE session_id = ? AND discord_id = ?
+                """,
+                (session_id, str(discord_id)),
+            )
 
     def remove_member(self, member: "Member") -> None:
         with self._connect() as connection:
