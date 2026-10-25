@@ -572,7 +572,7 @@ class AnalyticsCog(commands.Cog):
         for participant in summary.participants:
             if (
                 participant.discord_id is None
-                or participant.name_matches_usn_format is not False
+                or participant.global_name_matches_usn_format is not False
             ):
                 continue
             try:

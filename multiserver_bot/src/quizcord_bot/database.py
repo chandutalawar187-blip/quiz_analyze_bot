@@ -168,6 +168,7 @@ class QuizParticipant:
     discord_id: str | None
     eligible: bool = True
     name_matches_usn_format: bool | None = None
+    global_name_matches_usn_format: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -1948,13 +1949,18 @@ class Database:
                 discord_id=row[3],
                 eligible=bool(row[4]),
                 name_matches_usn_format=(
+                    matches_usn_format(str(row[0]))
+                    or (
+                        row[5] is not None
+                        and matches_usn_format(str(row[5]))
+                    )
+                ),
+                global_name_matches_usn_format=(
                     matches_usn_format(str(row[5]))
                     if row[5] is not None
-                    else (
-                        False
-                        if row[3] is not None
-                        else matches_usn_format(str(row[0]))
-                    )
+                    else False
+                    if row[3] is not None
+                    else None
                 ),
             )
             for row in rows

@@ -1203,6 +1203,39 @@ class DatabaseTests(unittest.TestCase):
             self.fail("Expected the final leaderboard summary.")
         self.assertTrue(summary.participants[0].name_matches_usn_format)
 
+    def test_valid_leaderboard_usn_is_not_warned_when_global_name_differs(self) -> None:
+        guild = SimpleNamespace(id=67890)
+        member = SimpleNamespace(
+            id=54321,
+            name="student_account",
+            display_name="Student Nickname",
+            global_name="Student Name",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.map_student(member, "4GM22CS055", "Student")
+        self.database.sync_member(member)
+        session = self.database.start_quiz_session(
+            guild.id, 1001, 12345, "2026-10-01T10:00:00+00:00"
+        )
+
+        summary = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "revision-1",
+            [("1", "Student", "900")],
+            True,
+        )
+
+        if summary is None:
+            self.fail("Expected the final leaderboard summary.")
+        participant = summary.participants[0]
+        self.assertEqual(participant.usn, "4GM22CS055")
+        self.assertTrue(participant.name_matches_usn_format)
+        self.assertFalse(participant.global_name_matches_usn_format)
+
     def test_faculty_assignment_accepts_unicode_formatted_usn(self) -> None:
         member = SimpleNamespace(
             id=54321,
