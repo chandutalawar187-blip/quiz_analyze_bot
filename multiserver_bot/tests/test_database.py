@@ -971,7 +971,7 @@ class DatabaseTests(unittest.TestCase):
         member = SimpleNamespace(
             id=54321,
             name="student_account",
-            display_name="Student Nickname",
+            display_name="Manual Student Nickname",
             global_name="4GM22CS001",
             status=SimpleNamespace(name="online"),
             bot=False,
@@ -1208,7 +1208,7 @@ class DatabaseTests(unittest.TestCase):
         member = SimpleNamespace(
             id=54321,
             name="student_account",
-            display_name="Student Nickname",
+            display_name="Manual Student Nickname",
             global_name="Student Name",
             status=SimpleNamespace(name="online"),
             bot=False,
@@ -1299,8 +1299,20 @@ class DatabaseTests(unittest.TestCase):
         )
         if summary is None:
             self.fail("Expected the final leaderboard summary.")
-        discord_member = SimpleNamespace(id=12345, send=AsyncMock())
-        guild = SimpleNamespace(get_member=lambda member_id: discord_member)
+        discord_member = SimpleNamespace(
+            id=12345,
+            send=AsyncMock(),
+            guild_permissions=SimpleNamespace(
+                administrator=False,
+                manage_guild=False,
+            ),
+            roles=[],
+        )
+        guild = SimpleNamespace(
+            id=67890,
+            name="Test server",
+            get_member=lambda member_id: discord_member,
+        )
         cog = AnalyticsCog(
             bot=SimpleNamespace(),
             settings=SimpleNamespace(),
@@ -1313,8 +1325,213 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(discord_member.send.await_count, 1)
         reminder = discord_member.send.await_args.args[0]
         self.assertIn("ABC123", reminder)
+        self.assertIn("MultiServer Bot", reminder)
+        self.assertIn("Test server", reminder)
         self.assertIn("global display name", reminder)
         self.assertIn("Do not change your unique Discord username", reminder)
+
+    def test_final_quiz_usn_reminders_exclude_faculty_and_administrators(self) -> None:
+        guild = SimpleNamespace(id=67890, name="Test server")
+        faculty_role_id = 33333
+        members = (
+            SimpleNamespace(
+                id=54321,
+                name="faculty_account",
+                display_name="Faculty Nickname",
+                global_name="Faculty Member",
+                status=SimpleNamespace(name="online"),
+                bot=False,
+                guild=guild,
+                guild_permissions=SimpleNamespace(
+                    administrator=False, manage_guild=False
+                ),
+                roles=[SimpleNamespace(id=faculty_role_id)],
+                send=AsyncMock(),
+            ),
+            SimpleNamespace(
+                id=54322,
+                name="admin_account",
+                display_name="Admin Nickname",
+                global_name="Administrator",
+                status=SimpleNamespace(name="online"),
+                bot=False,
+                guild=guild,
+                guild_permissions=SimpleNamespace(
+                    administrator=True, manage_guild=True
+                ),
+                roles=[],
+                send=AsyncMock(),
+            ),
+            SimpleNamespace(
+                id=54323,
+                name="student_account",
+                display_name="Learner Nickname",
+                global_name="Student Name",
+                status=SimpleNamespace(name="online"),
+                bot=False,
+                guild=guild,
+                guild_permissions=SimpleNamespace(
+                    administrator=False, manage_guild=False
+                ),
+                roles=[],
+                send=AsyncMock(),
+            ),
+        )
+        for member, usn, student_name in zip(
+            members,
+            ("4GM22CS001", "4GM22CS002", "4GM22CS003"),
+            ("Faculty", "Administrator", "Student"),
+        ):
+            self.database.map_student(member, usn, student_name)
+        self.database.sync_members(members)
+        self.database.set_faculty_role(guild.id, faculty_role_id)
+        session = self.database.start_quiz_session(
+            guild.id, 1001, 12345, "2026-10-01T10:00:00+00:00"
+        )
+        summary = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "revision-1",
+            [
+                ("1", "Faculty Nickname", "900"),
+                ("2", "Admin Nickname", "800"),
+                ("3", "Learner Nickname", "700"),
+            ],
+            True,
+        )
+        if summary is None:
+            self.fail("Expected the final leaderboard summary.")
+        self.assertEqual(
+            [
+                (
+                    participant.usn,
+                    participant.discord_id,
+                    participant.global_name_matches_usn_format,
+                )
+                for participant in summary.participants
+            ],
+            [
+                ("4GM22CS001", "54321", False),
+                ("4GM22CS002", "54322", False),
+                ("4GM22CS003", "54323", False),
+            ],
+        )
+        members_by_id = {member.id: member for member in members}
+        guild.get_member = members_by_id.get
+        cog = AnalyticsCog(
+            bot=SimpleNamespace(),
+            settings=SimpleNamespace(),
+            database=self.database,
+        )
+
+        asyncio.run(cog._notify_global_name_updates(guild, summary))
+
+        self.assertEqual(members[0].send.await_count, 0)
+        self.assertEqual(members[1].send.await_count, 0)
+        self.assertEqual(members[2].send.await_count, 1)
+
+    def test_faculty_can_manually_send_usn_reminders_once_for_latest_completed_quiz(
+        self,
+    ) -> None:
+        guild = SimpleNamespace(id=67890, name="Test server", owner_id=99999)
+        faculty_role_id = 33333
+        member = SimpleNamespace(
+            id=54321,
+            name="student_account",
+            display_name="Manual Student Nickname",
+            global_name="Student Name",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(
+                administrator=False, manage_guild=False
+            ),
+            roles=[],
+            send=AsyncMock(),
+        )
+        self.database.map_student(member, "4GM22CS001", "Student")
+        self.database.sync_member(member)
+        self.database.set_faculty_role(guild.id, faculty_role_id)
+        completed_session = self.database.start_quiz_session(
+            guild.id, 1001, 12345, "2026-10-01T10:00:00+00:00"
+        )
+        self.database.record_quiz_leaderboard(
+            completed_session.session_id,
+            5001,
+            "revision-1",
+            [("1", "Manual Student Nickname", "900")],
+            True,
+        )
+        self.database.start_quiz_session(
+            guild.id, 1001, 12345, "2026-10-02T10:00:00+00:00"
+        )
+        guild.get_member = lambda member_id: member
+        faculty = SimpleNamespace(
+            id=22222,
+            roles=[SimpleNamespace(id=faculty_role_id)],
+            guild_permissions=SimpleNamespace(
+                administrator=False, manage_guild=False
+            ),
+        )
+        interaction = SimpleNamespace(
+            guild_id=guild.id,
+            guild=guild,
+            channel_id=1001,
+            user=faculty,
+            response=SimpleNamespace(
+                send_message=AsyncMock(),
+                defer=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        cog = AnalyticsCog(
+            bot=SimpleNamespace(),
+            settings=SimpleNamespace(),
+            database=self.database,
+        )
+
+        asyncio.run(AnalyticsCog.remind_usn.callback(cog, interaction))
+        asyncio.run(AnalyticsCog.remind_usn.callback(cog, interaction))
+
+        self.assertEqual(interaction.response.defer.await_count, 2)
+        self.assertEqual(interaction.followup.send.await_count, 2)
+        self.assertEqual(member.send.await_count, 1)
+        self.assertIn("Sent 1 direct message", interaction.followup.send.call_args_list[0].args[0])
+        self.assertIn("Sent 0 direct message", interaction.followup.send.call_args_list[1].args[0])
+
+    def test_usn_reminder_command_rejects_non_faculty_non_admin(self) -> None:
+        guild = SimpleNamespace(id=67890, name="Test server", owner_id=99999)
+        self.database.set_faculty_role(guild.id, 33333)
+        interaction = SimpleNamespace(
+            guild_id=guild.id,
+            guild=guild,
+            channel_id=1001,
+            user=SimpleNamespace(
+                id=22222,
+                roles=[],
+                guild_permissions=SimpleNamespace(
+                    administrator=False, manage_guild=False
+                ),
+            ),
+            response=SimpleNamespace(
+                send_message=AsyncMock(),
+                defer=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        cog = AnalyticsCog(
+            bot=SimpleNamespace(),
+            settings=SimpleNamespace(),
+            database=self.database,
+        )
+
+        asyncio.run(AnalyticsCog.remind_usn.callback(cog, interaction))
+
+        interaction.response.send_message.assert_awaited_once()
+        self.assertTrue(
+            interaction.response.send_message.await_args.kwargs["ephemeral"]
+        )
+        interaction.response.defer.assert_not_awaited()
 
     def test_analytics_report_aggregates_points_and_attendance(self) -> None:
         self.database.save_quiz_results(

@@ -1248,6 +1248,21 @@ class Database:
             ).fetchone()
             return self._get_session(connection, row[0]) if row else None
 
+    def get_latest_completed_quiz_session(
+        self, guild_id: int, channel_id: int
+    ) -> QuizSession | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT session_id FROM quiz_sessions
+                WHERE guild_id = ? AND channel_id = ? AND status = 'completed'
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (str(guild_id), str(channel_id)),
+            ).fetchone()
+            return self._get_session(connection, row[0]) if row else None
+
     def get_quiz_session_for_message(
         self, channel_id: int, message_id: int
     ) -> QuizSession | None:

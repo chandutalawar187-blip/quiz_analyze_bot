@@ -391,6 +391,61 @@ class AnalyticsCog(commands.Cog):
         )
         await interaction.response.send_message(message, ephemeral=True)
 
+    @app_commands.command(
+        name="remind_usn",
+        description="DM quiz participants who need to update their Discord name.",
+    )
+    @app_commands.guild_only()
+    async def remind_usn(self, interaction: discord.Interaction) -> None:
+        if (
+            interaction.guild_id is None
+            or interaction.guild is None
+            or interaction.channel_id is None
+        ):
+            await interaction.response.send_message(
+                "This command can only be used in a server channel.",
+                ephemeral=True,
+            )
+            return
+        permissions = interaction.user.guild_permissions
+        faculty_role_id = self.database.get_faculty_role_id(interaction.guild_id)
+        is_faculty = faculty_role_id is not None and any(
+            role.id == faculty_role_id for role in interaction.user.roles
+        )
+        if not (
+            interaction.user.id == interaction.guild.owner_id
+            or permissions.administrator
+            or permissions.manage_guild
+            or is_faculty
+        ):
+            await interaction.response.send_message(
+                "Only faculty and server administrators can send USN reminders.",
+                ephemeral=True,
+            )
+            return
+
+        session = self.database.get_latest_completed_quiz_session(
+            interaction.guild_id, interaction.channel_id
+        )
+        if session is None:
+            await interaction.response.send_message(
+                "There is no completed quiz in this channel to send reminders for.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        summary = self.database.get_quiz_session_summary(session.session_id)
+        sent_count = await self._notify_global_name_updates(
+            interaction.guild, summary
+        )
+        await interaction.followup.send(
+            f"USN reminder process completed for the latest quiz. "
+            f"Sent {sent_count} direct message(s). Reminders are sent at most "
+            "once per member per quiz.",
+            ephemeral=True,
+        )
+
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
         self.database.sync_member(member)
@@ -568,7 +623,9 @@ class AnalyticsCog(commands.Cog):
 
     async def _notify_global_name_updates(
         self, guild: discord.Guild, summary: QuizSessionSummary
-    ) -> None:
+    ) -> int:
+        faculty_role_id = self.database.get_faculty_role_id(guild.id)
+        sent_count = 0
         for participant in summary.participants:
             if (
                 participant.discord_id is None
@@ -601,6 +658,13 @@ class AnalyticsCog(commands.Cog):
                         member_id,
                     )
                     continue
+            permissions = member.guild_permissions
+            if permissions.administrator or permissions.manage_guild:
+                continue
+            if faculty_role_id is not None and any(
+                role.id == faculty_role_id for role in member.roles
+            ):
+                continue
             usn = self.database.claim_global_name_reminder(
                 summary.session.session_id, member_id
             )
@@ -609,14 +673,19 @@ class AnalyticsCog(commands.Cog):
             safe_usn = discord.utils.escape_mentions(
                 discord.utils.escape_markdown(usn)
             )
+            safe_guild_name = discord.utils.escape_mentions(
+                discord.utils.escape_markdown(guild.name)
+            )
             try:
                 await member.send(
+                    f"This message is from **MultiServer Bot** in **{safe_guild_name}**.\n"
                     "Your quiz result was recorded. Please set your Discord "
                     f"global display name to your USN: **{safe_usn}**.\n"
                     "For example: `4GM22CS001` or `U22E22CS001`. Do not change "
                     "your unique Discord username. This helps match future "
                     "Quizcord results correctly."
                 )
+                sent_count += 1
             except discord.Forbidden:
                 LOGGER.info(
                     "Could not DM member %s a USN nickname reminder; DMs are unavailable.",
@@ -627,6 +696,7 @@ class AnalyticsCog(commands.Cog):
                     "Could not DM member %s a USN nickname reminder.",
                     member_id,
                 )
+        return sent_count
 
     async def _quiz_admin(
         self, guild: discord.Guild
