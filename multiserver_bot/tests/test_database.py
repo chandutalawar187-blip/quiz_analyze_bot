@@ -16,6 +16,11 @@ from quizcord_bot.quizcord import parse_quiz_rows
 from quizcord_bot.views import result_embed
 
 
+async def _iterate_members(members):
+    for member in members:
+        yield member
+
+
 class DatabaseTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -1326,7 +1331,7 @@ class DatabaseTests(unittest.TestCase):
         )
         if summary is None:
             self.fail("Expected the final leaderboard summary.")
-        guild.get_member = lambda member_id: member
+        guild.fetch_members = lambda limit=None: _iterate_members((member,))
         cog = AnalyticsCog(
             bot=SimpleNamespace(),
             settings=SimpleNamespace(),
@@ -1382,7 +1387,8 @@ class DatabaseTests(unittest.TestCase):
         guild = SimpleNamespace(
             id=67890,
             name="Test server",
-            get_member=lambda member_id: discord_member,
+            owner_id=99999,
+            fetch_members=lambda limit=None: _iterate_members((discord_member,)),
         )
         cog = AnalyticsCog(
             bot=SimpleNamespace(),
@@ -1426,7 +1432,7 @@ class DatabaseTests(unittest.TestCase):
             self.fail("Expected the final leaderboard summary.")
         self.assertTrue(summary.participants[0].global_name_matches_usn_format)
         member.global_name = "Student One"
-        guild.get_member = lambda member_id: member
+        guild.fetch_members = lambda limit=None: _iterate_members((member,))
         cog = AnalyticsCog(
             bot=SimpleNamespace(),
             settings=SimpleNamespace(),
@@ -1525,8 +1531,45 @@ class DatabaseTests(unittest.TestCase):
                 ("4GM22CS003", "54323", False),
             ],
         )
-        members_by_id = {member.id: member for member in members}
-        guild.get_member = members_by_id.get
+        non_attendee = SimpleNamespace(
+            id=54324,
+            name="non_attendee_account",
+            display_name="Non Attendee Nickname",
+            global_name="Non Attendee",
+            status=SimpleNamespace(name="offline"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(
+                administrator=False,
+                manage_guild=False,
+                manage_roles=False,
+                manage_channels=False,
+                manage_messages=False,
+            ),
+            roles=[],
+            send=AsyncMock(),
+        )
+        maintainer = SimpleNamespace(
+            id=54325,
+            name="maintainer_account",
+            display_name="Maintainer Nickname",
+            global_name="Maintainer",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(
+                administrator=False,
+                manage_guild=False,
+                manage_roles=False,
+                manage_channels=False,
+                manage_messages=True,
+            ),
+            roles=[],
+            send=AsyncMock(),
+        )
+        guild.fetch_members = lambda limit=None: _iterate_members(
+            (*members, non_attendee, maintainer)
+        )
         cog = AnalyticsCog(
             bot=SimpleNamespace(),
             settings=SimpleNamespace(),
@@ -1538,6 +1581,8 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(members[0].send.await_count, 0)
         self.assertEqual(members[1].send.await_count, 0)
         self.assertEqual(members[2].send.await_count, 1)
+        self.assertEqual(non_attendee.send.await_count, 1)
+        self.assertEqual(maintainer.send.await_count, 0)
 
     def test_faculty_can_manually_send_usn_reminders_once_for_latest_completed_quiz(
         self,
@@ -1574,7 +1619,7 @@ class DatabaseTests(unittest.TestCase):
         self.database.start_quiz_session(
             guild.id, 1001, 12345, "2026-10-02T10:00:00+00:00"
         )
-        guild.get_member = lambda member_id: member
+        guild.fetch_members = lambda limit=None: _iterate_members((member,))
         faculty = SimpleNamespace(
             id=22222,
             roles=[SimpleNamespace(id=faculty_role_id)],
@@ -1639,6 +1684,42 @@ class DatabaseTests(unittest.TestCase):
         interaction.response.send_message.assert_awaited_once()
         self.assertTrue(
             interaction.response.send_message.await_args.kwargs["ephemeral"]
+        )
+        interaction.response.defer.assert_not_awaited()
+
+    def test_usn_reminder_command_allows_server_maintainer(self) -> None:
+        guild = SimpleNamespace(id=67890, name="Test server", owner_id=99999)
+        interaction = SimpleNamespace(
+            guild_id=guild.id,
+            guild=guild,
+            channel_id=1001,
+            user=SimpleNamespace(
+                id=22222,
+                roles=[],
+                guild_permissions=SimpleNamespace(
+                    administrator=False,
+                    manage_guild=False,
+                    manage_messages=True,
+                ),
+            ),
+            response=SimpleNamespace(
+                send_message=AsyncMock(),
+                defer=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        cog = AnalyticsCog(
+            bot=SimpleNamespace(),
+            settings=SimpleNamespace(),
+            database=self.database,
+        )
+
+        asyncio.run(AnalyticsCog.remind_usn.callback(cog, interaction))
+
+        interaction.response.send_message.assert_awaited_once()
+        self.assertIn(
+            "no completed quiz",
+            interaction.response.send_message.await_args.args[0],
         )
         interaction.response.defer.assert_not_awaited()
 

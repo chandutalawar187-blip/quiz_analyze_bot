@@ -37,12 +37,32 @@ from quizcord_bot.views import (
 
 
 LOGGER = logging.getLogger("quizcord_analytics")
+USN_MAINTAINER_PERMISSIONS = (
+    "administrator",
+    "manage_guild",
+    "manage_roles",
+    "manage_channels",
+    "manage_messages",
+    "manage_nicknames",
+    "kick_members",
+    "ban_members",
+    "moderate_members",
+)
+
+
+def _has_usn_maintainer_permissions(permissions: discord.Permissions) -> bool:
+    return any(
+        getattr(permissions, permission, False)
+        for permission in USN_MAINTAINER_PERMISSIONS
+    )
 
 
 @dataclass(frozen=True)
 class USNReminderResult:
     sent: int = 0
     already_sent: int = 0
+    valid_name: int = 0
+    excluded: int = 0
     failed: int = 0
     unavailable: int = 0
 
@@ -427,8 +447,7 @@ class AnalyticsCog(commands.Cog):
         )
         if not (
             interaction.user.id == interaction.guild.owner_id
-            or permissions.administrator
-            or permissions.manage_guild
+            or _has_usn_maintainer_permissions(permissions)
             or is_faculty
         ):
             await interaction.response.send_message(
@@ -455,7 +474,9 @@ class AnalyticsCog(commands.Cog):
         await interaction.followup.send(
             f"USN reminder process completed for the latest quiz. "
             f"Sent: {result.sent}; already sent: {result.already_sent}; "
-            f"could not send: {result.failed}; member unavailable or not linked: "
+            f"already using a valid USN name: {result.valid_name}; "
+            f"excluded staff/bots: {result.excluded}; "
+            f"could not send: {result.failed}; roster unavailable: "
             f"{result.unavailable}. Failed sends can be retried.",
             ephemeral=True,
         )
@@ -639,59 +660,51 @@ class AnalyticsCog(commands.Cog):
         self, guild: discord.Guild, summary: QuizSessionSummary
     ) -> USNReminderResult:
         faculty_role_id = self.database.get_faculty_role_id(guild.id)
+        try:
+            members = [
+                member async for member in guild.fetch_members(limit=None)
+            ]
+        except discord.Forbidden:
+            LOGGER.warning(
+                "Cannot fetch members for USN reminders in guild %s.",
+                guild.id,
+            )
+            return USNReminderResult(unavailable=1)
+        except discord.HTTPException:
+            LOGGER.exception(
+                "Could not fetch members for USN reminders in guild %s.",
+                guild.id,
+            )
+            return USNReminderResult(unavailable=1)
         sent_count = 0
         already_sent_count = 0
+        valid_name_count = 0
+        excluded_count = 0
         failed_count = 0
         unavailable_count = 0
-        for participant in summary.participants:
-            if participant.discord_id is None:
-                unavailable_count += 1
+        for member in members:
+            if getattr(member, "bot", False):
+                excluded_count += 1
                 continue
-            try:
-                member_id = int(participant.discord_id)
-            except ValueError:
-                LOGGER.warning(
-                    "Ignoring invalid Discord ID on quiz participant %s.",
-                    participant.usn,
-                )
-                unavailable_count += 1
-                continue
-            member = guild.get_member(member_id)
-            if member is None:
-                try:
-                    member = await guild.fetch_member(member_id)
-                except discord.NotFound:
-                    unavailable_count += 1
-                    continue
-                except discord.Forbidden:
-                    LOGGER.warning(
-                        "Cannot retrieve member %s to send a USN nickname reminder.",
-                        member_id,
-                    )
-                    unavailable_count += 1
-                    continue
-                except discord.HTTPException:
-                    LOGGER.exception(
-                        "Could not retrieve member %s for a USN nickname reminder.",
-                        member_id,
-                    )
-                    unavailable_count += 1
-                    continue
             if matches_usn_format(getattr(member, "global_name", None) or ""):
+                valid_name_count += 1
                 continue
             permissions = member.guild_permissions
-            if permissions.administrator or permissions.manage_guild:
+            if (
+                member.id == getattr(guild, "owner_id", None)
+                or _has_usn_maintainer_permissions(permissions)
+            ):
+                excluded_count += 1
                 continue
             if faculty_role_id is not None and any(
                 role.id == faculty_role_id for role in member.roles
             ):
+                excluded_count += 1
                 continue
             usn = self.database.claim_global_name_reminder(
                 summary.session.session_id,
-                member_id,
-                participant.usn
-                if matches_usn_format(participant.usn)
-                else "",
+                member.id,
+                "",
             )
             if usn is None:
                 already_sent_count += 1
@@ -719,25 +732,27 @@ class AnalyticsCog(commands.Cog):
                 sent_count += 1
             except discord.Forbidden:
                 self.database.release_global_name_reminder(
-                    summary.session.session_id, member_id
+                    summary.session.session_id, member.id
                 )
                 failed_count += 1
                 LOGGER.info(
                     "Could not DM member %s a USN nickname reminder; DMs are unavailable.",
-                    member_id,
+                    member.id,
                 )
             except discord.HTTPException:
                 self.database.release_global_name_reminder(
-                    summary.session.session_id, member_id
+                    summary.session.session_id, member.id
                 )
                 failed_count += 1
                 LOGGER.exception(
                     "Could not DM member %s a USN nickname reminder.",
-                    member_id,
+                    member.id,
                 )
         return USNReminderResult(
             sent=sent_count,
             already_sent=already_sent_count,
+            valid_name=valid_name_count,
+            excluded=excluded_count,
             failed=failed_count,
             unavailable=unavailable_count,
         )
