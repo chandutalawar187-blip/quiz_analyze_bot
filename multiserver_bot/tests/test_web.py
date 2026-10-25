@@ -808,7 +808,17 @@ class DashboardWebTests(unittest.TestCase):
             (
                 "/static/cookie-preferences.js",
                 "javascript",
-                'if (readChoice() !== "accepted")',
+                "urlQueryParams: false",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                "beforeSendSpan: scrubSpan",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                'if (/url|query/i.test(key))',
             ),
             (
                 "/static/faculty-dashboard.css",

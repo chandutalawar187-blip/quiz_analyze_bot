@@ -87,27 +87,20 @@
     return sdkPromise;
   }
 
-  function scrubTransaction(event) {
-    if (readChoice() !== "accepted") {
-      return null;
+  function scrubSpan(span) {
+    if (typeof span.name === "string") {
+      span.name = span.name
+        .replace(/(\/api\/sessions\/)[^/?\s]+/g, "$1:session")
+        .replace(/\?.*$/, "");
     }
-    delete event.request;
-    event.transaction = "admin-dashboard";
-    for (const span of event.spans || []) {
-      if (typeof span.description === "string") {
-        span.description = span.description
-          .replace(/(\/api\/sessions\/)[^/?\s]+/g, "$1:session")
-          .replace(/\?.*$/, "");
-      }
-      if (span.data && typeof span.data === "object") {
-        for (const key of Object.keys(span.data)) {
-          if (/url|query/i.test(key)) {
-            delete span.data[key];
-          }
+    if (span.attributes && typeof span.attributes === "object") {
+      for (const key of Object.keys(span.attributes)) {
+        if (/url|query/i.test(key)) {
+          delete span.attributes[key];
         }
       }
     }
-    return event;
+    return span;
   }
 
   async function startAnalytics() {
@@ -127,6 +120,9 @@
         dsn,
         defaultIntegrations: false,
         sendDefaultPii: false,
+        dataCollection: {
+          urlQueryParams: false,
+        },
         tracesSampler: () => (readChoice() === "accepted" ? 0.1 : 0),
         replaysSessionSampleRate: 0,
         replaysOnErrorSampleRate: 0,
@@ -141,7 +137,7 @@
             maxReplayDuration: 900000,
           }),
         ],
-        beforeSendTransaction: scrubTransaction,
+        beforeSendSpan: scrubSpan,
       });
       initialized = true;
     }
