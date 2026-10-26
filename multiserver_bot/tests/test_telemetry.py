@@ -1,8 +1,9 @@
 """Sentry telemetry setup and privacy-filter tests."""
 
+import asyncio
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from quizcord_bot.config import Settings
 from quizcord_bot.telemetry import (
@@ -12,6 +13,7 @@ from quizcord_bot.telemetry import (
     _scrub_transaction,
     initialize_sentry,
     record_http_request,
+    trace_external_request,
 )
 
 
@@ -91,6 +93,66 @@ class SentryTelemetryTests(unittest.TestCase):
         self.assertEqual(
             scrubbed["spans"],
             [{"op": "http.client", "description": "http.client"}],
+        )
+
+    def test_scrubber_preserves_only_allowlisted_external_span_names(self) -> None:
+        transaction = {
+            "spans": [
+                {
+                    "op": "external.api",
+                    "description": "discord.oauth.current_user",
+                    "data": {"url": "https://discord.com/users/@me"},
+                },
+                {
+                    "op": "external.api",
+                    "description": "GET /guilds/67890/members/12345",
+                },
+                {
+                    "op": "http.client",
+                    "description": "GET https://discord.com/users/@me",
+                },
+            ]
+        }
+
+        scrubbed = _scrub_transaction(transaction, {})
+
+        self.assertEqual(
+            scrubbed["spans"],
+            [
+                {
+                    "op": "external.api",
+                    "description": "discord.oauth.current_user",
+                },
+                {"op": "external.api", "description": "external.api"},
+                {"op": "http.client", "description": "http.client"},
+            ],
+        )
+
+    def test_trace_external_request_records_safe_name_and_returns_response(self) -> None:
+        from contextlib import nullcontext
+
+        request = AsyncMock(return_value="response")
+
+        with patch(
+            "quizcord_bot.telemetry.sentry_sdk.start_span",
+            return_value=nullcontext(),
+        ) as start_span:
+            response = asyncio.run(
+                trace_external_request(
+                    "discord.oauth.current_user",
+                    request,
+                    "https://discord.com/users/@me",
+                    headers={"Authorization": "test"},
+                )
+            )
+
+        self.assertEqual(response, "response")
+        request.assert_awaited_once_with(
+            "https://discord.com/users/@me",
+            headers={"Authorization": "test"},
+        )
+        start_span.assert_called_once_with(
+            op="external.api", name="discord.oauth.current_user"
         )
 
     def test_log_scrubbing_removes_message_and_unapproved_attributes(self) -> None:

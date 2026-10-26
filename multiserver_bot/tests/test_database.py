@@ -5,17 +5,38 @@ import sqlite3
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
+
+from discord import app_commands
 
 from quizcord_bot.cogs.analytics import AnalyticsCog
 from quizcord_bot.database import Database, matches_usn_format
+from quizcord_bot.quizcord import parse_quiz_rows
 from quizcord_bot.views import result_embed
 
 
+async def _iterate_members(members):
+    for member in members:
+        yield member
+
+
 class DatabaseTests(unittest.TestCase):
+    def test_session_pages_reach_older_sessions_and_stay_in_guild(self) -> None:
+        self.database.register_guild(67890, "Primary", None)
+        for i in range(52):
+            self.database.start_quiz_session(67890, 100 + i, 3, f"2026-10-01T00:{i:02d}:00+00:00")
+        self.database.start_quiz_session(99999, 4, 5, "2026-10-02T00:00:00+00:00")
+        first = self.database.get_quiz_session_summaries(67890)
+        older = self.database.get_quiz_session_summaries(67890, offset=50)
+        self.assertEqual(len(first), 50)
+        self.assertEqual(len(older), 2)
+        self.assertFalse({row.session.session_id for row in first} & {row.session.session_id for row in older})
+        self.assertTrue(all(row.session.guild_id == 67890 for row in (*first, *older)))
+        self.assertGreater(first[-1].session.started_at, older[0].session.started_at)
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.temp_dir.name) / "results.db")
@@ -144,6 +165,79 @@ class DatabaseTests(unittest.TestCase):
             ),
             ("400 Points", "1"),
         )
+
+    def test_clear_guild_quiz_history_preserves_other_guild_and_mappings(self) -> None:
+        self.database.register_guild(98765, "Another server")
+        other_member = SimpleNamespace(
+            id=54321,
+            name="Student_Two",
+            display_name="Student Two",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+        )
+        self.database.map_student(
+            other_member, "XYZ789", "Student Two", guild_id=98765
+        )
+        sessions = {}
+        for guild_id, channel_id, quiz_id, nickname in (
+            (67890, 1001, "college-quiz", "Student Nickname"),
+            (98765, 1002, "other-quiz", "Student Two"),
+        ):
+            session = self.database.start_quiz_session(
+                guild_id, channel_id, 12345, "2026-10-05T10:00:00+00:00"
+            )
+            sessions[guild_id] = session
+            self.database.record_quiz_leaderboard(
+                session.session_id,
+                channel_id + 100,
+                "revision-1",
+                [("1", nickname, "900")],
+                True,
+                quiz_id,
+            )
+        self.database.save_quiz_results(
+            "manual-college-quiz",
+            [("1", "Student Nickname", "700")],
+            guild_id=67890,
+        )
+
+        deleted_analytics, deleted_sessions = (
+            self.database.clear_guild_quiz_history(67890)
+        )
+
+        self.assertEqual(deleted_analytics, 2)
+        self.assertEqual(deleted_sessions, 1)
+        self.assertEqual(
+            self.database.get_student_quiz_analytics(67890, "ABC123").history,
+            (),
+        )
+        self.assertEqual(
+            self.database.get_student_quiz_analytics(98765, "XYZ789").total_points,
+            900,
+        )
+        self.assertIsNone(
+            self.database.get_quiz_session(sessions[67890].session_id)
+        )
+        self.assertIsNotNone(
+            self.database.get_quiz_session(sessions[98765].session_id)
+        )
+        self.assertEqual(
+            self.database.get_student_quiz_analytics(67890, "ABC123").student_name,
+            "Student One",
+        )
+        with self.database._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM quiz_session_updates"
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM quiz_session_participants"
+                ).fetchone()[0],
+                1,
+            )
 
     def test_student_profile_includes_manual_imports_with_recorded_import_dates(
         self,
@@ -293,6 +387,317 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(analytics.quizzes_attended, 1)
         self.assertEqual(len(analytics.history), 1)
         self.assertEqual(analytics.history[0].quizcord_quiz_id, "quiz-123")
+
+    def test_repeated_start_signal_keeps_active_quiz_until_final_leaderboard(
+        self,
+    ) -> None:
+        started_at = "2026-10-24T19:00:00+00:00"
+        session = self.database.start_quiz_session(
+            67890, 1001, 12345, started_at
+        )
+        self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "question-1",
+            [("1", "Student Nickname", "900")],
+            False,
+        )
+
+        repeated_start = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-24T19:05:00+00:00"
+        )
+        self.assertEqual(repeated_start.session_id, session.session_id)
+        self.assertEqual(repeated_start.status, "active")
+
+        completed = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5002,
+            "final",
+            [("1", "Student Nickname", "950")],
+            True,
+            "quiz-2026-10-24",
+        )
+        self.assertIsNotNone(completed)
+        next_session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-24T20:00:00+00:00"
+        )
+        self.assertNotEqual(next_session.session_id, session.session_id)
+        self.assertEqual(next_session.status, "active")
+
+    def test_stale_active_session_is_interrupted_before_next_quiz(self) -> None:
+        session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-24T19:00:00+00:00"
+        )
+        self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "question-1",
+            [("1", "Student Nickname", "900")],
+            False,
+        )
+
+        next_session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-24T20:00:00+00:00"
+        )
+
+        self.assertNotEqual(next_session.session_id, session.session_id)
+        self.assertEqual(next_session.status, "active")
+        previous_summary = self.database.get_quiz_session_summary(
+            session.session_id
+        )
+        self.assertEqual(previous_summary.session.status, "interrupted")
+        self.assertEqual(previous_summary.session.question_count, 1)
+        self.assertEqual(previous_summary.participants[0].points, 900)
+
+    def test_recent_leaderboard_keeps_long_running_quiz_active(self) -> None:
+        session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-24T19:00:00+00:00"
+        )
+        activity_time = datetime.fromisoformat("2026-10-24T19:50:00+00:00")
+        activity_snowflake = (
+            int(activity_time.timestamp() * 1000) - 1_420_070_400_000
+        ) << 22
+        self.database.record_quiz_leaderboard(
+            session.session_id,
+            activity_snowflake,
+            "question-1",
+            [("1", "Student Nickname", "900")],
+            False,
+        )
+
+        repeated_start = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-24T20:30:00+00:00"
+        )
+        next_quiz = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-24T20:51:00+00:00"
+        )
+
+        self.assertEqual(repeated_start.session_id, session.session_id)
+        self.assertNotEqual(next_quiz.session_id, session.session_id)
+        self.assertEqual(
+            self.database.get_quiz_session_summary(
+                session.session_id
+            ).session.status,
+            "interrupted",
+        )
+
+    def test_initialize_preserves_ambiguous_completed_same_day_sessions(
+        self,
+    ) -> None:
+        sessions = []
+        for index, (score, quiz_id) in enumerate(
+            ((900, None), (950, None), (1000, "3228337"), (1100, None))
+        ):
+            session = self.database.start_quiz_session(
+                67890,
+                1001,
+                12345,
+                f"2026-10-24T19:{index:02}:00+00:00",
+            )
+            self.database.set_quiz_dashboard_message(
+                session.session_id, 9999, 6000 + index
+            )
+            self.database.record_quiz_leaderboard(
+                session.session_id,
+                5001 + index,
+                f"revision-{index}",
+                [("1", "Student Nickname", str(score))],
+                True,
+                quiz_id,
+                f"2026-10-24T19:{index:02}:30+00:00",
+            )
+            sessions.append(session)
+
+        self.database.initialize()
+        self.database.initialize()
+
+        summaries = self.database.get_quiz_session_summaries(67890)
+        self.assertEqual(len(summaries), 4)
+        self.assertEqual(
+            {summary.session.session_id for summary in summaries},
+            {session.session_id for session in sessions},
+        )
+        self.assertTrue(
+            all(summary.session.status == "completed" for summary in summaries)
+        )
+        analytics = self.database.get_student_quiz_analytics(67890, "ABC123")
+        self.assertEqual(analytics.quizzes_attended, 4)
+        self.assertEqual(analytics.completed_quizzes, 4)
+        self.assertEqual(analytics.total_points, 3950)
+        with self.database._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM quiz_session_updates"
+                ).fetchone()[0],
+                4,
+            )
+            self.assertEqual(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM quiz_analytics
+                    WHERE guild_id = ? AND usn = ? AND quiz_id IS NOT NULL
+                    """,
+                    ("67890", "ABC123"),
+                ).fetchone()[0],
+                4,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM quiz_session_aliases"
+                ).fetchone()[0],
+                0,
+            )
+        analytics_count, session_count = self.database.clear_guild_quiz_history(
+            67890
+        )
+        self.assertEqual(session_count, 4)
+        self.assertGreater(analytics_count, 0)
+        with self.database._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM quiz_session_aliases"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_initialize_merges_only_sessions_with_shared_uncompleted_message(
+        self,
+    ) -> None:
+        sessions = []
+        for index in range(2):
+            session = self.database.start_quiz_session(
+                67890,
+                1001,
+                12345,
+                f"2026-10-24T19:0{index}:00+00:00",
+            )
+            self.database.record_quiz_leaderboard(
+                session.session_id,
+                5001,
+                f"revision-{index}",
+                [("1", "Student Nickname", str(900 + index * 50))],
+                False,
+                "same-quiz-id",
+            )
+            with self.database._connect() as connection:
+                connection.execute(
+                    "UPDATE quiz_sessions SET status = 'interrupted' "
+                    "WHERE session_id = ?",
+                    (session.session_id,),
+                )
+            sessions.append(session)
+
+        self.database.initialize()
+
+        summaries = self.database.get_quiz_session_summaries(67890)
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0].session.status, "interrupted")
+        self.assertEqual(summaries[0].session.question_count, 2)
+        self.assertEqual(summaries[0].participants[0].points, 950)
+        with self.database._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM quiz_session_aliases"
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM quiz_session_updates"
+                ).fetchone()[0],
+                2,
+            )
+
+    def test_initialize_keeps_completed_sessions_even_with_shared_message(
+        self,
+    ) -> None:
+        sessions = []
+        for index in range(2):
+            session = self.database.start_quiz_session(
+                67890,
+                1001,
+                12345,
+                f"2026-10-24T19:0{index}:00+00:00",
+            )
+            self.database.record_quiz_leaderboard(
+                session.session_id,
+                5001,
+                f"final-{index}",
+                [("1", "Student Nickname", str(900 + index * 50))],
+                True,
+                "same-quiz-id",
+            )
+            sessions.append(session)
+
+        self.database.initialize()
+
+        summaries = self.database.get_quiz_session_summaries(67890)
+        self.assertEqual(len(summaries), 2)
+        self.assertEqual(
+            {summary.session.session_id for summary in summaries},
+            {session.session_id for session in sessions},
+        )
+        self.assertTrue(
+            all(summary.session.status == "completed" for summary in summaries)
+        )
+
+    def test_initialize_keeps_sessions_with_different_message_histories(
+        self,
+    ) -> None:
+        for index, message_ids in enumerate(((5001, 5002), (5001, 5003))):
+            session = self.database.start_quiz_session(
+                67890,
+                1001,
+                12345,
+                f"2026-10-24T19:0{index}:00+00:00",
+            )
+            for message_id in message_ids:
+                self.database.record_quiz_leaderboard(
+                    session.session_id,
+                    message_id,
+                    f"revision-{message_id}",
+                    [("1", "Student Nickname", str(message_id))],
+                    False,
+                    "same-quiz-id",
+                )
+            with self.database._connect() as connection:
+                connection.execute(
+                    "UPDATE quiz_sessions SET status = 'interrupted' "
+                    "WHERE session_id = ?",
+                    (session.session_id,),
+                )
+
+        self.database.initialize()
+
+        summaries = self.database.get_quiz_session_summaries(67890)
+        self.assertEqual(len(summaries), 2)
+        self.assertTrue(
+            all(summary.session.status == "interrupted" for summary in summaries)
+        )
+
+    def test_initialize_does_not_merge_sessions_with_conflicting_quiz_ids(
+        self,
+    ) -> None:
+        for index, quiz_id in enumerate(("quiz-one", "quiz-two")):
+            session = self.database.start_quiz_session(
+                67890,
+                1001,
+                12345,
+                f"2026-10-24T19:{index:02}:00+00:00",
+            )
+            self.database.record_quiz_leaderboard(
+                session.session_id,
+                5001 + index,
+                f"revision-{index}",
+                [("1", "Student Nickname", "900")],
+                True,
+                quiz_id,
+            )
+
+        with self.assertLogs("quizcord_analytics.database", level="WARNING"):
+            self.database.initialize()
+
+        self.assertEqual(len(self.database.get_quiz_session_summaries(67890)), 2)
 
     def test_student_history_collapses_legacy_duplicate_session_with_and_without_id(
         self,
@@ -494,6 +899,91 @@ class DatabaseTests(unittest.TestCase):
         self.assertIsNone(alternate_user.student_name)
         self.assertTrue(alternate_user.name_matches_usn_format)
 
+    def test_quiz_session_absentees_exclude_attending_members_and_bots(self) -> None:
+        guild = SimpleNamespace(id=67890)
+        attendee = SimpleNamespace(
+            id=12345,
+            name="attendee_account",
+            display_name="Attendee Nickname",
+            global_name="4GM22CS001",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(),
+        )
+        absent = SimpleNamespace(
+            id=54321,
+            name="absent_account",
+            display_name="Absent Nickname",
+            global_name="4GM22CS002",
+            status=SimpleNamespace(name="offline"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(),
+        )
+        bot = SimpleNamespace(
+            id=99999,
+            name="quizcord_bot",
+            display_name="Quizcord",
+            global_name="Quizcord Bot",
+            status=SimpleNamespace(name="online"),
+            bot=True,
+            guild=guild,
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.map_student(attendee, "4GM22CS001", "Attendee Student")
+        self.database.sync_members((attendee, absent, bot))
+        session = self.database.start_quiz_session(
+            guild.id, 1001, 12345, "2026-10-25T10:00:00+00:00"
+        )
+        self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "revision-1",
+            [("1", "Attendee Nickname", "900")],
+            False,
+        )
+
+        absentees = self.database.get_quiz_session_absentees(session.session_id)
+
+        self.assertEqual(len(absentees), 1)
+        self.assertEqual(absentees[0].display_name, "Absent Nickname")
+        self.assertEqual(absentees[0].usn, "4GM22CS002")
+
+    def test_quiz_session_absentees_sort_by_the_displayed_name(self) -> None:
+        guild = SimpleNamespace(id=67890)
+        first = SimpleNamespace(
+            id=54321,
+            name="first_account",
+            display_name="Zulu Nickname",
+            global_name="A Global Name",
+            status=SimpleNamespace(name="offline"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(),
+        )
+        second = SimpleNamespace(
+            id=54322,
+            name="second_account",
+            display_name="Alpha Nickname",
+            global_name="Z Global Name",
+            status=SimpleNamespace(name="offline"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.sync_members((first, second))
+        session = self.database.start_quiz_session(
+            guild.id, 1001, 12345, "2026-10-25T10:00:00+00:00"
+        )
+
+        absentees = self.database.get_quiz_session_absentees(session.session_id)
+
+        self.assertEqual(
+            [student.display_name for student in absentees],
+            ["Alpha Nickname", "Zulu Nickname"],
+        )
+
     def test_faculty_student_assignments_are_private_and_require_a_known_usn(
         self,
     ) -> None:
@@ -501,7 +991,7 @@ class DatabaseTests(unittest.TestCase):
         member = SimpleNamespace(
             id=54321,
             name="student_account",
-            display_name="Student Nickname",
+            display_name="Manual Student Nickname",
             global_name="4GM22CS001",
             status=SimpleNamespace(name="online"),
             bot=False,
@@ -699,6 +1189,9 @@ class DatabaseTests(unittest.TestCase):
     def test_usn_format_accepts_both_configured_patterns(self) -> None:
         self.assertTrue(matches_usn_format("4GM22CS001"))
         self.assertTrue(matches_usn_format("U22E22CS001"))
+        self.assertTrue(matches_usn_format("U26E\u200b01CS027"))
+        self.assertTrue(matches_usn_format("4GM23CS055\u200b"))
+        self.assertTrue(matches_usn_format("４ＧＭ２３ＣＳ０５５"))
         self.assertFalse(matches_usn_format("Student Nickname"))
         self.assertFalse(matches_usn_format("4GM22CS01"))
 
@@ -712,7 +1205,7 @@ class DatabaseTests(unittest.TestCase):
             manage_channels=False,
             manage_messages=False,
         )
-        self.member.global_name = "4GM22CS001"
+        self.member.global_name = "4GM22CS\u200b001"
         self.database.sync_member(self.member)
         session = self.database.start_quiz_session(
             guild.id, 1001, 12345, "2026-10-01T10:00:00+00:00"
@@ -729,6 +1222,56 @@ class DatabaseTests(unittest.TestCase):
         if summary is None:
             self.fail("Expected the final leaderboard summary.")
         self.assertTrue(summary.participants[0].name_matches_usn_format)
+
+    def test_valid_leaderboard_usn_is_not_warned_when_global_name_differs(self) -> None:
+        guild = SimpleNamespace(id=67890)
+        member = SimpleNamespace(
+            id=54321,
+            name="student_account",
+            display_name="Manual Student Nickname",
+            global_name="Student Name",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.map_student(member, "4GM22CS055", "Student")
+        self.database.sync_member(member)
+        session = self.database.start_quiz_session(
+            guild.id, 1001, 12345, "2026-10-01T10:00:00+00:00"
+        )
+
+        summary = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "revision-1",
+            [("1", "Student", "900")],
+            True,
+        )
+
+        if summary is None:
+            self.fail("Expected the final leaderboard summary.")
+        participant = summary.participants[0]
+        self.assertEqual(participant.usn, "4GM22CS055")
+        self.assertTrue(participant.name_matches_usn_format)
+        self.assertFalse(participant.global_name_matches_usn_format)
+
+    def test_faculty_assignment_accepts_unicode_formatted_usn(self) -> None:
+        member = SimpleNamespace(
+            id=54321,
+            name="student_account",
+            display_name="Student Nickname",
+            global_name="4GM22CS\u200b001",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=SimpleNamespace(id=67890),
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.sync_member(member)
+
+        self.assertTrue(
+            self.database.add_faculty_student(67890, 111, "4GM22CS001")
+        )
 
     def test_global_name_reminder_is_limited_to_once_per_registered_student_per_quiz(
         self,
@@ -747,6 +1290,76 @@ class DatabaseTests(unittest.TestCase):
         self.assertIsNone(
             self.database.claim_global_name_reminder(session.session_id, 54321)
         )
+
+    def test_global_name_reminder_can_use_quiz_usn_without_student_mapping(self) -> None:
+        session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-01T10:00:00+00:00"
+        )
+
+        self.assertEqual(
+            self.database.claim_global_name_reminder(
+                session.session_id, 54321, "4GM22CS055"
+            ),
+            "4GM22CS055",
+        )
+        self.assertIsNone(
+            self.database.claim_global_name_reminder(
+                session.session_id, 54321, "4GM22CS055"
+            )
+        )
+        self.database.release_global_name_reminder(
+            session.session_id, 54321
+        )
+        self.assertEqual(
+            self.database.claim_global_name_reminder(
+                session.session_id, 54321, "4GM22CS055"
+            ),
+            "4GM22CS055",
+        )
+
+    def test_reminder_dms_linked_member_without_student_mapping(self) -> None:
+        guild = SimpleNamespace(id=67890, name="Test server")
+        member = SimpleNamespace(
+            id=54321,
+            name="unmapped_account",
+            display_name="Unmapped Nickname",
+            global_name="Student Name",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(
+                administrator=False, manage_guild=False
+            ),
+            roles=[],
+            send=AsyncMock(),
+        )
+        self.database.sync_member(member)
+        session = self.database.start_quiz_session(
+            guild.id, 1001, 12345, "2026-10-01T10:00:00+00:00"
+        )
+        summary = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "revision-1",
+            [("1", "Unmapped Nickname", "900")],
+            True,
+        )
+        if summary is None:
+            self.fail("Expected the final leaderboard summary.")
+        guild.fetch_members = lambda limit=None: _iterate_members((member,))
+        cog = AnalyticsCog(
+            bot=SimpleNamespace(),
+            settings=SimpleNamespace(),
+            database=self.database,
+        )
+
+        result = asyncio.run(cog._notify_global_name_updates(guild, summary))
+
+        self.assertEqual(result.sent, 1)
+        self.assertEqual(result.unavailable, 0)
+        member.send.assert_awaited_once()
+        reminder = member.send.await_args.args[0]
+        self.assertIn("set your Discord global display name to your USN.", reminder)
 
     def test_final_quiz_sends_a_private_global_name_reminder_once(self) -> None:
         guild_record = SimpleNamespace(
@@ -776,8 +1389,22 @@ class DatabaseTests(unittest.TestCase):
         )
         if summary is None:
             self.fail("Expected the final leaderboard summary.")
-        discord_member = SimpleNamespace(id=12345, send=AsyncMock())
-        guild = SimpleNamespace(get_member=lambda member_id: discord_member)
+        discord_member = SimpleNamespace(
+            id=12345,
+            global_name="Student One",
+            send=AsyncMock(),
+            guild_permissions=SimpleNamespace(
+                administrator=False,
+                manage_guild=False,
+            ),
+            roles=[],
+        )
+        guild = SimpleNamespace(
+            id=67890,
+            name="Test server",
+            owner_id=99999,
+            fetch_members=lambda limit=None: _iterate_members((discord_member,)),
+        )
         cog = AnalyticsCog(
             bot=SimpleNamespace(),
             settings=SimpleNamespace(),
@@ -790,8 +1417,326 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(discord_member.send.await_count, 1)
         reminder = discord_member.send.await_args.args[0]
         self.assertIn("ABC123", reminder)
+        self.assertIn("MultiServer Bot", reminder)
+        self.assertIn("Test server", reminder)
         self.assertIn("global display name", reminder)
         self.assertIn("Do not change your unique Discord username", reminder)
+
+    def test_reminder_uses_current_global_name_instead_of_quiz_snapshot(self) -> None:
+        guild = SimpleNamespace(id=67890, name="Test server")
+        member = self.member
+        member.guild = guild
+        member.guild_permissions = SimpleNamespace(
+            administrator=False, manage_guild=False
+        )
+        member.global_name = "4GM22CS055"
+        member.roles = []
+        member.send = AsyncMock()
+        self.database.sync_member(member)
+        session = self.database.start_quiz_session(
+            guild.id, 1001, 12345, "2026-10-01T10:00:00+00:00"
+        )
+        summary = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "revision-1",
+            [("1", "Student Nickname", "900")],
+            True,
+        )
+        if summary is None:
+            self.fail("Expected the final leaderboard summary.")
+        self.assertTrue(summary.participants[0].global_name_matches_usn_format)
+        member.global_name = "Student One"
+        guild.fetch_members = lambda limit=None: _iterate_members((member,))
+        cog = AnalyticsCog(
+            bot=SimpleNamespace(),
+            settings=SimpleNamespace(),
+            database=self.database,
+        )
+
+        result = asyncio.run(cog._notify_global_name_updates(guild, summary))
+
+        self.assertEqual(result.sent, 1)
+        member.send.assert_awaited_once()
+        self.assertIn("ABC123", member.send.await_args.args[0])
+
+    def test_final_quiz_usn_reminders_exclude_faculty_and_administrators(self) -> None:
+        guild = SimpleNamespace(id=67890, name="Test server")
+        faculty_role_id = 33333
+        members = (
+            SimpleNamespace(
+                id=54321,
+                name="faculty_account",
+                display_name="Faculty Nickname",
+                global_name="Faculty Member",
+                status=SimpleNamespace(name="online"),
+                bot=False,
+                guild=guild,
+                guild_permissions=SimpleNamespace(
+                    administrator=False, manage_guild=False
+                ),
+                roles=[SimpleNamespace(id=faculty_role_id)],
+                send=AsyncMock(),
+            ),
+            SimpleNamespace(
+                id=54322,
+                name="admin_account",
+                display_name="Admin Nickname",
+                global_name="Administrator",
+                status=SimpleNamespace(name="online"),
+                bot=False,
+                guild=guild,
+                guild_permissions=SimpleNamespace(
+                    administrator=True, manage_guild=True
+                ),
+                roles=[],
+                send=AsyncMock(),
+            ),
+            SimpleNamespace(
+                id=54323,
+                name="student_account",
+                display_name="Learner Nickname",
+                global_name="Student Name",
+                status=SimpleNamespace(name="online"),
+                bot=False,
+                guild=guild,
+                guild_permissions=SimpleNamespace(
+                    administrator=False, manage_guild=False
+                ),
+                roles=[],
+                send=AsyncMock(),
+            ),
+        )
+        for member, usn, student_name in zip(
+            members,
+            ("4GM22CS001", "4GM22CS002", "4GM22CS003"),
+            ("Faculty", "Administrator", "Student"),
+        ):
+            self.database.map_student(member, usn, student_name)
+        self.database.sync_members(members)
+        self.database.set_faculty_role(guild.id, faculty_role_id)
+        session = self.database.start_quiz_session(
+            guild.id, 1001, 12345, "2026-10-01T10:00:00+00:00"
+        )
+        summary = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "revision-1",
+            [
+                ("1", "Faculty Nickname", "900"),
+                ("2", "Admin Nickname", "800"),
+                ("3", "Learner Nickname", "700"),
+            ],
+            True,
+        )
+        if summary is None:
+            self.fail("Expected the final leaderboard summary.")
+        self.assertEqual(
+            [
+                (
+                    participant.usn,
+                    participant.discord_id,
+                    participant.global_name_matches_usn_format,
+                )
+                for participant in summary.participants
+            ],
+            [
+                ("4GM22CS001", "54321", False),
+                ("4GM22CS002", "54322", False),
+                ("4GM22CS003", "54323", False),
+            ],
+        )
+        non_attendee = SimpleNamespace(
+            id=54324,
+            name="non_attendee_account",
+            display_name="Non Attendee Nickname",
+            global_name="Non Attendee",
+            status=SimpleNamespace(name="offline"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(
+                administrator=False,
+                manage_guild=False,
+                manage_roles=False,
+                manage_channels=False,
+                manage_messages=False,
+            ),
+            roles=[],
+            send=AsyncMock(),
+        )
+        maintainer = SimpleNamespace(
+            id=54325,
+            name="maintainer_account",
+            display_name="Maintainer Nickname",
+            global_name="Maintainer",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(
+                administrator=False,
+                manage_guild=False,
+                manage_roles=False,
+                manage_channels=False,
+                manage_messages=True,
+            ),
+            roles=[],
+            send=AsyncMock(),
+        )
+        guild.fetch_members = lambda limit=None: _iterate_members(
+            (*members, non_attendee, maintainer)
+        )
+        cog = AnalyticsCog(
+            bot=SimpleNamespace(),
+            settings=SimpleNamespace(),
+            database=self.database,
+        )
+
+        asyncio.run(cog._notify_global_name_updates(guild, summary))
+
+        self.assertEqual(members[0].send.await_count, 0)
+        self.assertEqual(members[1].send.await_count, 0)
+        self.assertEqual(members[2].send.await_count, 1)
+        self.assertEqual(non_attendee.send.await_count, 1)
+        self.assertEqual(maintainer.send.await_count, 0)
+
+    def test_faculty_can_manually_send_usn_reminders_once_for_latest_completed_quiz(
+        self,
+    ) -> None:
+        guild = SimpleNamespace(id=67890, name="Test server", owner_id=99999)
+        faculty_role_id = 33333
+        member = SimpleNamespace(
+            id=54321,
+            name="student_account",
+            display_name="Manual Student Nickname",
+            global_name="Student Name",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=guild,
+            guild_permissions=SimpleNamespace(
+                administrator=False, manage_guild=False
+            ),
+            roles=[],
+            send=AsyncMock(),
+        )
+        self.database.map_student(member, "4GM22CS001", "Student")
+        self.database.sync_member(member)
+        self.database.set_faculty_role(guild.id, faculty_role_id)
+        completed_session = self.database.start_quiz_session(
+            guild.id, 1001, 12345, "2026-10-01T10:00:00+00:00"
+        )
+        self.database.record_quiz_leaderboard(
+            completed_session.session_id,
+            5001,
+            "revision-1",
+            [("1", "Manual Student Nickname", "900")],
+            True,
+        )
+        self.database.start_quiz_session(
+            guild.id, 1001, 12345, "2026-10-02T10:00:00+00:00"
+        )
+        guild.fetch_members = lambda limit=None: _iterate_members((member,))
+        faculty = SimpleNamespace(
+            id=22222,
+            roles=[SimpleNamespace(id=faculty_role_id)],
+            guild_permissions=SimpleNamespace(
+                administrator=False, manage_guild=False
+            ),
+        )
+        interaction = SimpleNamespace(
+            guild_id=guild.id,
+            guild=guild,
+            channel_id=1001,
+            user=faculty,
+            response=SimpleNamespace(
+                send_message=AsyncMock(),
+                defer=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        cog = AnalyticsCog(
+            bot=SimpleNamespace(),
+            settings=SimpleNamespace(),
+            database=self.database,
+        )
+
+        asyncio.run(AnalyticsCog.remind_usn.callback(cog, interaction))
+        asyncio.run(AnalyticsCog.remind_usn.callback(cog, interaction))
+
+        self.assertEqual(interaction.response.defer.await_count, 2)
+        self.assertEqual(interaction.followup.send.await_count, 2)
+        self.assertEqual(member.send.await_count, 1)
+        self.assertIn("Sent: 1", interaction.followup.send.call_args_list[0].args[0])
+        self.assertIn("Sent: 0", interaction.followup.send.call_args_list[1].args[0])
+
+    def test_usn_reminder_command_rejects_non_faculty_non_admin(self) -> None:
+        guild = SimpleNamespace(id=67890, name="Test server", owner_id=99999)
+        self.database.set_faculty_role(guild.id, 33333)
+        interaction = SimpleNamespace(
+            guild_id=guild.id,
+            guild=guild,
+            channel_id=1001,
+            user=SimpleNamespace(
+                id=22222,
+                roles=[],
+                guild_permissions=SimpleNamespace(
+                    administrator=False, manage_guild=False
+                ),
+            ),
+            response=SimpleNamespace(
+                send_message=AsyncMock(),
+                defer=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        cog = AnalyticsCog(
+            bot=SimpleNamespace(),
+            settings=SimpleNamespace(),
+            database=self.database,
+        )
+
+        asyncio.run(AnalyticsCog.remind_usn.callback(cog, interaction))
+
+        interaction.response.send_message.assert_awaited_once()
+        self.assertTrue(
+            interaction.response.send_message.await_args.kwargs["ephemeral"]
+        )
+        interaction.response.defer.assert_not_awaited()
+
+    def test_usn_reminder_command_allows_server_maintainer(self) -> None:
+        guild = SimpleNamespace(id=67890, name="Test server", owner_id=99999)
+        interaction = SimpleNamespace(
+            guild_id=guild.id,
+            guild=guild,
+            channel_id=1001,
+            user=SimpleNamespace(
+                id=22222,
+                roles=[],
+                guild_permissions=SimpleNamespace(
+                    administrator=False,
+                    manage_guild=False,
+                    manage_messages=True,
+                ),
+            ),
+            response=SimpleNamespace(
+                send_message=AsyncMock(),
+                defer=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        cog = AnalyticsCog(
+            bot=SimpleNamespace(),
+            settings=SimpleNamespace(),
+            database=self.database,
+        )
+
+        asyncio.run(AnalyticsCog.remind_usn.callback(cog, interaction))
+
+        interaction.response.send_message.assert_awaited_once()
+        self.assertIn(
+            "no completed quiz",
+            interaction.response.send_message.await_args.args[0],
+        )
+        interaction.response.defer.assert_not_awaited()
 
     def test_analytics_report_aggregates_points_and_attendance(self) -> None:
         self.database.save_quiz_results(
@@ -898,6 +1843,74 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(summary.participants[0].usn, "ABC123")
         self.assertEqual(summary.participants[0].discord_id, "12345")
         self.assertEqual(summary.participants[0].points, 2702)
+
+    def test_grouped_leaderboard_members_are_independent_and_scores_update(self) -> None:
+        second_member = SimpleNamespace(
+            id=54321,
+            name="Student_Two",
+            display_name="Student Two",
+            global_name="4GM22CS002",
+            status=SimpleNamespace(name="online"),
+            bot=False,
+            guild=SimpleNamespace(id=67890),
+            guild_permissions=SimpleNamespace(),
+        )
+        self.database.map_student(second_member, "DEF456", "Student Two")
+        self.database.sync_member(second_member)
+        session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-01T10:00:00+00:00"
+        )
+
+        first = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "question-1",
+            parse_quiz_rows("#2. @Student Nickname, <@54321> 7"),
+            False,
+        )
+        updated = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5002,
+            "question-2",
+            parse_quiz_rows("#1. <@12345>, <@54321> — **9**"),
+            False,
+        )
+        final = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5003,
+            "final",
+            parse_quiz_rows("#1. <@12345>, <@54321> — **9**"),
+            True,
+            "quiz-grouped",
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(updated)
+        self.assertIsNotNone(final)
+        for summary in (first, updated, final):
+            participants_by_id = {
+                participant.discord_id: participant
+                for participant in summary.participants
+            }
+            self.assertEqual(set(participants_by_id), {"12345", "54321"})
+        self.assertEqual(
+            {
+                participant.usn: (participant.rank, participant.points)
+                for participant in updated.participants
+            },
+            {"ABC123": (1, 9), "DEF456": (1, 9)},
+        )
+        self.assertEqual(
+            {
+                participant.usn: participant.points
+                for participant in final.participants
+            },
+            {"ABC123": 9, "DEF456": 9},
+        )
+        self.assertEqual(
+            self.database.get_student_quiz_analytics(67890, "ABC123").total_points,
+            9,
+        )
 
     def test_startup_repairs_existing_composite_mention_participant(self) -> None:
         session = self.database.start_quiz_session(
@@ -1099,6 +2112,56 @@ class DatabaseTests(unittest.TestCase):
             ("950 Points", "1"),
         )
 
+    def test_quiz_id_followup_merges_existing_analytics_row(self) -> None:
+        session = self.database.start_quiz_session(
+            67890, 222, 333, "2026-10-17T15:00:00+00:00"
+        )
+        self.database.record_quiz_leaderboard(
+            session.session_id,
+            444,
+            "revision-1",
+            [("1", "Student Nickname", "950")],
+            True,
+        )
+        self.database.save_quiz_results(
+            "quiz-followup",
+            [("2", "Student Nickname", "700")],
+        )
+        with self.database._connect() as connection:
+            connection.execute(
+                """
+                UPDATE quiz_analytics SET quiz_date = ?
+                WHERE guild_id = ? AND usn = ? AND quiz_id = ?
+                """,
+                ("2026-10-17T15:02:00+00:00", "67890", "ABC123", "quiz-followup"),
+            )
+
+        self.database.attach_quizcord_id(session.session_id, "quiz-followup")
+
+        self.assertEqual(
+            self.database.get_quiz_result("ABC123", "quiz-followup"),
+            ("950 Points", "1"),
+        )
+        self.assertEqual(self.database.count_attended_quizzes("ABC123"), 1)
+        with self.database._connect() as connection:
+            self.assertIsNone(
+                connection.execute(
+                    """
+                    SELECT 1 FROM quiz_analytics
+                    WHERE guild_id = ? AND usn = ? AND quiz_id = ?
+                    """,
+                    ("67890", "ABC123", session.session_id),
+                ).fetchone()
+            )
+            quiz_date = connection.execute(
+                """
+                SELECT quiz_date FROM quiz_analytics
+                WHERE guild_id = ? AND usn = ? AND quiz_id = ?
+                """,
+                ("67890", "ABC123", "quiz-followup"),
+            ).fetchone()[0]
+        self.assertEqual(quiz_date, "2026-10-17T15:02:00+00:00")
+
     def test_scorecard_shows_quizcord_attendance(self) -> None:
         self.database.save_quiz_results(
             "quiz-1", [("1", "student_one", "950")]
@@ -1261,6 +2324,133 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("quizcord_username", registry_columns)
         self.assertEqual(registry, ("67890", "ABC123"))
         self.assertEqual(analytics, ("67890", "ABC123", "legacy-quiz"))
+
+
+class USNReminderCooldownTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cooldown_is_shared_by_guild_and_expires(self) -> None:
+        interaction = SimpleNamespace(
+            guild_id=67890,
+            channel_id=1001,
+            user=SimpleNamespace(id=22222),
+            created_at=datetime.fromisoformat("2026-10-01T10:00:00+00:00"),
+        )
+
+        async def run_checks() -> None:
+            for check in AnalyticsCog.remind_usn.checks:
+                self.assertTrue(await check(interaction))
+
+        await run_checks()
+        interaction.user = SimpleNamespace(id=33333)
+        interaction.channel_id = 1002
+        with self.assertRaises(app_commands.CommandOnCooldown):
+            await run_checks()
+
+        interaction.guild_id = 98765
+        await run_checks()
+
+        interaction.guild_id = 67890
+        interaction.created_at += timedelta(seconds=61)
+        await run_checks()
+
+
+class ClearQuizHistoryCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_requires_typed_confirmation_before_deleting(self) -> None:
+        database = SimpleNamespace(clear_guild_quiz_history=Mock())
+        cog = AnalyticsCog(SimpleNamespace(), SimpleNamespace(), database)
+        interaction = SimpleNamespace(
+            guild_id=67890,
+            response=SimpleNamespace(send_message=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await cog.clear_quiz_history.callback(cog, interaction, "delete")
+
+        database.clear_guild_quiz_history.assert_not_called()
+        interaction.response.send_message.assert_awaited_once()
+        self.assertIn(
+            "No data was deleted",
+            interaction.response.send_message.await_args.args[0],
+        )
+
+    async def test_clears_only_current_server_after_confirmation(self) -> None:
+        database = SimpleNamespace(
+            clear_guild_quiz_history=Mock(return_value=(12, 4))
+        )
+        cog = AnalyticsCog(SimpleNamespace(), SimpleNamespace(), database)
+        events = []
+
+        async def defer(**kwargs):
+            events.append(("defer", kwargs))
+
+        def clear_history(guild_id):
+            events.append(("clear", guild_id))
+            return 12, 4
+
+        database.clear_guild_quiz_history.side_effect = clear_history
+        interaction = SimpleNamespace(
+            guild_id=67890,
+            response=SimpleNamespace(
+                defer=AsyncMock(side_effect=defer),
+                send_message=AsyncMock(),
+            ),
+            followup=SimpleNamespace(
+                send=AsyncMock(
+                    side_effect=lambda *args, **kwargs: events.append(
+                        ("followup", args, kwargs)
+                    )
+                )
+            ),
+        )
+
+        await cog.clear_quiz_history.callback(cog, interaction, "DELETE")
+
+        database.clear_guild_quiz_history.assert_called_once_with(67890)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        interaction.response.send_message.assert_not_awaited()
+        interaction.followup.send.assert_awaited_once()
+        self.assertEqual(
+            [event[0] for event in events], ["defer", "clear", "followup"]
+        )
+        self.assertIn(
+            "4 sessions and 12 saved student results",
+            interaction.followup.send.await_args.args[0],
+        )
+        self.assertTrue(
+            interaction.followup.send.await_args.kwargs["ephemeral"]
+        )
+
+    async def test_reports_history_clear_failure_after_deferring(self) -> None:
+        database = SimpleNamespace(
+            clear_guild_quiz_history=Mock(
+                side_effect=sqlite3.OperationalError("database is locked")
+            )
+        )
+        cog = AnalyticsCog(SimpleNamespace(), SimpleNamespace(), database)
+        interaction = SimpleNamespace(
+            guild_id=67890,
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        with self.assertLogs(
+            "quizcord_analytics", level="ERROR"
+        ) as captured:
+            await cog.clear_quiz_history.callback(cog, interaction, "DELETE")
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        interaction.followup.send.assert_awaited_once()
+        self.assertIn(
+            "Could not clear this server’s quiz history",
+            interaction.followup.send.await_args.args[0],
+        )
+        self.assertNotIn(
+            "Cleared this server’s quiz history",
+            interaction.followup.send.await_args.args[0],
+        )
+        self.assertTrue(
+            interaction.followup.send.await_args.kwargs["ephemeral"]
+        )
+        self.assertIn("database is locked", captured.output[0])
 
 
 if __name__ == "__main__":

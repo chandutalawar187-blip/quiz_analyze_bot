@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    try {
+      const savedTheme = localStorage.getItem("quizcord-dashboard-theme");
+      if (savedTheme === "dark" || savedTheme === "light") {
+        document.documentElement.dataset.theme = savedTheme;
+      }
+    } catch (error) {
+      console.warn("Could not restore the dashboard theme preference.", error);
+    }
+  </script>
+  <title>Student analytics · Quizcord Faculty</title>
+  <link rel="stylesheet" href="/static/admin-dashboard.css">
+  <link rel="stylesheet" href="/static/dashboard-theme.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">Quizcord <span>Faculty</span></div>
+    <div class="account">
+      <a href="/faculty">Back to students</a>
+      <span id="account-name"></span>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false">
+        <span class="icon icon-moon theme-toggle-icon" aria-hidden="true"></span>
+        <span class="theme-toggle-label">Dark mode</span>
+      </button>
+      <a href="/auth/logout">Sign out</a>
+    </div>
+  </header>
+  <main>
+    <div class="eyebrow">Student analytics</div>
+    <h1 id="student-name">Loading student…</h1>
+    <p class="panel-sub" id="student-usn"></p>
+    <div id="student-content"><div class="empty">Loading quiz analytics…</div></div>
+  </main>
+  <script src="/static/dashboard-theme.js" defer></script>
+  <script src="/static/faculty-student.js" defer></script>
+</body>
+</html>

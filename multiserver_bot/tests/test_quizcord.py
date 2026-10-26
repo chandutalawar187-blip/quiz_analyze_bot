@@ -10,7 +10,7 @@ from quizcord_bot.quizcord import (
     extract_leaderboard,
     extract_quizcord_id,
     is_final_leaderboard,
-    is_first_question_message,
+    is_quiz_start_message,
     is_quizcord_author,
     parse_quiz_rows,
 )
@@ -125,7 +125,7 @@ class QuizcordParserTests(unittest.TestCase):
         message.content = ""
         message.embeds = [embed]
 
-        self.assertTrue(is_first_question_message(message))
+        self.assertTrue(is_quiz_start_message(message))
 
     def test_extracts_leaderboard_rows_from_message_content(self) -> None:
         message = Mock()
@@ -184,6 +184,41 @@ class QuizcordParserTests(unittest.TestCase):
                 ("2", "<@!12345>", "650"),
             ],
         )
+
+    def test_splits_grouped_names_and_mentions_for_each_rank(self) -> None:
+        self.assertEqual(
+            parse_quiz_rows(
+                "1. Final leaderboard\n"
+                "#1. @Nandeesh.R — **9**\n"
+                "#2. <@1552201816094015530>, <@!1443969026320764928> — **7**\n"
+                "#3. @Jagadeesh b, @4GM25CS045 — **5** "
+                "![:Gain:](https://cdn.discordapp.com/emojis/example.webp)\n"
+                "Total players\n126"
+            ),
+            [
+                ("1", "@Nandeesh.R", "9"),
+                ("2", "<@1552201816094015530>", "7"),
+                ("2", "<@!1443969026320764928>", "7"),
+                ("3", "@Jagadeesh b", "5"),
+                ("3", "@4GM25CS045", "5"),
+            ],
+        )
+
+    def test_splits_grouped_mentions_before_a_bare_trailing_score(self) -> None:
+        self.assertEqual(
+            parse_quiz_rows(
+                "#1. <@1278920873730113539>, @U26E01CS092, "
+                "@4GM25CS008 15"
+            ),
+            [
+                ("1", "<@1278920873730113539>", "15"),
+                ("1", "@U26E01CS092", "15"),
+                ("1", "@4GM25CS008", "15"),
+            ],
+        )
+
+    def test_does_not_treat_a_mention_id_as_a_bare_score(self) -> None:
+        self.assertEqual(parse_quiz_rows("#1. <@1278920873730113539>"), [])
 
 
 class SimpleField:

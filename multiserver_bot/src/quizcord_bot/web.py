@@ -7,12 +7,15 @@ import secrets
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 import httpx
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from pydantic import BaseModel
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -20,12 +23,14 @@ from quizcord_bot.config import Settings
 from quizcord_bot.database import (
     Database,
     DashboardUser,
+    QuizSessionAbsentStudent,
     QuizSessionSummary,
     StudentQuizAnalytics,
     matches_usn_format,
+    normalize_usn,
 )
 from quizcord_bot.exports import quiz_session_workbook, student_analytics_workbook
-from quizcord_bot.telemetry import record_http_request
+from quizcord_bot.telemetry import record_http_request, trace_external_request
 
 
 LOGGER = logging.getLogger("quizcord_analytics.dashboard")
@@ -45,6 +50,12 @@ RATE_LIMIT_RULES = {
 }
 DEFAULT_REQUEST_RATE_LIMIT = (300, 60)
 DEFAULT_API_RATE_LIMIT = (120, 60)
+WEB_TEMPLATE_DIR = Path(__file__).with_name("templates")
+WEB_STATIC_DIR = Path(__file__).with_name("static")
+
+
+def _read_web_template(name: str) -> str:
+    return (WEB_TEMPLATE_DIR / name).read_text(encoding="utf-8")
 
 
 def _error_page(status_code: int, detail: Any) -> str:
@@ -102,6 +113,13 @@ def _wants_json_error(request: Request) -> bool:
     return "application/json" in accept and "text/html" not in accept
 
 
+class GuildResponse(BaseModel):
+    id: str
+    name: str
+    role: str
+    is_faculty: bool
+
+
 @dataclass
 class _OAuthSession:
     user_id: int
@@ -118,1197 +136,30 @@ class _OAuthSession:
     permission_check_lock: asyncio.Lock
 
 
-HTML_PAGE = r"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <title>Quizcord Analytics</title>
-  <style>
-    :root {
-      --bg: #f3f1ee;
-      --bg-elevated: #f8f6f3;
-      --panel: #ffffff;
-      --panel-strong: #f1f4f7;
-      --line: #e0d9d2;
-      --line-strong: #cfc7bf;
-      --text: #171c2a;
-      --text-soft: #5d6678;
-      --text-muted: #7d8797;
-      --accent: #1f2d3d;
-      --accent-soft: #edf3fb;
-      --accent-strong: #314e76;
-      --success: #3a5c49;
-      --warning: #7f5c2c;
-      --danger: #8a3b3b;
-      --shadow: 0 14px 36px rgba(20, 27, 38, 0.08);
-      --radius-lg: 18px;
-      --radius-md: 12px;
-      --radius-sm: 10px;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-      color: var(--text);
-      background: var(--bg);
-      font-synthesis: none;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background: var(--bg);
-      color: var(--text);
-      font-size: 14px;
-      line-height: 1.5;
-    }
-    button, a, input, select { font: inherit; }
-    .top {
-      height: 72px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 max(24px, calc((100vw - 1280px) / 2));
-      border-bottom: 1px solid var(--line);
-      background: rgba(255,255,255,0.92);
-      position: sticky;
-      top: 0;
-      z-index: 2;
-      backdrop-filter: blur(8px);
-    }
-    .brand {
-      font-weight: 800;
-      letter-spacing: -0.02em;
-      font-size: 15px;
-      color: var(--accent);
-    }
-    .brand span { color: var(--accent-strong); }
-    .account {
-      display: flex;
-      align-items: center;
-      gap: 16px;
-      color: var(--text-soft);
-      font-size: 13px;
-    }
-    .account a {
-      color: var(--text-soft);
-      text-decoration: none;
-    }
-    .account a:hover { color: var(--text); }
-    main {
-      max-width: 1280px;
-      margin: 38px auto;
-      padding: 0 24px;
-    }
-    .heading {
-      display: flex;
-      justify-content: space-between;
-      align-items: end;
-      gap: 20px;
-      margin-bottom: 24px;
-      padding-bottom: 10px;
-      border-bottom: 1px solid var(--line);
-    }
-    .eyebrow {
-      color: var(--accent-strong);
-      font-size: 11px;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      font-weight: 700;
-    }
-    .dashboard-tabs {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 22px;
-      border-bottom: 1px solid var(--line);
-      padding: 0;
-    }
-    .dashboard-tabs button {
-      padding: 11px 14px;
-      border: 0;
-      border-bottom: 2px solid transparent;
-      background: transparent;
-      color: var(--text-soft);
-      font-weight: 700;
-      cursor: pointer;
-      border-radius: 0;
-    }
-    .dashboard-tabs button[aria-selected="true"] {
-      color: var(--text);
-      border-bottom-color: var(--accent);
-      background: transparent;
-    }
-    .directory-tools {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 16px;
-      padding: 16px 20px;
-      color: var(--text-soft);
-      font-size: 13px;
-      border-bottom: 1px solid var(--line);
-      background: var(--bg-elevated);
-    }
-    .directory-search {
-      max-width: 360px;
-      width: 100%;
-      padding: 10px 12px;
-      background: var(--panel);
-      color: var(--text);
-      border: 1px solid var(--line-strong);
-      border-radius: var(--radius-sm);
-    }
-    .directory-table { width: 100%; min-width: 720px; }
-    .directory-warning {
-      color: var(--warning);
-      font-size: 11px;
-      font-weight: 700;
-    }
-    h1 {
-      font-size: 30px;
-      margin: 8px 0 0;
-      letter-spacing: -0.04em;
-      color: var(--text);
-    }
-    select {
-      color: var(--text);
-      background: var(--panel);
-      border: 1px solid var(--line-strong);
-      padding: 10px 38px 10px 12px;
-      border-radius: var(--radius-sm);
-      min-width: 240px;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 16px;
-    }
-    .card {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: var(--radius-lg);
-      padding: 20px;
-      box-shadow: var(--shadow);
-    }
-    .metric-label { font-size: 12px; color: var(--text-soft); }
-    .metric {
-      font-size: 28px;
-      font-weight: 800;
-      margin-top: 12px;
-      letter-spacing: -0.04em;
-    }
-    .status {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      color: var(--text-soft);
-      font-size: 12px;
-      font-weight: 600;
-    }
-    .dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--success);
-      box-shadow: none;
-    }
-    .dot.complete { background: var(--accent-strong); }
-    .dot.interrupted { background: var(--warning); }
-    .main-grid {
-      display: grid;
-      grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr);
-      gap: 16px;
-      margin-top: 16px;
-    }
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: var(--radius-lg);
-      overflow: hidden;
-      box-shadow: var(--shadow);
-    }
-    .panel-head {
-      padding: 19px 21px;
-      border-bottom: 1px solid var(--line);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      background: rgba(250, 249, 247, 0.6);
-    }
-    .panel h2 { font-size: 16px; margin: 0; }
-    .panel-sub {
-      font-size: 12px;
-      color: var(--text-muted);
-      margin-top: 4px;
-    }
-    .table-wrap { overflow: auto; max-height: 520px; }
-    table {
-      border-collapse: collapse;
-      width: 100%;
-      text-align: left;
-    }
-    th, td {
-      padding: 13px 20px;
-      border-bottom: 1px solid var(--line);
-      font-size: 13px;
-      vertical-align: middle;
-    }
-    th {
-      color: var(--text-muted);
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      position: sticky;
-      top: 0;
-      background: var(--panel-strong);
-    }
-    td.points {
-      text-align: right;
-      font-variant-numeric: tabular-nums;
-      color: var(--text);
-      font-weight: 700;
-    }
-    .rank { color: var(--accent-strong); font-weight: 800; }
-    .usn { font-weight: 700; letter-spacing: 0.02em; }
-    .student-link { color: var(--text); text-decoration: none; }
-    .student-link:hover { color: var(--accent-strong); text-decoration: underline; }
-    .name-warning {
-      color: var(--warning);
-      font-size: 11px;
-      line-height: 1.3;
-      margin-top: 4px;
-    }
-    .ring-wrap { display: grid; place-items: center; padding: 26px; }
-    .ring {
-      width: 156px;
-      height: 156px;
-      position: relative;
-      display: grid;
-      place-items: center;
-    }
-    .ring svg { position: absolute; inset: 0; transform: rotate(-90deg); }
-    .ring circle { fill: none; stroke-width: 9; }
-    .ring .track { stroke: var(--line-strong); }
-    .ring .value {
-      stroke: var(--accent-strong);
-      stroke-linecap: round;
-      stroke-dasharray: 326.7;
-      stroke-dashoffset: 326.7;
-      transition: stroke-dashoffset .4s ease;
-    }
-    .ring.complete .value { stroke-dashoffset: 0; }
-    .ring-center {
-      text-align: center;
-      position: relative;
-      z-index: 1;
-      max-width: 100%;
-      padding: 0 12px;
-    }
-    .ring-number { font-size: 32px; font-weight: 800; }
-    .ring-caption {
-      font-size: 11px;
-      color: var(--text-muted);
-      margin-top: 3px;
-      white-space: nowrap;
-    }
-    .summary-list { padding: 0 20px 18px; }
-    .summary-row {
-      padding: 12px 0;
-      border-bottom: 1px solid var(--line);
-      display: flex;
-      justify-content: space-between;
-      gap: 16px;
-      font-size: 13px;
-    }
-    .summary-row:last-child { border: 0; }
-    .summary-row span:first-child { color: var(--text-soft); }
-    .summary-row strong { text-align: right; font-variant-numeric: tabular-nums; }
-    .note {
-      color: var(--text-soft);
-      font-size: 12px;
-      line-height: 1.6;
-      padding: 0 20px 20px;
-    }
-    .empty {
-      color: var(--text-muted);
-      text-align: center;
-      padding: 46px 20px;
-      font-size: 14px;
-    }
-    .error { color: var(--danger); }
-    .refresh { color: var(--text-muted); font-size: 12px; }
-    .profile-heading {
-      margin-bottom: 24px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 18px;
-    }
-    .export-link {
-      display: inline-block;
-      background: var(--accent);
-      color: #fff;
-      text-decoration: none;
-      padding: 11px 16px;
-      border: 1px solid var(--accent);
-      border-radius: var(--radius-sm);
-      font-size: 13px;
-      font-weight: 700;
-      white-space: nowrap;
-    }
-    .export-link:hover { background: var(--accent-strong); }
-    .profile-grid {
-      display: grid;
-      grid-template-columns: minmax(240px, .7fr) minmax(0, 1.8fr);
-      gap: 16px;
-      margin-top: 16px;
-    }
-    .profile-ring { display: grid; place-items: center; padding: 20px; }
-    .profile-ring .ring { width: 190px; height: 190px; }
-    .profile-ring .ring-number { font-size: 36px; }
-    .profile-bars { padding: 4px 20px 18px; }
-    .bar-row {
-      display: grid;
-      grid-template-columns: 100px 1fr 64px;
-      align-items: center;
-      gap: 12px;
-      margin: 13px 0;
-      font-size: 12px;
-      color: var(--text-soft);
-    }
-    .bar-track {
-      height: 9px;
-      border-radius: 999px;
-      background: var(--panel-strong);
-      overflow: hidden;
-      border: 1px solid var(--line);
-    }
-    .bar-track span {
-      display: block;
-      height: 100%;
-      border-radius: inherit;
-      background: linear-gradient(90deg, var(--accent), var(--accent-strong));
-    }
-    .back-link {
-      color: var(--accent-strong);
-      text-decoration: none;
-      font-size: 13px;
-      font-weight: 700;
-    }
-    .back-link:hover { text-decoration: underline; }
-    .login { max-width: 500px; margin: 12vh auto; padding: 20px; }
-    .login .card { padding: 34px; }
-    .login a.button {
-      display: inline-block;
-      background: var(--accent);
-      color: white;
-      text-decoration: none;
-      padding: 12px 18px;
-      border-radius: var(--radius-sm);
-      font-weight: 700;
-      margin-top: 18px;
-    }
-    @media(max-width:860px){ .grid{grid-template-columns:repeat(2,1fr)} .main-grid{grid-template-columns:1fr} }
-    @media(max-width:520px){
-      .top{ padding:0 16px; }
-      .account{ gap:8px; font-size:12px; }
-      main{ margin:24px auto; padding:0 16px; }
-      .heading{ align-items:start; flex-direction:column; }
-      select{ width:100%; }
-      .grid{ gap:10px; }
-      .card{ padding:16px; }
-      .metric{ font-size:24px; }
-      th, td{ padding:12px 14px; }
-    }
-  </style>
-</head>
-<body>
-  <header class="top"><div class="brand">Quizcord <span>Analytics</span></div><div class="account"><a id="back-link" href="/" hidden>← Dashboard</a><a id="faculty-password-link" href="/admin/faculty-passwords" hidden>Faculty passwords</a><select id="guild-select" aria-label="Select server" hidden></select><span id="account-name"></span><a href="/auth/logout">Sign out</a></div></header>
-  <main>
-    <nav class="dashboard-tabs" id="dashboard-tabs" aria-label="Dashboard sections">
-      <button type="button" data-view="sessions" aria-selected="true">Quiz sessions</button>
-      <button type="button" data-view="users" aria-selected="false">All users</button>
-    </nav>
-    <section class="heading" id="session-heading"><div><div class="eyebrow">Live monitoring</div><h1>Quiz dashboard</h1></div><select id="session-select" aria-label="Select quiz session"></select></section>
-    <div id="content"><div class="empty">Loading quiz sessions…</div></div>
-  </main>
-  <script>
-    const select = document.getElementById("session-select");
-    const content = document.getElementById("content");
-    const dashboardTabs = document.getElementById("dashboard-tabs");
-    const sessionHeading = document.getElementById("session-heading");
-    const initialSession = new URLSearchParams(location.search).get("session");
-    const facultyStudentPath = location.pathname.startsWith("/faculty/students/");
-    const studentPath = facultyStudentPath ? location.pathname.slice("/faculty/students/".length) : location.pathname.startsWith("/students/") ? location.pathname.slice("/students/".length) : null;
-    const studentUSN = studentPath ? decodeURIComponent(studentPath) : null;
-    const guildSelect = document.getElementById("guild-select");
-    const safe = value => String(value ?? "");
-    const el = (tag, className, text) => { const node=document.createElement(tag); if(className)node.className=className; if(text!==undefined)node.textContent=text; return node; };
-    async function initializeGuildSelector(){
-      const response=await fetch("/api/guilds",{cache:"no-store"});
-      if(!response.ok)throw new Error("Could not load your Discord servers.");
-      const guilds=await response.json();
-      if(!guilds.length)throw new Error("The bot is not installed in a server you can manage.");
-      guildSelect.replaceChildren();
-      guilds.forEach(guild=>{const option=document.createElement("option");option.value=guild.id;option.textContent=guild.name;guildSelect.append(option);});
-      const saved=localStorage.getItem("quizcord-selected-guild");
-      const requested=new URLSearchParams(location.search).get("guild_id");
-      guildSelect.value=guilds.some(guild=>guild.id===requested)?requested:guilds.some(guild=>guild.id===saved)?saved:guilds[0].id;
-      guildSelect.hidden=guilds.length<2;
-      const selected=await fetch("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:guildSelect.value}),cache:"no-store"});
-      if(!selected.ok)throw new Error("Could not select the Discord server.");
-      localStorage.setItem("quizcord-selected-guild",guildSelect.value);
-      guildSelect.addEventListener("change",async()=>{guildSelect.disabled=true;try{const changed=await fetch("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:guildSelect.value}),cache:"no-store"});if(!changed.ok)throw new Error("Could not select the Discord server.");localStorage.setItem("quizcord-selected-guild",guildSelect.value);location.reload();}catch(error){content.replaceChildren(el("div","empty error",error.message));guildSelect.disabled=false;}});
-    }
-    let activeSession = initialSession;
-    let activeView = "sessions";
-    let pollBusy = false;
-    let userSearchQuery = "";
-    let pendingDirectoryUsers = null;
-    function metric(label,value){const card=el("div","card");card.append(el("div","metric-label",label),el("div","metric",value));return card;}
-    function statusLabel(status){return status==="completed"?"Complete":status==="interrupted"?"Interrupted":"Live";}
-    function dateLabel(value,withTime=false){if(!value)return"Date unavailable";if(/^\d{4}-\d{2}-\d{2}$/.test(value)){const [year,month,day]=value.split("-").map(Number);return new Date(year,month-1,day).toLocaleDateString();}return new Date(value).toLocaleString(undefined,withTime?{}:{dateStyle:"short"});}
-    function render(summary){
-      const session=summary.session;
-      const complete=session.status==="completed";
-      const participants=summary.participants||[];
-      const grid=el("section","grid");
-      const statusCard=el("div","card");
-      statusCard.append(el("div","metric-label","Session status"));
-      const state=el("div","metric status");
-      const dot=el("span","dot"+(complete?" complete":session.status==="interrupted"?" interrupted":""));
-      state.append(dot,document.createTextNode(statusLabel(session.status)));
-      statusCard.append(state);grid.append(statusCard);
-      const attendanceCount=summary.attendance_count||0;
-      const eligibleCount=summary.eligible_student_count;
-      const attendanceRate=summary.attendance_percentage;
-      grid.append(metric(complete?"Students attended":"Students attending",attendanceCount+" / "+(eligibleCount??"—")),metric("Attendance rate",attendanceRate===null?"—":Number(attendanceRate).toFixed(1)+"%"),metric("Leaderboard updates",summary.question_count),metric("Quiz ID",session.quizcord_quiz_id||"Pending"));
-      const layout=el("section","main-grid");
-      const roster=el("article","panel");
-      const header=el("div","panel-head");
-      const title=el("div");title.append(el("h2","", "Participant leaderboard"),el("div","panel-sub",complete?"Final leaderboard snapshot":"Latest leaderboard snapshot"));
-      header.append(title,el("span","refresh","Updates automatically"));roster.append(header);
-      if(!participants.length){roster.append(el("div","empty","No participant rows have arrived yet."));}
-      else{
-        const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),tr=el("tr");
-        ["Rank","Student USN","Quizcord points"].forEach(label=>tr.append(el("th","",label)));
-        thead.append(tr);table.append(thead);const tbody=el("tbody");
-        participants.forEach(person=>{const row=el("tr"),link=document.createElement("a");link.className="student-link";link.href="/students/"+encodeURIComponent(person.usn);link.textContent=person.usn;row.append(el("td","rank","#"+safe(person.rank)));const studentCell=el("td","usn");studentCell.append(link);if(person.name_matches_usn_format===false)studentCell.append(el("div","name-warning","Name not updated to USN"));row.append(studentCell,el("td","points",safe(person.points)));tbody.append(row);});
-        table.append(tbody);wrap.append(table);roster.append(wrap);
-      }
-      const side=el("article","panel");const sideHead=el("div","panel-head");sideHead.append(el("h2","","Student attendance"));side.append(sideHead);
-      const ringWrap=el("div","ring-wrap"),ring=el("div","ring"+(complete?" complete":""));
-      ring.innerHTML='<svg viewBox="0 0 120 120" aria-hidden="true"><circle class="track" cx="60" cy="60" r="52"></circle><circle class="value" cx="60" cy="60" r="52"></circle></svg>';
-      const ringValue=ring.querySelector(".value");
-      if(ringValue&&attendanceRate!==null)ringValue.style.strokeDashoffset=String(326.7*(1-Math.min(100,attendanceRate)/100));
-      const center=el("div","ring-center");center.append(el("div","ring-number",attendanceRate===null?"—":Number(attendanceRate).toFixed(1)+"%"),el("div","ring-caption",eligibleCount===null?"Member count unavailable":attendanceCount+" / "+eligibleCount+" attended"));ring.append(center);ringWrap.append(ring);side.append(ringWrap);
-      const rows=el("div","summary-list");
-      [["Human server members",eligibleCount??"Unavailable"],["Started",new Date(session.started_at).toLocaleString()]].forEach(([label,value])=>{const row=el("div","summary-row");row.append(el("span","",label),el("strong","",safe(value)));rows.append(row);});
-      side.append(rows,el("div","note","Attendance includes human members regardless of server permissions. Bot accounts are excluded."));
-      if(complete){const link=document.createElement("a");link.href="/api/sessions/"+encodeURIComponent(session.session_id)+"/export.xlsx";link.textContent="Download Excel";link.style.cssText="display:block;margin:0 20px 20px;text-align:center;padding:11px;border-radius:9px;background:#26365b;color:#dce5ff;text-decoration:none;font-size:13px;font-weight:650";side.append(link);}
-      layout.append(roster,side);content.replaceChildren(grid,layout);
-    }
-    function renderUsers(users){
-      const heading=el("section","heading"),title=el("div","");
-      title.append(el("div","eyebrow","Server directory"),el("h1","","All users"));
-      heading.append(title,el("div","panel-sub",users.length+" human members"));
-      const panel=el("article","panel"),tools=el("div","directory-tools");
-      const search=document.createElement("input");search.className="directory-search";search.type="search";search.placeholder="Search names or USN";search.setAttribute("aria-label","Search users");
-      search.value=userSearchQuery;
-      tools.append(el("span","","Names marked below need a USN-format global display name."),search);panel.append(tools);
-      const wrap=el("div","table-wrap"),table=el("table","directory-table"),thead=el("thead"),headRow=el("tr");
-      ["Global display name","Account username","Server nickname","USN"].forEach(label=>headRow.append(el("th","",label)));
-      thead.append(headRow);table.append(thead);const body=el("tbody");
-      const rows=[];
-      users.forEach(user=>{const row=el("tr"),globalCell=el("td","");
-        globalCell.append(el("span","",user.global_name||"Not set"));
-        if(!user.name_matches_usn_format)globalCell.append(el("div","directory-warning","Name not updated to USN"));
-        row.append(globalCell,el("td","",user.account_name),el("td","",user.server_nickname||"—"),el("td","usn",user.usn||"—"));
-        row.dataset.search=[user.global_name,user.account_name,user.server_nickname,user.student_name,user.usn].filter(Boolean).join(" ").toLocaleLowerCase();
-        rows.push(row);body.append(row);
-      });
-      table.append(body);wrap.append(table);panel.append(wrap);
-      if(!users.length)panel.append(el("div","empty","No synchronized human members found."));
-      const filterRows=()=>{const query=search.value.trim().toLocaleLowerCase();rows.forEach(row=>{row.hidden=!row.dataset.search.includes(query);});};
-      search.addEventListener("input",()=>{userSearchQuery=search.value;filterRows();});
-      search.addEventListener("blur",()=>{if(pendingDirectoryUsers!==null&&activeView==="users"){const updatedUsers=pendingDirectoryUsers;pendingDirectoryUsers=null;renderUsers(updatedUsers);}});
-      filterRows();
-      content.replaceChildren(heading,panel);
-    }
-    function renderStudent(student){
-      document.getElementById("back-link").hidden=false;
-      document.getElementById("back-link").href=facultyStudentPath?"/faculty":"/";
-      select.hidden=true;
-      document.querySelector(".eyebrow").textContent="Student analytics";
-      document.querySelector("h1").textContent=student.student_name;
-      const heading=el("div","profile-heading");
-      const headingDetails=el("div","");
-      headingDetails.append(el("div","eyebrow",student.usn),el("div","panel-sub","Quiz attendance and performance across completed quizzes tracked by this bot."));
-      const exportLink=document.createElement("a");exportLink.className="export-link";exportLink.href="/api/students/"+encodeURIComponent(student.usn)+"/export.xlsx";exportLink.textContent="Download Excel";heading.append(headingDetails,exportLink);
-      const grid=el("section","grid");
-      grid.append(metric("Quizzes attended",student.quizzes_attended),metric("Completed quizzes tracked",student.completed_quizzes),metric("Attendance",student.attendance_percentage.toFixed(1)+"%"),metric("Total Quizcord points",student.total_points),metric("Average points per attended quiz",student.average_points===null?"—":Number(student.average_points).toFixed(1)));
-      const profile=el("section","profile-grid");
-      const attendance=el("article","panel");
-      const attendanceHead=el("div","panel-head");attendanceHead.append(el("h2","","Attendance rate"));attendance.append(attendanceHead);
-      const ringWrap=el("div","profile-ring"),ring=el("div","ring"),svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
-      svg.setAttribute("viewBox","0 0 120 120");svg.setAttribute("aria-hidden","true");
-      for(const className of ["track","value"]){const circle=document.createElementNS("http://www.w3.org/2000/svg","circle");circle.setAttribute("class",className);circle.setAttribute("cx","60");circle.setAttribute("cy","60");circle.setAttribute("r","52");svg.append(circle);if(className==="value")circle.style.strokeDashoffset=String(326.7*(1-Math.min(100,student.attendance_percentage)/100));}
-      const center=el("div","ring-center");center.append(el("div","ring-number",student.attendance_percentage.toFixed(1)+"%"),el("div","ring-caption",student.quizzes_attended+" of "+student.completed_quizzes+" quizzes"));ring.append(svg,center);ringWrap.append(ring);attendance.append(ringWrap,el("div","note","Attendance percentage includes tracked quiz sessions and manual imports. Imports without a saved date remain marked Date unavailable."));
-      const performance=el("article","panel"),performanceHead=el("div","panel-head");performanceHead.append(el("h2","","Points by quiz"));performance.append(performanceHead);
-      const completedHistory=student.history.filter(item=>item.status==="completed"||item.status==="historical");
-      if(completedHistory.length){const bars=el("div","profile-bars"),maxPoints=Math.max(1,...completedHistory.map(item=>item.points));completedHistory.slice().reverse().forEach(item=>{const row=el("div","bar-row");row.append(el("span","",dateLabel(item.started_at)));const track=el("div","bar-track"),bar=el("span");bar.style.width=(item.points/maxPoints*100)+"%";track.append(bar);row.append(track,el("strong","",String(item.points)));bars.append(row);});performance.append(bars);}else{performance.append(el("div","empty","No completed quiz scores recorded yet."));}
-      profile.append(attendance,performance);
-      const historyPanel=el("article","panel"),historyHead=el("div","panel-head");historyHead.append(el("div","","Date-wise attendance and results"));historyPanel.append(historyHead);
-      if(!student.history.length){historyPanel.append(el("div","empty","No quiz attendance has been recorded for this student."));}
-      else{const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),headRow=el("tr");["Date","Quiz ID","Status","Rank","Points"].forEach(label=>headRow.append(el("th","",label)));thead.append(headRow);table.append(thead);const body=el("tbody");student.history.forEach(item=>{const row=el("tr"),date=dateLabel(item.started_at,true),status=item.status==="completed"?"Complete":item.status==="active"?"Live":item.status==="historical"?"Historical import":"Interrupted";row.append(el("td","",date),el("td","",item.quizcord_quiz_id||"Not provided"),el("td","",status),el("td","rank",item.rank?"#"+safe(item.rank):"—"),el("td","points",safe(item.points)));body.append(row);});table.append(body);wrap.append(table);historyPanel.append(wrap);}
-      content.replaceChildren(heading,grid,profile,historyPanel);
-    }
-    async function refresh(){
-      if(pollBusy||activeView!=="sessions")return;pollBusy=true;
-      try{
-        const response=await fetch("/api/sessions",{cache:"no-store"});
-        if(response.status===401){location.replace("/");return;}
-        if(!response.ok)throw new Error("Could not load quiz sessions.");
-        const sessions=await response.json();
-        const old=activeSession||select.value;
-        select.replaceChildren();
-        sessions.forEach(session=>{const option=document.createElement("option");option.value=session.session_id;option.textContent=(session.quizcord_quiz_id||"Quiz session")+" · "+statusLabel(session.status)+" · "+new Date(session.started_at).toLocaleString();select.append(option);});
-        if(!sessions.length){content.replaceChildren(el("div","empty","No quiz sessions have been recorded yet. Start a Quizcord quiz to see its live dashboard."));return;}
-        activeSession=sessions.some(s=>s.session_id===old)?old:sessions[0].session_id;select.value=activeSession;
-        const detail=await fetch("/api/sessions/"+encodeURIComponent(activeSession),{cache:"no-store"});
-        if(!detail.ok)throw new Error("Could not load the selected quiz.");
-        const summary=await detail.json();
-        if(activeView==="sessions")render(summary);
-      }catch(error){content.replaceChildren(el("div","empty error",error.message));}
-      finally{pollBusy=false;}
-    }
-    async function refreshUsers(){
-      if(pollBusy||activeView!=="users")return;pollBusy=true;
-      try{
-        const response=await fetch("/api/users",{cache:"no-store"});
-        if(response.status===401){location.replace("/");return;}
-        if(!response.ok)throw new Error("Could not load server users.");
-        const users=await response.json();
-        if(activeView==="users"){
-          if(content.querySelector(".directory-search")===document.activeElement)pendingDirectoryUsers=users;
-          else renderUsers(users);
-        }
-      }catch(error){content.replaceChildren(el("div","empty error",error.message));}
-      finally{pollBusy=false;}
-    }
-    function switchView(view){
-      activeView=view;
-      dashboardTabs.querySelectorAll("button").forEach(button=>button.setAttribute("aria-selected",String(button.dataset.view===view)));
-      sessionHeading.hidden=view!=="sessions";
-      select.hidden=view!=="sessions";
-      if(view==="users")refreshUsers();else refresh();
-    }
-    dashboardTabs.addEventListener("click",event=>{const button=event.target.closest("button[data-view]");if(button)switchView(button.dataset.view);});
-    select.addEventListener("change",()=>{activeSession=select.value;refresh();});
-    initializeGuildSelector().then(()=>{
-    return fetch("/api/me").then(response=>{if(!response.ok)throw new Error("Sign-in expired.");return response.json();}).then(user=>{document.getElementById("account-name").textContent=user.username;document.getElementById("faculty-password-link").hidden=user.role!=="admin";});
-    }).then(()=>{
-    if(studentUSN){
-      dashboardTabs.hidden=true;
-      select.hidden=true;
-      async function refreshStudent(){try{const endpoint=facultyStudentPath?"/api/faculty/students/":"/api/students/";const response=await fetch(endpoint+encodeURIComponent(studentUSN),{cache:"no-store"});if(response.status===401){location.replace(facultyStudentPath?"/faculty/login":"/");return;}if(!response.ok)throw new Error("Could not load student analytics.");renderStudent(await response.json());}catch(error){content.replaceChildren(el("div","empty error",error.message));}}
-      refreshStudent();setInterval(refreshStudent,10000);
-    }else{refresh();setInterval(()=>{if(activeView==="users")refreshUsers();else refresh();},3000);}
-    }).catch(error=>content.replaceChildren(el("div","empty error",error.message)));
-  </script>
-</body>
-</html>
-"""
+HTML_PAGE = _read_web_template("admin_dashboard.html")
+FACULTY_LOGIN_PAGE = _read_web_template("faculty_login.html")
+FACULTY_PASSWORD_PAGE = _read_web_template("faculty_password.html")
+FACULTY_ADMIN_PAGE = _read_web_template("faculty_password_admin.html")
+FACULTY_PAGE = _read_web_template("faculty_dashboard.html")
+FACULTY_STUDENT_PAGE = _read_web_template("faculty_student.html")
+PRIVACY_POLICY_PAGE = _read_web_template("privacy_policy.html")
+TERMS_OF_SERVICE_PAGE = _read_web_template("terms_of_service.html")
 
-FACULTY_LOGIN_PAGE = r"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title>Faculty sign in · Quizcord Analytics</title>
-  <style>
-    :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#182033;background:#f6f7fa;font-synthesis:none}
-    *{box-sizing:border-box}
-    body{margin:0;min-height:100vh;display:grid;grid-template-columns:minmax(380px,560px) minmax(0,1fr);background:#f6f7fa}
-    a{color:inherit}
-    .identity-panel{min-height:100vh;display:flex;flex-direction:column;justify-content:space-between;padding:56px 52px 50px 68px;background:#0e1729;color:#f5f7fc}
-    .brand-lockup{display:flex;align-items:center;gap:12px}
-    .brand-mark{width:38px;height:38px;display:grid;place-items:center;border:1px solid #4f669c;border-radius:10px;background:#293b63;color:#cfd9ff;font-size:17px;font-weight:800}
-    .brand-copy{display:flex;flex-direction:column}
-    .brand-name{font-size:13px;font-weight:800;letter-spacing:1.3px}
-    .brand-descriptor{margin-top:2px;color:#9eaccb;font-size:9px;letter-spacing:1.7px}
-    .faculty-story{width:min(100%,430px);margin:10vh 0}
-    .eyebrow{color:#a9bfff;font-size:11px;font-weight:700;letter-spacing:1.8px}
-    .faculty-story h1{margin:18px 0 16px;font-size:44px;line-height:1.18;letter-spacing:-1.6px;color:#f5f7fc}
-    .faculty-story p{max-width:420px;margin:0;color:#b8c4dc;font-size:14px;line-height:1.8}
-    .steps{display:grid;gap:22px;width:min(100%,420px)}
-    .step{display:flex;align-items:flex-start;gap:14px}
-    .step-number{flex:none;width:34px;height:34px;display:grid;place-items:center;border:1px solid #45577d;border-radius:50%;background:#212f4f;color:#bac8f0;font-size:11px;font-weight:700}
-    .step-title{margin:0 0 4px;color:#eff3fc;font-size:14px;font-weight:650}
-    .step-detail{margin:0;color:#aebbd2;font-size:12px;line-height:1.55}
-    .assurance{display:flex;align-items:center;gap:9px;color:#929fba;font-size:11px}
-    .assurance-dot,.privacy-dot{flex:none;width:7px;height:7px;border-radius:50%;background:#73cbb0}
-    .auth-panel{min-width:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:space-between;padding:38px 54px 36px;background:#f6f7fa}
-    .mobile-brand{display:none}
-    .admin-nav{width:min(100%,772px);display:flex;justify-content:flex-end}
-    .admin-nav a{color:#586276;font-size:12px;text-decoration:none}
-    .admin-nav a:hover{text-decoration:underline}
-    .admin-nav strong{color:#475ba9;font-weight:700}
-    .auth-card{width:min(100%,520px);padding:42px 42px 34px;border:1px solid #e0e5ee;border-radius:16px;background:#fff;box-shadow:0 14px 40px #17233b0b}
-    .card-eyebrow{color:#5265ba;font-size:10px;font-weight:800;letter-spacing:1.6px}
-    .auth-card h2{margin:12px 0 8px;color:#192238;font-size:30px;line-height:1.28;letter-spacing:-.8px}
-    .card-description{margin:0;color:#626d81;font-size:14px;line-height:1.65}
-    .discord-button{min-height:56px;width:100%;margin-top:26px;display:flex;align-items:center;justify-content:center;gap:11px;border:0;border-radius:9px;background:#4f63cc;color:#fff;text-decoration:none;font-size:15px;font-weight:700;transition:background-color .15s,transform .15s,box-shadow .15s}
-    .discord-button:hover{transform:translateY(-1px);background:#4357bd;box-shadow:0 8px 18px #4357bd2e}
-    .discord-button:focus-visible,.admin-nav a:focus-visible{outline:3px solid #8296ef;outline-offset:3px}
-    .discord-icon{width:20px;height:20px;fill:currentColor}
-    .role-note{margin:17px 0 0;color:#707a8d;font-size:12px;line-height:1.55}
-    .divider{height:1px;margin:18px 0;background:#e6e9ef}
-    .next-step{display:flex;align-items:flex-start;gap:13px;padding:14px;border:1px solid #e1e5f0;border-radius:9px;background:#f2f4fa}
-    .next-number{flex:none;width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:#e3e8fb;color:#40539e;font-size:12px;font-weight:700}
-    .next-title{margin:0 0 4px;color:#222b3d;font-size:13px;font-weight:700}
-    .next-detail{margin:0;color:#697286;font-size:12px;line-height:1.5}
-    .privacy-note{display:flex;align-items:center;gap:8px;color:#7d8799;font-size:12px}
-    .privacy-dot{width:6px;height:6px}
-    @media(max-width:900px){
-      body{grid-template-columns:1fr}
-      .identity-panel{display:none}
-      .auth-panel{min-height:100vh;padding:28px 24px 26px}
-      .mobile-brand{width:min(100%,520px);display:flex;align-items:center;gap:10px}
-      .mobile-brand .brand-mark{border-color:#dbe2fa;background:#e8edff;color:#5265ba}
-      .admin-nav{width:min(100%,520px)}
-      .auth-card{margin:auto}
-      .privacy-note{margin-top:24px}
-    }
-    @media(max-width:520px){
-      .auth-panel{padding:22px 16px}
-      .auth-card{padding:30px 24px 26px;border-radius:13px}
-      .mobile-brand{margin-bottom:30px}
-      .auth-card h2{font-size:27px}
-      .privacy-note{font-size:11px;text-align:center}
-    }
-    @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
-  </style>
-</head>
-<body>
-  <aside class="identity-panel" aria-label="Quizcord faculty portal information">
-    <div class="brand-lockup" aria-label="Quizcord Analytics">
-      <span class="brand-mark" aria-hidden="true">Q</span>
-      <span class="brand-copy"><span class="brand-name">QUIZCORD</span><span class="brand-descriptor">ANALYTICS</span></span>
-    </div>
-    <div>
-      <section class="faculty-story">
-        <div class="eyebrow">FACULTY PORTAL</div>
-        <h1>A clearer view of every learner.</h1>
-        <p>Review quiz participation and student progress in a workspace built for your faculty role.</p>
-      </section>
-      <div class="steps" aria-label="Sign-in steps">
-        <div class="step">
-          <span class="step-number" aria-hidden="true">01</span>
-          <div><h2 class="step-title">Verify your identity</h2><p class="step-detail">Sign in with Discord and confirm your Faculty role.</p></div>
-        </div>
-        <div class="step">
-          <span class="step-number" aria-hidden="true">02</span>
-          <div><h2 class="step-title">Enter your faculty password</h2><p class="step-detail">Use the app password provided by your administrator.</p></div>
-        </div>
-      </div>
-    </div>
-    <div class="assurance"><span class="assurance-dot" aria-hidden="true"></span><span>Secure access for your configured Discord server.</span></div>
-  </aside>
-  <main class="auth-panel">
-    <div class="mobile-brand" aria-label="Quizcord Analytics">
-      <span class="brand-mark" aria-hidden="true">Q</span><span class="brand-name">QUIZCORD ANALYTICS</span>
-    </div>
-    <nav class="admin-nav" aria-label="Administrator sign in">
-      <a href="/login">Administrator? <strong>Sign in to the admin portal</strong> →</a>
-    </nav>
-    <section class="auth-card">
-      <div class="card-eyebrow">FACULTY SIGN-IN</div>
-      <h2>Welcome, faculty.</h2>
-      <p class="card-description">Continue with Discord to confirm your account and Faculty role.</p>
-      <a class="discord-button" href="/auth/login?destination=faculty">
-        <svg class="discord-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.7 5.3a18.4 18.4 0 0 0-4.6-1.4l-.6 1.2a16.7 16.7 0 0 0-5 0l-.6-1.2a18.4 18.4 0 0 0-4.6 1.4C1.4 9.5.6 13.6 1 17.6a18.5 18.5 0 0 0 5.7 2.9l1.2-2a11.8 11.8 0 0 1-1.9-.9l.5-.4a13.1 13.1 0 0 0 11 0l.5.4a11.8 11.8 0 0 1-1.9.9l1.2 2a18.5 18.5 0 0 0 5.7-2.9c.5-4.7-.8-8.8-3.3-12.3ZM8.8 14.9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2Zm6.4 0c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2Z"/></svg>
-        Continue with Discord
-      </a>
-      <p class="role-note">Only members with your server’s Faculty role can continue.</p>
-      <div class="divider" aria-hidden="true"></div>
-      <div class="next-step">
-        <span class="next-number" aria-hidden="true">2</span>
-        <div><h3 class="next-title">Next: enter your faculty password</h3><p class="next-detail">Your administrator provides this app password separately.</p></div>
-      </div>
-    </section>
-    <div class="privacy-note"><span class="privacy-dot" aria-hidden="true"></span><span>Quizcord never asks for or stores your Discord password.</span></div>
-  </main>
-</body>
-</html>"""
 
-FACULTY_PASSWORD_PAGE = r"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark"><title>Faculty password · Quizcord</title>
-<style>
-:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#f2f3f5;background:#313338}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(ellipse at 50% 35%,#3b3d78 0,#313338 62%)}
-main{width:min(460px,calc(100% - 32px));padding:36px;border-radius:12px;background:#2b2d31;box-shadow:0 18px 50px #11131888}
-.brand{font-weight:750;letter-spacing:.5px;text-transform:uppercase;color:#b5bac1}.brand span{color:#a6a9ff}.eyebrow{margin-top:32px;color:#a6a9ff;font-size:12px;letter-spacing:1.4px;font-weight:700;text-transform:uppercase}
-h1{font-size:26px;margin:8px 0 10px}.description{color:#b5bac1;line-height:1.55;margin:0 0 22px}
-label{display:block;font-size:13px;color:#dbdee1;margin:14px 0 7px}input{width:100%;padding:12px;background:#1e1f22;border:1px solid #4e5058;border-radius:5px;color:#f2f3f5;font:inherit}
-button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:5px;background:#5865f2;color:white;font:inherit;font-weight:700;cursor:pointer}button:hover{background:#4752c4}
-.server-select{width:100%;margin:18px 0 4px;padding:10px;background:#1e1f22;color:#f2f3f5;border:1px solid #4e5058;border-radius:5px;font:inherit}
-.muted{color:#949ba4;font-size:12px;line-height:1.5}.message{min-height:20px;margin-top:12px;color:#ff9e9e;font-size:13px}.hidden{display:none!important}a{color:#c4c9ce;font-size:13px}
-</style></head><body><main>
-<div class="brand">Quizcord <span>Faculty</span></div><div class="eyebrow">Second step</div>
-<h1 id="title">Faculty password</h1>
-<p class="description" id="description">Enter the temporary faculty password provided by your administrator.</p>
-<select id="guild-select" class="server-select hidden" aria-label="Select server"></select>
-<form id="password-form"><div id="captcha-container"><p class="muted">Complete this security check to continue.</p><div id="turnstile-widget" data-sitekey="__TURNSTILE_SITE_KEY__"></div></div>
-<label for="password">Faculty password</label><input id="password" type="password" autocomplete="current-password" disabled required>
-<div id="new-password-fields" class="hidden"><label for="new-password">New password</label><input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="128"><label for="confirm-password">Confirm new password</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="128"><p class="muted">Use 12–128 characters. No character-mix rules are required. This is an app password, not your Discord password.</p></div>
-<button id="submit" type="submit" disabled>Continue</button><div class="message" id="message" role="alert"></div></form>
-<a href="/auth/logout">Sign out</a>
-<script>
-const form=document.getElementById("password-form"),password=document.getElementById("password"),fields=document.getElementById("new-password-fields"),captchaContainer=document.getElementById("captcha-container"),captchaWidget=document.getElementById("turnstile-widget"),message=document.getElementById("message"),button=document.getElementById("submit");
-let mustChange=false,turnstileWidgetId=null,captchaToken="";
-async function send(path,data){const response=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data),cache:"no-store"});const body=await response.json().catch(()=>({detail:"Request failed."}));if(response.status===401&&body.detail==="Please sign in again."){location.replace("/faculty/login");throw new Error(body.detail);}if(!response.ok){const error=new Error(body.detail||"Could not verify your password.");error.body=body;throw error;}return body;}
-function setVerificationEnabled(enabled){password.disabled=!enabled;button.disabled=!enabled;}
-function resetCaptcha(){captchaToken="";setVerificationEnabled(false);if(turnstileWidgetId!==null&&window.turnstile)window.turnstile.reset(turnstileWidgetId);}
-function showCaptcha(){captchaContainer.classList.remove("hidden");if(!captchaWidget.dataset.sitekey)throw new Error("Security check is not configured. Contact an administrator.");if(turnstileWidgetId!==null)return Promise.resolve();return new Promise((resolve,reject)=>{const render=()=>{turnstileWidgetId=window.turnstile.render(captchaWidget,{sitekey:captchaWidget.dataset.sitekey,action:"faculty_password",callback:token=>{captchaToken=token;setVerificationEnabled(true);message.textContent="";},"expired-callback":()=>{captchaToken="";setVerificationEnabled(false);},"error-callback":()=>{captchaToken="";setVerificationEnabled(false);message.textContent="Security check failed to load. Please retry.";}});resolve();};if(window.turnstile){render();return;}const script=document.createElement("script");script.src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";script.async=true;script.defer=true;script.onload=render;script.onerror=()=>reject(new Error("Security check failed to load. Please retry."));document.head.appendChild(script);});}
-async function initializeGuildSelector(){const selector=document.getElementById("guild-select"),response=await fetch("/api/guilds",{cache:"no-store"});if(!response.ok)throw new Error("Could not load your Discord servers.");const guilds=(await response.json()).filter(guild=>guild.role==="faculty");if(!guilds.length)return;guilds.forEach(guild=>{const option=document.createElement("option");option.value=guild.id;option.textContent=guild.name;selector.append(option);});selector.classList.toggle("hidden",guilds.length<2);const saved=localStorage.getItem("quizcord-selected-guild"),current=await fetch("/api/me",{cache:"no-store"}).then(result=>result.json());selector.value=guilds.some(guild=>guild.id===saved)?saved:guilds.some(guild=>guild.id===current.guild_id)?current.guild_id:guilds[0].id;const selected=await fetch("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:selector.value}),cache:"no-store"});if(!selected.ok)throw new Error("Could not select the Discord server.");localStorage.setItem("quizcord-selected-guild",selector.value);selector.addEventListener("change",async()=>{selector.disabled=true;try{const changed=await fetch("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:selector.value}),cache:"no-store"});if(!changed.ok)throw new Error("Could not select the Discord server.");localStorage.setItem("quizcord-selected-guild",selector.value);location.reload();}catch(error){message.textContent=error.message;selector.disabled=false;}});}
-initializeGuildSelector().then(showCaptcha).catch(error=>{message.textContent=error.message;});
-form.addEventListener("submit",async event=>{event.preventDefault();message.textContent="";button.disabled=true;
-try{if(!mustChange){if(!captchaToken)throw new Error("Complete the security check before continuing.");const result=await send("/api/faculty/password/verify",{password:password.value,turnstile_token:captchaToken});captchaToken="";mustChange=result.must_change;if(mustChange){captchaContainer.classList.add("hidden");fields.classList.remove("hidden");password.value="";password.autocomplete="new-password";password.disabled=false;document.getElementById("title").textContent="Set a new password";document.getElementById("description").textContent="Your temporary password was accepted. Choose a new password to finish signing in.";button.textContent="Update password";button.disabled=false;return;}location.replace("/faculty");return;}
-const next=document.getElementById("new-password").value,confirm=document.getElementById("confirm-password").value;if(next.length<12)throw new Error("Use at least 12 characters.");if(next!==confirm)throw new Error("The new passwords do not match.");await send("/api/faculty/password/change",{current_password:password.value,new_password:next});location.replace("/faculty");
-}catch(error){message.textContent=error.message;if(!mustChange)resetCaptcha();else button.disabled=false;}});
-</script></main></body></html>"""
-
-FACULTY_ADMIN_PAGE = r"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark"><title>Faculty passwords · Quizcord</title>
-<style>
-:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#e7edf8;background:#0b1020}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 10% 0%,#17264a 0,transparent 42%),#0b1020}
-header{border-bottom:1px solid #26314b;background:#0e1528cc}
-.header-inner{max-width:980px;margin:auto;padding:18px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px}
-.brand{font-size:16px;font-weight:800;letter-spacing:.3px}.brand span{color:#8fa7ff}
-.admin-badge{display:inline-flex;align-items:center;gap:8px;padding:7px 11px;border:1px solid #40528a;border-radius:999px;background:#18264a;color:#c9d5ff;font-size:11px;font-weight:800;letter-spacing:1px}
-.admin-badge::before{content:"";width:8px;height:8px;border-radius:50%;background:#91a6ff;box-shadow:0 0 12px #91a6ff88}
-main{max-width:980px;margin:40px auto;padding:0 24px}.back{display:inline-flex;align-items:center;gap:8px;margin:0 0 20px;color:#aebbd2;text-decoration:none;font-size:14px}.back:hover{color:#fff}
-.panel{background:linear-gradient(145deg,#131d34,#101729 70%);border:1px solid #2d3c60;border-radius:18px;padding:clamp(24px,5vw,42px);box-shadow:0 24px 70px #05091466}
-.eyebrow{display:flex;align-items:center;gap:9px;color:#9db0ff;font-size:12px;letter-spacing:1.5px;text-transform:uppercase;font-weight:800}
-.eyebrow::before{content:"";width:24px;height:1px;background:#7188ed}
-h1{font-size:clamp(28px,4vw,38px);letter-spacing:-.7px;margin:12px 0 10px}
-.description,.note{color:#aebbd2;line-height:1.65}.description{max-width:720px;margin:0}
-.form-card{margin-top:30px;padding:22px;border:1px solid #273655;border-radius:13px;background:#0d1425}
-label{display:block;margin:0 0 9px;font-size:13px;font-weight:650;color:#dce4f8}
-input{width:min(100%,520px);padding:13px 14px;background:#090f1e;color:#e7edf8;border:1px solid #3a4969;border-radius:9px;font:inherit;transition:border-color .15s,box-shadow .15s}
-input:focus{outline:none;border-color:#8296ff;box-shadow:0 0 0 3px #5865f233}
-button{margin-top:16px;padding:12px 17px;border:0;border-radius:9px;background:linear-gradient(135deg,#6878ff,#5262e8);color:white;font:inherit;font-weight:750;cursor:pointer;box-shadow:0 7px 20px #4659ed33}
-button:hover:not(:disabled){filter:brightness(1.1)}button:disabled{opacity:.6;cursor:wait}
-.secret{margin-top:22px;padding:18px;border:1px solid #425681;border-radius:12px;background:#182540}.secret code{display:block;margin:12px 0;word-break:break-all;font-size:17px;color:#fff}
-.error{margin-top:10px;color:#ff9e9e;font-size:14px}.note{margin:22px 0 0;font-size:13px}.note strong{color:#d8e0f4}
-@media(max-width:560px){.header-inner{padding:16px}.header-inner .admin-badge{font-size:10px;padding:6px 9px}main{margin:24px auto;padding:0 16px}.panel{padding:24px 18px}.form-card{padding:17px}button{width:100%}}
-</style></head><body><header><div class="header-inner"><div class="brand">Quizcord <span>Analytics</span></div><div class="admin-badge">ADMIN CONSOLE</div></div></header><main>
-<a class="back" href="/">← <span>Back to admin dashboard</span></a><section class="panel"><div class="eyebrow">Administrator tools · Faculty accounts</div><h1>Faculty password management</h1>
-<p class="description">Issue or reset a faculty member's app password. Enter their Discord user ID; a one-time password will be generated and shown only once. They must change it after signing in.</p>
-<div class="form-card"><form id="provision-form"><label for="discord-id">Faculty member's Discord user ID</label><input id="discord-id" inputmode="numeric" pattern="[0-9]+" autocomplete="off" placeholder="Example: 123456789012345678" required><br><button id="submit" type="submit">Generate temporary password</button><div id="error" class="error" role="alert"></div></form></div>
-<div id="secret" class="secret" hidden><strong>Copy this password and send it securely to the faculty member. It will not be shown again.</strong><code id="temporary-password"></code><button id="copy" type="button">Copy password</button></div>
-<p class="note"><strong>Access requirement:</strong> The member must be in this server and have its configured Faculty role. Resetting a password invalidates the previous one.</p>
-</section>
-<script>
-const form=document.getElementById("provision-form"),id=document.getElementById("discord-id"),error=document.getElementById("error"),secret=document.getElementById("secret"),temporary=document.getElementById("temporary-password"),submit=document.getElementById("submit");
-form.addEventListener("submit",async event=>{event.preventDefault();error.textContent="";secret.hidden=true;submit.disabled=true;try{const response=await fetch("/api/admin/faculty-passwords/"+encodeURIComponent(id.value.trim()),{method:"POST",cache:"no-store"});const body=await response.json();if(response.status===401){location.replace("/");return;}if(!response.ok)throw new Error(body.detail||"Could not provision faculty password.");temporary.textContent=body.temporary_password;secret.hidden=false;}catch(exception){error.textContent=exception.message;}finally{submit.disabled=false;}});
-document.getElementById("copy").addEventListener("click",async()=>{await navigator.clipboard.writeText(temporary.textContent);document.getElementById("copy").textContent="Copied";});
-</script></main></body></html>"""
-
-FACULTY_PAGE = r"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <title>Faculty · Quizcord Analytics</title>
-  <style>
-    :root {
-      --bg: #f3f1ee;
-      --bg-elevated: #f8f6f3;
-      --panel: #ffffff;
-      --panel-strong: #f1f4f7;
-      --line: #e0d9d2;
-      --line-strong: #cfc7bf;
-      --text: #171c2a;
-      --text-soft: #5d6678;
-      --text-muted: #7d8797;
-      --accent: #1f2d3d;
-      --accent-soft: #edf3fb;
-      --accent-strong: #314e76;
-      --danger: #8a3b3b;
-      --warning: #7f5c2c;
-      --shadow: 0 14px 36px rgba(20, 27, 38, 0.08);
-      --radius-lg: 18px;
-      --radius-md: 12px;
-      --radius-sm: 10px;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-      color: var(--text);
-      background: var(--bg);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background: var(--bg);
-      color: var(--text);
-      font-size: 14px;
-      line-height: 1.5;
-    }
-    button, a, input, select { font: inherit; }
-    .top {
-      height: 72px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 max(24px, calc((100vw - 1100px) / 2));
-      border-bottom: 1px solid var(--line);
-      background: rgba(255,255,255,0.92);
-      position: sticky;
-      top: 0;
-      z-index: 2;
-      backdrop-filter: blur(8px);
-    }
-    .brand {
-      font-weight: 800;
-      letter-spacing: -0.02em;
-      font-size: 15px;
-      color: var(--accent);
-    }
-    .brand span { color: var(--accent-strong); }
-    .account {
-      display: flex;
-      align-items: center;
-      gap: 16px;
-      color: var(--text-soft);
-      font-size: 13px;
-    }
-    .account a {
-      color: var(--text-soft);
-      text-decoration: none;
-    }
-    .account a:hover { color: var(--text); }
-    .account select {
-      max-width: 220px;
-      padding: 8px 10px;
-      border: 1px solid var(--line-strong);
-      border-radius: var(--radius-sm);
-      background: var(--panel);
-      color: var(--text);
-    }
-    main {
-      max-width: 1100px;
-      margin: 38px auto;
-      padding: 0 24px;
-    }
-    .eyebrow {
-      color: var(--accent-strong);
-      font-size: 11px;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      font-weight: 800;
-    }
-    h1 {
-      font-size: 30px;
-      margin: 8px 0;
-      letter-spacing: -0.04em;
-    }
-    .intro {
-      color: var(--text-soft);
-      margin: 0 0 26px;
-    }
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: var(--radius-lg);
-      overflow: hidden;
-      margin: 18px 0;
-      box-shadow: var(--shadow);
-    }
-    .panel-head {
-      padding: 19px 21px;
-      border-bottom: 1px solid var(--line);
-      background: rgba(250, 249, 247, 0.6);
-    }
-    .panel h2 { font-size: 16px; margin: 0; }
-    .panel-sub {
-      font-size: 12px;
-      color: var(--text-muted);
-      margin-top: 5px;
-    }
-    .table-wrap { overflow: auto; max-height: 520px; }
-    table {
-      border-collapse: collapse;
-      width: 100%;
-      text-align: left;
-    }
-    th, td {
-      padding: 13px 18px;
-      border-bottom: 1px solid var(--line);
-      font-size: 13px;
-    }
-    th {
-      color: var(--text-muted);
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      position: sticky;
-      top: 0;
-      background: var(--panel-strong);
-    }
-    .usn { font-weight: 700; letter-spacing: 0.02em; }
-    .student-link { color: var(--text); text-decoration: none; }
-    .student-link:hover { color: var(--accent-strong); text-decoration: underline; }
-    .muted { color: var(--text-soft); }
-    .button {
-      border: 1px solid var(--line-strong);
-      border-radius: var(--radius-sm);
-      background: var(--panel-strong);
-      color: var(--text);
-      padding: 8px 12px;
-      cursor: pointer;
-      font-size: 12px;
-      font-weight: 700;
-    }
-    .button:hover { background: #edf2fa; }
-    .button.remove {
-      background: #f7f0f0;
-      border-color: #dac3c3;
-      color: var(--danger);
-    }
-    .button:disabled { opacity: 0.55; cursor: wait; }
-    .search-tools { display: flex; gap: 12px; padding: 16px 18px; }
-    .search {
-      flex: 1;
-      min-width: 0;
-      padding: 11px 12px;
-      background: var(--panel);
-      color: var(--text);
-      border: 1px solid var(--line-strong);
-      border-radius: var(--radius-sm);
-    }
-    .empty {
-      color: var(--text-muted);
-      text-align: center;
-      padding: 36px 20px;
-      font-size: 14px;
-    }
-    .error { color: var(--danger); }
-    .notice {
-      padding: 12px 18px;
-      color: var(--text-soft);
-      font-size: 13px;
-      border-top: 1px solid var(--line);
-      background: var(--bg-elevated);
-    }
-    .row-metrics { white-space: nowrap; color: var(--text-soft); }
-    .candidate-warning {
-      margin-top: 5px;
-      color: var(--warning);
-      font-size: 11px;
-      line-height: 1.4;
-      max-width: 460px;
-    }
-    @media(max-width:600px){
-      .top{ padding:0 16px; }
-      .account{ gap:8px; }
-      main{ margin:24px auto; padding:0 16px; }
-      .search-tools{ flex-direction:column; }
-      th, td{ padding:12px; }
-    }
-  </style>
-</head>
-<body>
-  <header class="top"><div class="brand">Quizcord <span>Faculty</span></div><div class="account"><select id="guild-select" aria-label="Select server" hidden></select><span id="account-name"></span><a href="/auth/logout">Sign out</a></div></header>
-  <main>
-    <div class="eyebrow">Student mentoring</div><h1>Monitor your students</h1>
-    <p class="intro">Add students by USN to follow their Quizcord attendance and performance.</p>
-    <section class="panel"><div class="panel-head"><h2>Your students</h2><div class="panel-sub">Only you can manage your student list.</div></div><div id="assigned"><div class="empty">Loading students…</div></div></section>
-    <section class="panel"><div class="panel-head"><h2>Add your students</h2><div class="panel-sub">Search by USN, then add the student to your list.</div></div>
-      <div class="search-tools"><input class="search" id="student-search" type="search" placeholder="Search by USN" aria-label="Search students by USN"></div>
-      <div id="candidates"><div class="empty">Enter a USN to find students.</div></div>
-    </section>
-  </main>
-  <script>
-    const el=(tag,className,text)=>{const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node;};
-    const assigned=document.getElementById("assigned"),candidates=document.getElementById("candidates"),search=document.getElementById("student-search");
-    let assignedUSNs=new Set(),searchTimer;
-    async function api(path,options={}){
-      const response=await fetch(path,{cache:"no-store",...options});
-      if(response.status===401){location.replace("/faculty/login");throw new Error("Sign-in expired.");}
-      return response;
-    }
-    async function loadAssigned(){
-      try{
-        const response=await api("/api/faculty/students");
-        if(!response.ok)throw new Error("Could not load your students.");
-        const students=await response.json();assignedUSNs=new Set(students.map(student=>student.usn.toLocaleLowerCase()));
-        if(!students.length){assigned.replaceChildren(el("div","empty","You haven't added any students yet. Search for a USN below to get started."));return;}
-        const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),head=el("tr");
-        ["Student","Quizzes attended","Attendance","Total points",""].forEach(label=>head.append(el("th","",label)));
-        thead.append(head);table.append(thead);const body=el("tbody");
-        students.forEach(student=>{const row=el("tr"),nameCell=el("td","");
-          const link=el("a","student-link",student.student_name);link.href="/faculty/students/"+encodeURIComponent(student.usn);
-          nameCell.append(link,el("div","usn muted",student.usn));
-          const remove=el("button","button remove","Remove");remove.type="button";remove.addEventListener("click",()=>removeStudent(student.usn,remove));
-          const removeCell=el("td","");removeCell.appendChild(remove);
-          row.append(nameCell,el("td","row-metrics",student.quizzes_attended+" / "+student.completed_quizzes),el("td","row-metrics",Number(student.attendance_percentage).toFixed(1)+"%"),el("td","row-metrics",String(student.total_points)),removeCell);body.append(row);
-        });
-        table.append(body);wrap.append(table);assigned.replaceChildren(wrap);
-      }catch(error){assigned.replaceChildren(el("div","empty error",error.message));}
-    }
-    async function loadCandidates(){
-      const query=search.value.trim();
-      try{
-        const response=await api("/api/faculty/candidates?search="+encodeURIComponent(query));
-        if(!response.ok)throw new Error("Could not search students.");
-        const users=await response.json();
-        if(!users.length){candidates.replaceChildren(el("div","empty","No students found for that USN."));return;}
-        const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),head=el("tr");
-        ["Student","USN",""].forEach(label=>head.append(el("th","",label)));
-        thead.append(head);table.append(thead);const body=el("tbody");
-        users.forEach(user=>{const row=el("tr");
-          const studentCell=el("td","");studentCell.append(el("div","",user.student_name));
-          if(!user.name_matches_usn_format)studentCell.append(el("div","candidate-warning","Ask this student to update their Discord global display name to their USN format before adding them."));
-          row.append(studentCell,el("td","usn",user.usn||"USN not available"));
-          const button=el("button","button",user.assigned?"Added":user.can_assign?"+ Add":"USN required");button.type="button";button.disabled=user.assigned||!user.can_assign;
-          if(user.can_assign&&!user.assigned)button.addEventListener("click",()=>addStudent(user.usn,button));
-          const actionCell=el("td","");actionCell.appendChild(button);row.append(actionCell);body.append(row);
-        });
-        table.append(body);wrap.append(table);candidates.replaceChildren(wrap);
-      }catch(error){candidates.replaceChildren(el("div","empty error",error.message));}
-    }
-    async function addStudent(usn,button){
-      button.disabled=true;
-      try{
-        const response=await api("/api/faculty/students/"+encodeURIComponent(usn),{method:"POST"});
-        if(response.status===409){await loadAssigned();await loadCandidates();return;}
-        if(!response.ok)throw new Error("Could not add this student.");
-        await loadAssigned();await loadCandidates();
-      }catch(error){candidates.prepend(el("div","notice error",error.message));button.disabled=false;}
-    }
-    async function removeStudent(usn,button){
-      button.disabled=true;
-      try{
-        const response=await api("/api/faculty/students/"+encodeURIComponent(usn),{method:"DELETE"});
-        if(!response.ok)throw new Error("Could not remove this student.");
-        await loadAssigned();await loadCandidates();
-      }catch(error){assigned.prepend(el("div","notice error",error.message));button.disabled=false;}
-    }
-    search.addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(loadCandidates,200);});
-    async function initializeGuildSelector(){
-      const selector=document.getElementById("guild-select");
-      const response=await api("/api/guilds");
-      if(!response.ok)throw new Error("Could not load your Discord servers.");
-      const guilds=await response.json();
-      if(!guilds.length)throw new Error("The bot is not installed in a server you can access.");
-      selector.replaceChildren();
-      guilds.forEach(guild=>{const option=document.createElement("option");option.value=guild.id;option.textContent=guild.name;selector.append(option);});
-      const saved=localStorage.getItem("quizcord-selected-guild");
-      selector.value=guilds.some(guild=>guild.id===saved)?saved:guilds[0].id;
-      selector.hidden=guilds.length<2;
-      const selected=await api("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:selector.value})});
-      if(!selected.ok)throw new Error("Could not select the Discord server.");
-      localStorage.setItem("quizcord-selected-guild",selector.value);
-      selector.addEventListener("change",async()=>{selector.disabled=true;try{const changed=await api("/api/guilds/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({guild_id:selector.value})});if(!changed.ok)throw new Error("Could not select the Discord server.");localStorage.setItem("quizcord-selected-guild",selector.value);location.reload();}catch(error){assigned.replaceChildren(el("div","empty error",error.message));selector.disabled=false;}});
-    }
-    initializeGuildSelector().then(()=>api("/api/me")).then(response=>{if(!response.ok)throw new Error("Sign-in expired.");return response.json();}).then(user=>{document.getElementById("account-name").textContent=user.username;loadAssigned();loadCandidates();}).catch(error=>assigned.replaceChildren(el("div","empty error",error.message)));
-  </script>
-</body>
-</html>
-"""
-
-PRIVACY_POLICY_PAGE = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <title>Privacy Policy · Quizcord Analytics</title>
-  <style>
-    :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#e7edf8;background:#0b1020}
-    *{box-sizing:border-box}body{margin:0;line-height:1.7}main{max-width:820px;margin:48px auto;padding:0 24px 48px}
-    a{color:#a9baff}h1{line-height:1.2}h2{margin-top:32px;font-size:19px}p,li{color:#c1cbe0}
-    .updated{color:#91a0ba;font-size:13px}.card{padding:28px;border:1px solid #26334e;border-radius:14px;background:#11182b}
-  </style>
-</head>
-<body><main><div class="card">
-  <p><a href="/">Quizcord Analytics</a></p>
-  <h1>Privacy Policy</h1>
-  <p class="updated">Effective date: October 18, 2026</p>
-  <p>This policy explains how the Quizcord Analytics Discord application and dashboard (the “Service”) process information when a Discord server installs or uses the Service.</p>
-
-  <h2>Information processed</h2>
-  <ul>
-    <li><strong>Server and member information:</strong> Discord server and channel IDs, server names, member Discord IDs, account usernames, display names, and server nicknames. The bot synchronizes human member information to provide server-specific dashboards and student matching.</li>
-    <li><strong>Student mappings:</strong> identifiers such as USNs, student names, and optional Quizcord leaderboard usernames that a server administrator or authorized faculty member enters or manages.</li>
-    <li><strong>Quiz analytics:</strong> Quizcord quiz IDs, start/completion times, leaderboard participant identifiers, ranks and points, and attendance-related records. Points are Quizcord leaderboard points, not a verified count of correct answers.</li>
-    <li><strong>Faculty access data:</strong> faculty Discord IDs, server role settings, student assignments, and salted password hashes with security counters. App passwords are not stored in plaintext.</li>
-    <li><strong>Dashboard sign-in data:</strong> Discord identity and server information requested through OAuth to authenticate users and check their access. The Service does not request Discord account passwords.</li>
-    <li><strong>Security checks:</strong> faculty password sign-in uses Cloudflare Turnstile, which may process technical and device information under Cloudflare’s own privacy terms.</li>
-  </ul>
-
-  <h2>How information is used</h2>
-  <p>Information is used to collect and display server-specific quiz analytics, match leaderboard participants to student records, provide faculty and administrator access, deliver relevant bot responses, and protect the Service from abuse. Server records are scoped so dashboard users can access only servers where their Discord permissions or configured faculty role authorize them.</p>
-
-  <h2>Storage, service providers, and sharing</h2>
-  <p>The Service database is hosted on Railway and stores records separately by Discord server. Discord provides the bot, OAuth, and server data APIs. Cloudflare provides the Turnstile security challenge. If Sentry monitoring is enabled by the Service operator, Sentry receives error reports, sampled performance traces and profiles, sanitized warning-and-higher logs, and dashboard request-count and duration metrics. This may include technical runtime information, exception messages and stack traces, endpoint operation names, and timing data. The Service removes HTTP request details, request bodies, and breadcrumbs from events; log messages are replaced with generic severity labels, and log attributes are limited to safe code/logger metadata. Metrics use route templates rather than concrete URLs. Exception messages or stack traces may still contain information produced by the application. These providers process information as needed to deliver their services and are subject to their own terms and privacy policies. The Service operator does not sell personal information.</p>
-
-  <h2>Retention and deletion</h2>
-  <p>Server analytics and configuration are retained in the Service database. When the bot leaves a server, that server is marked inactive; this does <strong>not</strong> automatically delete its stored records. A server owner may request deletion by emailing <a href="mailto:chandutalawar187@gmail.com">chandutalawar187@gmail.com</a> from an address they control and identifying the Discord server. Requests will be reviewed and handled by the Service operator. Some information may remain where required for security, legal, or operational reasons.</p>
-
-  <h2>Security</h2>
-  <p>The Service uses access checks, HTTPS for the hosted dashboard, password hashing, and request limits. No internet service can guarantee absolute security. Do not enter information that your organization is not authorized to share with this Service.</p>
-
-  <h2>Children and sensitive information</h2>
-  <p>The Service is intended for server administrators, faculty, and quiz participants in communities that choose to install it. Do not use it to store highly sensitive personal information. Server owners are responsible for ensuring they have appropriate authority and notices before entering student information.</p>
-
-  <h2>Changes and contact</h2>
-  <p>This policy may be updated as the Service changes. Questions or requests about information handled by the Service can be sent to <a href="mailto:chandutalawar187@gmail.com">chandutalawar187@gmail.com</a>.</p>
-  <p><a href="/terms">Terms of Service</a></p>
-</div></main></body></html>"""
-
-TERMS_OF_SERVICE_PAGE = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <title>Terms of Service · Quizcord Analytics</title>
-  <style>
-    :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#e7edf8;background:#0b1020}
-    *{box-sizing:border-box}body{margin:0;line-height:1.7}main{max-width:820px;margin:48px auto;padding:0 24px 48px}
-    a{color:#a9baff}h1{line-height:1.2}h2{margin-top:32px;font-size:19px}p,li{color:#c1cbe0}
-    .updated{color:#91a0ba;font-size:13px}.card{padding:28px;border:1px solid #26334e;border-radius:14px;background:#11182b}
-  </style>
-</head>
-<body><main><div class="card">
-  <p><a href="/">Quizcord Analytics</a></p>
-  <h1>Terms of Service</h1>
-  <p class="updated">Effective date: October 18, 2026</p>
-  <p>These terms apply to your use of the Quizcord Analytics Discord application and dashboard (the “Service”). By installing or using the Service, you agree to these terms. If you do not agree, do not use the Service.</p>
-
-  <h2>Use of the Service</h2>
-  <p>The Service provides server-specific tools for collecting, importing, and viewing Quizcord quiz participation and leaderboard analytics. It is provided for informational and administrative purposes. Quizcord points and ranks are reported as received and are not independently verified as correct-answer counts or official academic records.</p>
-
-  <h2>Server administrator responsibilities</h2>
-  <p>By installing or configuring the Service, you confirm that you have permission to do so for your Discord server. Server administrators are responsible for choosing the channels the bot can access, configuring faculty roles, managing student mappings, and ensuring that they have authority to submit and share any student or member information entered into the Service. Administrators should tell affected members how the Service is used where required by their organization or applicable law.</p>
-
-  <h2>Acceptable use</h2>
-  <p>You may not use the Service to violate Discord’s terms or policies, access another server’s information, interfere with the Service, or submit information unlawfully. Do not share faculty app passwords or grant faculty roles to people who should not have access.</p>
-
-  <h2>Availability and changes</h2>
-  <p>The Service may be changed, suspended, or discontinued. We do not guarantee uninterrupted availability or that analytics will be error-free; data depends in part on messages and information provided by Discord and Quizcord. Server records may remain stored after the bot is removed unless deletion is requested and processed as described in the <a href="/privacy">Privacy Policy</a>.</p>
-
-  <h2>Disclaimer and liability</h2>
-  <p>To the extent permitted by applicable law, the Service is provided “as is” and “as available,” without warranties of any kind. The Service operator is not responsible for decisions made solely on the basis of its analytics. Nothing in these terms limits rights or remedies that cannot legally be limited.</p>
-
-  <h2>Changes and contact</h2>
-  <p>These terms may be updated as the Service changes. Continued use after a posted update means you accept the revised terms. Questions can be sent to <a href="mailto:chandutalawar187@gmail.com">chandutalawar187@gmail.com</a>.</p>
-</div></main></body></html>"""
+def _render_admin_dashboard(
+    sentry_dsn: str | None, enable_session_replay: bool
+) -> str:
+    replay_enabled = enable_session_replay and sentry_dsn is not None
+    return (
+        HTML_PAGE.replace(
+            "__SESSION_REPLAY_DSN__",
+            html.escape(sentry_dsn if replay_enabled else "", quote=True),
+        )
+        .replace(
+            "__SESSION_REPLAY_ENABLED__",
+            "true" if replay_enabled else "false",
+        )
+    )
 
 
 def _dashboard_user(user: DashboardUser) -> dict[str, Any]:
@@ -1322,8 +173,22 @@ def _dashboard_user(user: DashboardUser) -> dict[str, Any]:
     }
 
 
+def _sentry_origin(dsn: str | None) -> str:
+    if dsn is None:
+        return ""
+    parsed = urlsplit(dsn)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("SENTRY_DSN must be an absolute HTTP(S) URL.")
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    return f" {parsed.scheme}://{parsed.hostname}{port}"
+
+
 def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
     app = FastAPI(title="Quizcord Analytics", docs_url=None, redoc_url=None)
+    sentry_origin = _sentry_origin(settings.sentry_dsn)
+    sentry_script = (
+        " https://browser.sentry-cdn.com" if settings.sentry_dsn else ""
+    )
     if settings.dashboard_session_secret:
         app.add_middleware(
             SessionMiddleware,
@@ -1446,13 +311,23 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; "
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com"
+            f"{sentry_script}; "
             "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-            "connect-src 'self' https://challenges.cloudflare.com; "
+            "connect-src 'self' https://challenges.cloudflare.com"
+            f"{sentry_origin}; "
+            "worker-src 'self' blob:; "
             "frame-src https://challenges.cloudflare.com; "
             "base-uri 'none'; frame-ancestors 'none'"
         )
         return response
+
+    app.mount(
+        "/static",
+        StaticFiles(directory=WEB_STATIC_DIR),
+        name="static",
+    )
 
     @app.middleware("http")
     async def collect_http_metrics(request: Request, call_next):
@@ -1639,7 +514,10 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         for key in expired_sessions:
             del oauth_sessions[key]
         state = secrets.token_urlsafe(32)
-        request.session.clear()
+        request.session.pop("oauth_state", None)
+        request.session.pop("login_destination", None)
+        request.session.pop("return_to", None)
+        request.session.pop("requested_guild_id", None)
         request.session["oauth_state"] = state
         if destination == "faculty":
             request.session["login_destination"] = "faculty"
@@ -1687,7 +565,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         oauth_stage = "authorization-code exchange"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                token_response = await client.post(
+                token_response = await trace_external_request(
+                    "discord.oauth.token_exchange",
+                    client.post,
                     f"{DISCORD_API}/oauth2/token",
                     data={
                         "client_id": client_id,
@@ -1702,14 +582,18 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 token = token_response.json()
                 access_token = token["access_token"]
                 oauth_stage = "Discord identity lookup"
-                user_response = await client.get(
+                user_response = await trace_external_request(
+                    "discord.oauth.current_user",
+                    client.get,
                     f"{DISCORD_API}/users/@me",
                     headers={"Authorization": f"Bearer {access_token}"},
                 )
                 user_response.raise_for_status()
                 user = user_response.json()
                 oauth_stage = "Discord server-membership lookup"
-                guilds_response = await client.get(
+                guilds_response = await trace_external_request(
+                    "discord.oauth.list_guilds",
+                    client.get,
                     f"{DISCORD_API}/users/@me/guilds",
                     headers={"Authorization": f"Bearer {access_token}"},
                 )
@@ -1820,21 +704,24 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         request.session.clear()
         return RedirectResponse("/", status_code=302)
 
-    @app.get("/api/guilds")
-    async def available_guilds(request: Request) -> list[dict[str, str]]:
+    @app.get("/api/guilds", response_model=list[GuildResponse])
+    async def available_guilds(
+        request: Request,
+    ) -> list[GuildResponse]:
         auth_session = await current_authenticated(request)
         installed = dict(database.get_installed_guilds())
         guild_ids = auth_session.admin_guild_ids | auth_session.faculty_guild_ids
         return [
-            {
-                "id": str(guild_id),
-                "name": name,
-                "role": (
+            GuildResponse(
+                id=str(guild_id),
+                name=name,
+                role=(
                     "admin"
                     if guild_id in auth_session.admin_guild_ids
                     else "faculty"
                 ),
-            }
+                is_faculty=guild_id in auth_session.faculty_guild_ids,
+            )
             for guild_id, name in sorted(
                 installed.items(), key=lambda item: item[1].casefold()
             )
@@ -1884,7 +771,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 suffix = f"?{urlencode(login_params)}" if login_params else ""
                 return RedirectResponse(f"/login{suffix}", status_code=302)
             raise
-        return HTMLResponse(HTML_PAGE)
+        return HTMLResponse(
+            _render_admin_dashboard(settings.sentry_dsn, enable_session_replay=True)
+        )
 
     @app.get("/faculty", response_class=HTMLResponse, response_model=None)
     async def faculty_page(request: Request) -> HTMLResponse | RedirectResponse:
@@ -1965,11 +854,26 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             raise
         if not usn.strip() or len(usn) > 100:
             raise HTTPException(status_code=404, detail="Student not found.")
-        return HTMLResponse(HTML_PAGE)
+        return HTMLResponse(
+            _render_admin_dashboard(settings.sentry_dsn, enable_session_replay=False)
+        )
 
-    @app.get("/faculty/students/{usn}", response_class=HTMLResponse)
-    async def faculty_student_page(usn: str, request: Request) -> HTMLResponse:
-        auth_session = await current_faculty(request)
+    @app.get(
+        "/faculty/students/{usn}",
+        response_class=HTMLResponse,
+        response_model=None,
+    )
+    async def faculty_student_page(
+        usn: str, request: Request
+    ) -> HTMLResponse | RedirectResponse:
+        try:
+            auth_session = await current_faculty(request)
+        except HTTPException as error:
+            if error.status_code == 401:
+                return RedirectResponse("/faculty/login", status_code=302)
+            if error.status_code == 428:
+                return RedirectResponse("/faculty/password", status_code=302)
+            raise
         if not usn.strip() or len(usn) > 100:
             raise HTTPException(status_code=404, detail="Student not found.")
         if usn.casefold() not in {
@@ -1979,7 +883,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             )
         }:
             raise HTTPException(status_code=404, detail="Student not found.")
-        return HTMLResponse(HTML_PAGE)
+        return HTMLResponse(FACULTY_STUDENT_PAGE)
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(
@@ -2000,90 +904,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 else f"?guild_id={guild_id}"
             )
         return HTMLResponse(
-            """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title>Admin sign in · Quizcord Analytics</title>
-  <style>
-    :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#172033;background:#f4f6fb;font-synthesis:none}
-    *{box-sizing:border-box}
-    body{margin:0;min-height:100vh;display:grid;grid-template-columns:minmax(360px,1fr) minmax(420px,1fr);background:#f4f6fb}
-    .brand-panel{position:relative;isolation:isolate;overflow:hidden;display:flex;flex-direction:column;justify-content:space-between;min-height:100vh;padding:42px clamp(32px,7vw,100px);color:#f6f8ff;background:linear-gradient(145deg,#152348 0%,#101a34 48%,#101629 100%)}
-    .brand-panel::before,.brand-panel::after{position:absolute;z-index:-1;content:"";border:1px solid #9bb3ff20;border-radius:50%;pointer-events:none}
-    .brand-panel::before{width:520px;height:520px;right:-260px;top:14%;box-shadow:0 0 0 50px #9bb3ff08,0 0 0 100px #9bb3ff06}
-    .brand-panel::after{width:340px;height:340px;left:-230px;bottom:-140px;box-shadow:0 0 0 40px #9bb3ff08}
-    .brand{display:flex;align-items:center;gap:12px;font-size:15px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
-    .brand-mark{display:grid;place-items:center;width:38px;height:38px;border:1px solid #96aaff66;border-radius:11px;background:#758bff1c;color:#bdcaff;font-size:16px}
-    .brand-copy{max-width:520px;margin:12vh 0 10vh}
-    .kicker{display:flex;align-items:center;gap:10px;color:#aebfff;font-size:11px;font-weight:800;letter-spacing:.18em;text-transform:uppercase}
-    .kicker::before{width:24px;height:2px;background:#8ea4ff;content:""}
-    h1{max-width:500px;margin:20px 0 16px;font-size:clamp(38px,5vw,62px);line-height:1.04;letter-spacing:-.055em}
-    .brand-copy p{max-width:430px;margin:0;color:#b8c3dc;font-size:16px;line-height:1.75}
-    .preview{max-width:480px;padding:20px;border:1px solid #9aafff33;border-radius:16px;background:#ffffff0a;backdrop-filter:blur(10px)}
-    .preview-heading{display:flex;align-items:center;justify-content:space-between;color:#e7ecff;font-size:12px;font-weight:700}
-    .live-dot{display:inline-flex;align-items:center;gap:7px;color:#c4d0eb;font-size:11px;font-weight:500}
-    .live-dot::before{width:7px;height:7px;border-radius:50%;background:#73d7b0;box-shadow:0 0 12px #73d7b088;content:""}
-    .preview-bars{display:grid;grid-template-columns:repeat(12,1fr);align-items:end;gap:8px;height:74px;margin-top:18px}
-    .preview-bars i{display:block;min-height:14px;border-radius:4px 4px 1px 1px;background:linear-gradient(180deg,#a9b8ff,#697ff0);opacity:.9}
-    .preview-bars i:nth-child(3n){opacity:.48}.preview-bars i:nth-child(4n){background:linear-gradient(180deg,#79d9c0,#4e9f9b)}
-    .brand-footer{color:#8f9bb7;font-size:12px}
-    .login-side{display:grid;place-items:center;padding:36px clamp(24px,6vw,84px)}
-    .login-card{width:min(100%,430px)}
-    .mobile-brand{display:none}
-    .eyebrow{color:#6775b2;font-size:11px;font-weight:800;letter-spacing:.16em;text-transform:uppercase}
-    h2{margin:13px 0 10px;color:#182238;font-size:32px;letter-spacing:-.04em}
-    .intro{margin:0 0 30px;color:#667086;font-size:15px;line-height:1.65}
-    .discord-button{display:flex;align-items:center;justify-content:center;gap:11px;width:100%;min-height:54px;padding:0 18px;border:0;border-radius:10px;background:#5865f2;color:#fff;text-decoration:none;font-size:15px;font-weight:750;box-shadow:0 8px 18px #5865f233;transition:transform .15s,background .15s,box-shadow .15s}
-    .discord-button:hover{transform:translateY(-1px);background:#4b58e8;box-shadow:0 12px 24px #5865f244}
-    .discord-icon{width:20px;height:20px;fill:currentColor}
-    .secure-note{display:flex;align-items:flex-start;gap:11px;margin-top:20px;padding:14px;border:1px solid #e4e8f1;border-radius:10px;background:#fff;color:#687389;font-size:12px;line-height:1.55}
-    .secure-icon{flex:none;color:#6477cf;font-size:16px}
-    .divider{height:1px;margin:28px 0 20px;background:#e5e8ef}
-    .faculty-prompt{margin:0;color:#737d91;font-size:13px}
-    .faculty-prompt a{color:#4d5ebd;font-weight:700;text-decoration:none}
-    .faculty-prompt a:hover{text-decoration:underline}
-    @media(max-width:850px){body{grid-template-columns:1fr}.brand-panel{display:none}.login-side{min-height:100vh;padding:28px 22px}.mobile-brand{display:flex;align-items:center;gap:10px;margin-bottom:48px;color:#172033;font-size:13px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.mobile-brand .brand-mark{background:#e8ecff;color:#5367ca;border-color:#dce2ff}.login-card{width:min(100%,420px)}}
-    @media(max-width:440px){.mobile-brand{margin-bottom:36px}h2{font-size:28px}.intro{font-size:14px}}
-    @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
-  </style>
-</head>
-<body>
-  <section class="brand-panel" aria-label="Quizcord Analytics">
-    <div class="brand"><span class="brand-mark" aria-hidden="true">Q</span><span>Quizcord Analytics</span></div>
-    <div class="brand-copy">
-      <div class="kicker">Administrator workspace</div>
-      <h1>Make every quiz count.</h1>
-      <p>Track participation, review student performance, and manage your server's quiz analytics from one place.</p>
-      <div class="preview" aria-hidden="true">
-        <div class="preview-heading"><span>Quiz activity</span><span class="live-dot">Analytics overview</span></div>
-        <div class="preview-bars"><i style="height:38%"></i><i style="height:55%"></i><i style="height:43%"></i><i style="height:70%"></i><i style="height:51%"></i><i style="height:83%"></i><i style="height:62%"></i><i style="height:93%"></i><i style="height:68%"></i><i style="height:78%"></i><i style="height:59%"></i><i style="height:88%"></i></div>
-      </div>
-    </div>
-    <div class="brand-footer">Secure access for your Discord server administrators.</div>
-  </section>
-  <main class="login-side">
-    <section class="login-card">
-      <div class="mobile-brand"><span class="brand-mark" aria-hidden="true">Q</span><span>Quizcord Analytics</span></div>
-      <div class="eyebrow">Admin sign in</div>
-      <h2>Welcome back</h2>
-      <p class="intro">Sign in with Discord. Access is limited to servers where the bot is installed and you have Manage Server permission.</p>
-      <a class="discord-button" href="/auth/login">
-        <svg class="discord-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.7 5.3a18.4 18.4 0 0 0-4.6-1.4l-.6 1.2a16.7 16.7 0 0 0-5 0l-.6-1.2a18.4 18.4 0 0 0-4.6 1.4C1.4 9.5.6 13.6 1 17.6a18.5 18.5 0 0 0 5.7 2.9l1.2-2a11.8 11.8 0 0 1-1.9-.9l.5-.4a13.1 13.1 0 0 0 11 0l.5.4a11.8 11.8 0 0 1-1.9.9l1.2 2a18.5 18.5 0 0 0 5.7-2.9c.5-4.7-.8-8.8-3.3-12.3ZM8.8 14.9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2Zm6.4 0c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2Z"/></svg>
-        Continue with Discord
-      </a>
-      <div class="secure-note"><span class="secure-icon" aria-hidden="true">◆</span><span>Access is verified through Discord for each server where the bot is installed.</span></div>
-      <div class="divider"></div>
-      <p class="faculty-prompt">Faculty member? <a href="/faculty/login">Go to the faculty portal</a></p>
-    </section>
-  </main>
-</body>
-</html>""".replace(
-                'href="/auth/login"', f'href="/auth/login{query}"'
-            )
-        )
+_read_web_template("admin_login.html").replace(
+                "__AUTH_LOGIN_URL__", f"/auth/login{query}"
+            )        )
 
     @app.get("/api/me")
     async def me(request: Request) -> dict[str, str]:
@@ -2097,12 +920,14 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         }
 
     @app.get("/api/sessions")
-    async def sessions(request: Request) -> list[dict[str, Any]]:
+    async def sessions(
+        request: Request, offset: int = Query(default=0, ge=0)
+    ) -> list[dict[str, Any]]:
         await current_admin(request)
         return [
             _summary_overview(summary)
             for summary in database.get_quiz_session_summaries(
-                request.state.guild_id, limit=50
+                request.state.guild_id, limit=50, offset=offset
             )
         ]
 
@@ -2248,9 +1073,14 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         guild_id = request.state.guild_id
         faculty_role_id = database.get_faculty_role_id(guild_id)
         if faculty_role_id is None:
-            raise HTTPException(
-                status_code=503,
-                detail="Set this server's faculty role before provisioning passwords with /set_faculty_role.",
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": (
+                        "Set this server's faculty role before provisioning "
+                        "passwords with /set_faculty_role."
+                    )
+                },
             )
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -2310,8 +1140,8 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                     "can_assign": (
                         user.usn is not None
                         and matches_usn_format(user.global_name or "")
-                        and user.usn.casefold()
-                        == (user.global_name or "").strip().casefold()
+                        and normalize_usn(user.usn).casefold()
+                        == normalize_usn(user.global_name or "").casefold()
                     ),
                     "name_matches_usn_format": user.name_matches_usn_format,
                     "assigned": (
@@ -2346,8 +1176,8 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             )
         if (
             not matches_usn_format(matching_user.global_name or "")
-            or usn.casefold()
-            != (matching_user.global_name or "").strip().casefold()
+            or normalize_usn(usn).casefold()
+            != normalize_usn(matching_user.global_name or "").casefold()
         ):
             raise HTTPException(
                 status_code=422,
@@ -2429,7 +1259,10 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         summary = database.get_quiz_session(session_id)
         if summary is None or summary.guild_id != request.state.guild_id:
             raise HTTPException(status_code=404, detail="Quiz session not found.")
-        return _summary_detail(database.get_quiz_session_summary(session_id))
+        return _summary_detail(
+            database.get_quiz_session_summary(session_id),
+            database.get_quiz_session_absentees(session_id),
+        )
 
     @app.get("/api/sessions/{session_id}/export.xlsx")
     async def export_session(session_id: str, request: Request) -> Response:
@@ -2467,7 +1300,9 @@ async def _verify_current_guild_access(
             raise HTTPException(status_code=401, detail="Please sign in again.")
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.post(
+                response = await trace_external_request(
+                    "discord.oauth.refresh_token",
+                    client.post,
                     f"{DISCORD_API}/oauth2/token",
                     data={
                         "client_id": settings.discord_oauth_client_id,
@@ -2494,7 +1329,9 @@ async def _verify_current_guild_access(
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(
+            response = await trace_external_request(
+                "discord.oauth.list_guilds",
+                client.get,
                 f"{DISCORD_API}/users/@me/guilds",
                 headers={"Authorization": f"Bearer {auth_session.access_token}"},
             )
@@ -2571,7 +1408,9 @@ async def _verify_turnstile_token(settings: Settings, token: str) -> bool:
         )
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.post(
+            response = await trace_external_request(
+                "cloudflare.turnstile.verify",
+                client.post,
                 "https://challenges.cloudflare.com/turnstile/v0/siteverify",
                 data={
                     "secret": settings.turnstile_secret_key,
@@ -2600,7 +1439,9 @@ async def _get_guild_member(
     user_id: int,
     guild_id: int,
 ) -> dict[str, Any] | None:
-    response = await client.get(
+    response = await trace_external_request(
+        "discord.guild.member_lookup",
+        client.get,
         f"{DISCORD_API}/guilds/{guild_id}/members/{user_id}",
         headers={"Authorization": f"Bot {settings.token}"},
     )
@@ -2659,7 +1500,9 @@ async def _revoke_oauth_token(
 ) -> None:
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.post(
+            response = await trace_external_request(
+                "discord.oauth.revoke_token",
+                client.post,
                 f"{DISCORD_API}/oauth2/token/revoke",
                 data={
                     "client_id": client_id,
@@ -2691,7 +1534,10 @@ def _summary_overview(summary: QuizSessionSummary) -> dict[str, Any]:
     }
 
 
-def _summary_detail(summary: QuizSessionSummary) -> dict[str, Any]:
+def _summary_detail(
+    summary: QuizSessionSummary,
+    absentees: tuple[QuizSessionAbsentStudent, ...] = (),
+) -> dict[str, Any]:
     session = summary.session
     return {
         "session": {
@@ -2715,6 +1561,13 @@ def _summary_detail(summary: QuizSessionSummary) -> dict[str, Any]:
                 "name_matches_usn_format": participant.name_matches_usn_format,
             }
             for participant in summary.participants
+        ],
+        "not_attended": [
+            {
+                "display_name": student.display_name,
+                "usn": student.usn,
+            }
+            for student in absentees
         ],
     }
 

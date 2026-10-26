@@ -1,8 +1,11 @@
 """Authentication and authorization tests for the web dashboard."""
 
+import base64
+import json
 import os
 import tempfile
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -11,11 +14,13 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 from fastapi.testclient import TestClient
+from itsdangerous import TimestampSigner
 
 from quizcord_bot.config import Settings
 from quizcord_bot.database import (
     Database,
     QuizParticipant,
+    QuizSessionAbsentStudent,
     QuizSession,
     QuizSessionSummary,
     StudentQuizAnalytics,
@@ -25,6 +30,7 @@ from quizcord_bot.web import (
     _is_guild_admin,
     _is_guild_faculty,
     _oauth_failure_detail,
+    _render_admin_dashboard,
     _summary_detail,
     _student_analytics,
     create_dashboard_app,
@@ -127,6 +133,36 @@ class DashboardWebTests(unittest.TestCase):
             headers={"X-Real-IP": "203.0.113.11"},
         )
         self.assertEqual(other_client.status_code, 302)
+
+    def test_oauth_login_preserves_existing_dashboard_session(self) -> None:
+        signer = TimestampSigner(self.settings.dashboard_session_secret)
+        original_session = {
+            "dashboard_session": "existing-dashboard-session",
+            "selected_guild_id": "67890",
+        }
+        encoded_session = base64.b64encode(
+            json.dumps(original_session).encode("utf-8")
+        )
+        self.client.cookies.set(
+            "quizcord_dashboard",
+            signer.sign(encoded_session).decode("utf-8"),
+        )
+
+        response = self.client.get("/auth/login", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 302)
+        cookie_header = response.headers["set-cookie"]
+        cookie_value = cookie_header.split(";", 1)[0].split("=", 1)[1]
+        signed_payload = signer.unsign(cookie_value)
+        session_payload = json.loads(
+            base64.b64decode(signed_payload).decode("utf-8")
+        )
+        self.assertEqual(
+            session_payload["dashboard_session"],
+            "existing-dashboard-session",
+        )
+        self.assertEqual(session_payload["selected_guild_id"], "67890")
+        self.assertIn("oauth_state", session_payload)
 
     def test_general_page_requests_are_rate_limited(self) -> None:
         with patch("quizcord_bot.web.DEFAULT_REQUEST_RATE_LIMIT", (2, 60)):
@@ -251,14 +287,32 @@ class DashboardWebTests(unittest.TestCase):
         client_context = Mock()
         client_context.__aenter__ = AsyncMock(return_value=discord_client)
         client_context.__aexit__ = AsyncMock(return_value=False)
-        with patch(
-            "quizcord_bot.web.httpx.AsyncClient", return_value=client_context
+        with (
+            patch(
+                "quizcord_bot.web.httpx.AsyncClient",
+                return_value=client_context,
+            ),
+            patch(
+                "quizcord_bot.telemetry.sentry_sdk.start_span",
+                return_value=nullcontext(),
+            ) as start_span,
         ):
             callback = self.client.get(
                 f"/auth/callback?code=admin-login&state={state}",
                 follow_redirects=False,
             )
 
+        span_names = {
+            call.kwargs["name"] for call in start_span.call_args_list
+        }
+        self.assertTrue(
+            {
+                "discord.oauth.token_exchange",
+                "discord.oauth.current_user",
+                "discord.oauth.list_guilds",
+                "discord.guild.member_lookup",
+            }.issubset(span_names)
+        )
         self.assertEqual(callback.status_code, 302)
         self.assertEqual(callback.headers["location"], "/faculty/password")
         self.assertEqual(self.client.get("/faculty/password").status_code, 200)
@@ -269,16 +323,38 @@ class DashboardWebTests(unittest.TestCase):
         )
         self.assertEqual(self.client.get("/", follow_redirects=False).status_code, 200)
         self.assertEqual(self.client.get("/api/sessions").status_code, 200)
+        with patch.object(self.database, "get_quiz_session_summaries", return_value=()) as summaries:
+            page = self.client.get("/api/sessions?guild_id=67890&offset=50")
+            self.assertEqual(page.status_code, 200)
+            summaries.assert_called_once_with(67890, limit=50, offset=50)
+        self.assertEqual(self.client.get("/api/sessions?offset=-1").status_code, 422)
         available_guilds = self.client.get("/api/guilds")
         self.assertEqual(
             [guild["id"] for guild in available_guilds.json()],
             ["98765", "67890"],
         )
+        guild_access = {
+            guild["id"]: (guild["role"], guild["is_faculty"])
+            for guild in available_guilds.json()
+        }
+        self.assertEqual(guild_access["67890"], ("admin", True))
+        self.assertEqual(guild_access["98765"], ("admin", False))
+        self.assertIs(guild_access["67890"][1], True)
+        self.assertIs(guild_access["98765"][1], False)
         selected = self.client.post(
             "/api/guilds/select", json={"guild_id": "98765"}
         )
         self.assertEqual(selected.status_code, 200)
         self.assertEqual(self.client.get("/api/me").json()["guild_id"], "98765")
+        missing_faculty_role = self.client.post(
+            "/api/admin/faculty-passwords/1550724138765783102"
+        )
+        self.assertEqual(missing_faculty_role.status_code, 409)
+        self.assertEqual(
+            missing_faculty_role.json()["detail"],
+            "Set this server's faculty role before provisioning passwords "
+            "with /set_faculty_role.",
+        )
         rejected_guild = self.client.post(
             "/api/guilds/select", json={"guild_id": "11111"}
         )
@@ -433,8 +509,27 @@ class DashboardWebTests(unittest.TestCase):
             password_page.text,
         )
         self.assertIn(
+            'let mustChange=false,turnstileWidgetId=null,captchaToken="",verifiedTemporaryPassword="";',
+            password_page.text,
+        )
+        self.assertIn("password.readOnly=true", password_page.text)
+        self.assertIn(
+            "current_password:verifiedTemporaryPassword", password_page.text
+        )
+        self.assertIn(
             "initializeGuildSelector().then(showCaptcha).catch",
             password_page.text,
+        )
+        self.assertIn(
+            '"expired-callback":()=>{if(mustChange)return;captchaToken="";',
+            password_page.text,
+        )
+        self.assertIn(
+            '"error-callback":()=>{if(mustChange)return;captchaToken="";',
+            password_page.text,
+        )
+        self.assertIn(
+            '.filter(guild=>guild.is_faculty)', password_page.text
         )
         self.assertEqual(self.client.get("/faculty").status_code, 200)
         self.assertEqual(
@@ -588,10 +683,53 @@ class DashboardWebTests(unittest.TestCase):
         self.assertIn("Ask them to update", rejected_add.json()["detail"])
         added = self.client.post("/api/faculty/students/4GM22CS001")
         self.assertEqual(added.status_code, 204)
+        # Explicit guild selection takes precedence over a stale shared cookie.
+        signer = TimestampSigner(self.settings.dashboard_session_secret)
+        signed = self.client.cookies.get("quizcord_dashboard")
+        payload = json.loads(base64.b64decode(signer.unsign(signed)))
+        payload["selected_guild_id"] = "99999"
+        stale = signer.sign(base64.b64encode(json.dumps(payload).encode())).decode()
+        self.client.cookies.clear()
+        self.client.cookies.set("quizcord_dashboard", stale)
+        explicit = self.client.get("/api/faculty/students?guild_id=67890")
+        self.assertEqual(explicit.status_code, 200)
+        self.assertEqual([row["usn"] for row in explicit.json()], ["4GM22CS001"])
+        self.assertEqual(
+            self.client.delete("/api/faculty/students/4GM22CS001?guild_id=67890").status_code,
+            204,
+        )
+        self.assertEqual(
+            self.client.post("/api/faculty/students/4GM22CS001?guild_id=67890").status_code,
+            204,
+        )
+        self.database.register_guild(99999, "Other server", None)
+        for method, endpoint in (
+            ("get", "/api/faculty/students"),
+            ("get", "/api/faculty/candidates"),
+            ("post", "/api/faculty/students/4GM22CS001"),
+            ("delete", "/api/faculty/students/4GM22CS001"),
+        ):
+            with self.subTest(method=method, endpoint=endpoint):
+                response = getattr(self.client, method)(endpoint + "?guild_id=99999")
+                self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.database.get_faculty_student_usns(67890, 123456), ("4GM22CS001",))
+        self.client.post("/api/guilds/select", json={"guild_id": "67890"})
         students = self.client.get("/api/faculty/students").json()
         self.assertEqual([row["usn"] for row in students], ["4GM22CS001"])
+        student_page = self.client.get("/faculty/students/4GM22CS001")
+        self.assertEqual(student_page.status_code, 200)
+        self.assertIn("Quizcord Faculty", student_page.text)
+        self.assertIn('href="/faculty">Back to students', student_page.text)
+        self.assertIn("/static/faculty-student.js", student_page.text)
+        self.assertNotIn('id="faculty-password-link"', student_page.text)
+        self.assertNotIn("/admin/faculty-passwords", student_page.text)
+        self.assertNotIn('id="dashboard-tabs"', student_page.text)
         self.assertEqual(
             self.client.get("/api/faculty/students/NOTASSIGNED").status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.get("/faculty/students/NOTASSIGNED").status_code,
             404,
         )
         self.assertEqual(self.client.get("/api/sessions").status_code, 403)
@@ -603,6 +741,210 @@ class DashboardWebTests(unittest.TestCase):
         self.assertEqual(response.headers["location"], "/login")
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertEqual(response.headers["x-frame-options"], "DENY")
+
+    def test_dashboard_static_assets_are_served(self) -> None:
+        for path, content_type, expected in (
+            (
+                "/static/dashboard-theme.css",
+                "text/css",
+                "::view-transition-new(root)",
+            ),
+            (
+                "/static/dashboard-theme.js",
+                "javascript",
+                "circle(0px at",
+            ),
+            (
+                "/static/dashboard-theme.js",
+                "javascript",
+                "document.startViewTransition",
+            ),
+            (
+                "/static/admin-dashboard.css",
+                "text/css",
+                ".dashboard-tabs",
+            ),
+            (
+                "/static/admin-dashboard.css",
+                "text/css",
+                ".directory-search-field",
+            ),
+            (
+                "/static/admin-dashboard.css",
+                "text/css",
+                ".session-search-field",
+            ),
+            (
+                "/static/admin-dashboard.css",
+                "text/css",
+                "[hidden] { display: none !important; }",
+            ),
+            (
+                "/static/admin-dashboard.css",
+                "text/css",
+                ".attendance-toggle",
+            ),
+            (
+                "/static/admin-dashboard.css",
+                "text/css",
+                "max-height: calc(100dvh - 40px)",
+            ),
+            (
+                "/static/admin-dashboard.css",
+                "text/css",
+                "overflow-y: auto",
+            ),
+            (
+                "/static/admin-dashboard.css",
+                "text/css",
+                ".ring .value",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "Students who attended",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "No students match your search.",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "Show not attended (",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "student-page-heading",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "sessionHeading.hidden=true",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "Search names or USN",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "View analytics",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                'else{pendingDirectoryUsers=null;renderUsers(users);}',
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                "maskAllText: true",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                'replay.stop({ flush: false })',
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                "maxReplayDuration: 900000",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                "startRevision !== consentRevision",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                'tracesSampler: () => (!declinedInMemory && readChoice() === "accepted" ? 0.1 : 0)',
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                "urlQueryParams: false",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                "httpHeaders: []",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                "httpBodies: []",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                "sdkPromise = undefined",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                "beforeSendSpan: scrubSpan",
+            ),
+            (
+                "/static/cookie-preferences.js",
+                "javascript",
+                'if (/url|query/i.test(key))',
+            ),
+            (
+                "/static/faculty-dashboard.css",
+                "text/css",
+                ".candidate-warning",
+            ),
+            (
+                "/static/faculty-student.js",
+                "javascript",
+                "/api/faculty/students/",
+            ),
+            (
+                "/static/icons/moon.svg",
+                "image/svg+xml",
+                "<svg",
+            ),
+            (
+                "/static/icons/users.svg",
+                "image/svg+xml",
+                "<svg",
+            ),
+            (
+                "/static/faculty-dashboard.js",
+                "javascript",
+                'guild.is_faculty||guild.role==="admin"',
+            ),
+            (
+                "/static/faculty-dashboard.js",
+                "javascript",
+                'if(!query){candidates.replaceChildren(el("div","empty","Enter a USN to find students."));return;}',
+            ),
+            (
+                "/static/faculty-dashboard.js",
+                "javascript",
+                "if(query!==search.value.trim())return;",
+            ),
+            (
+                "/static/faculty-dashboard.js",
+                "javascript",
+                "loadAssigned();}).catch",
+            ),
+            (
+                "/static/faculty-student.js",
+                "javascript",
+                "new Date(year, month - 1, day)",
+            ),
+        ):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(content_type, response.headers["content-type"])
+                self.assertIn(expected, response.text)
 
     def test_health_endpoint_does_not_require_sign_in(self) -> None:
         response = self.client.get("/health")
@@ -646,9 +988,51 @@ class DashboardWebTests(unittest.TestCase):
         self.assertIn("request bodies", privacy.text)
         self.assertIn("generic severity labels", privacy.text)
         self.assertIn("route templates", privacy.text)
+        self.assertIn("Cookies and optional analytics", privacy.text)
+        self.assertIn("Cookie settings", privacy.text)
+        self.assertIn("quizcord_analytics_consent", privacy.text)
+        self.assertIn("All page text and input values are masked", privacy.text)
+        self.assertIn(
+            "Faculty pages and individual student analytics pages are excluded",
+            privacy.text,
+        )
         self.assertEqual(terms.status_code, 200)
         self.assertIn("Terms of Service", terms.text)
         self.assertIn('href="/privacy"', terms.text)
+
+    def test_session_replay_html_is_enabled_only_for_admin_dashboard(self) -> None:
+        enabled = _render_admin_dashboard(
+            "https://public@example.ingest.sentry.io/123", True
+        )
+        disabled = _render_admin_dashboard(
+            "https://public@example.ingest.sentry.io/123", False
+        )
+
+        self.assertIn('data-session-replay-enabled="true"', enabled)
+        self.assertIn("Cookie preferences", enabled)
+        self.assertIn("cookie-analytics-enabled", enabled)
+        self.assertIn("Optional analytics and performance", enabled)
+        self.assertIn(
+            'data-session-replay-dsn="https://public@example.ingest.sentry.io/123"',
+            enabled,
+        )
+        self.assertIn('data-session-replay-enabled="false"', disabled)
+        self.assertIn('data-session-replay-dsn=""', disabled)
+
+    def test_sentry_browser_csp_allows_only_configured_ingest_origin(self) -> None:
+        settings = replace(
+            self.settings,
+            sentry_dsn="https://public@example.ingest.sentry.io/123",
+        )
+        app = create_dashboard_app(settings, self.database)
+
+        with TestClient(app, base_url="https://testserver") as client:
+            response = client.get("/health")
+
+        policy = response.headers["Content-Security-Policy"]
+        self.assertIn("https://browser.sentry-cdn.com", policy)
+        self.assertIn("https://example.ingest.sentry.io", policy)
+        self.assertIn("worker-src 'self' blob:", policy)
 
     def test_student_analytics_endpoint_requires_discord_sign_in(self) -> None:
         response = self.client.get("/api/students/ABC123")
@@ -751,11 +1135,18 @@ class DashboardWebTests(unittest.TestCase):
             question_count=1,
         )
 
-        detail = _summary_detail(summary)
+        detail = _summary_detail(
+            summary,
+            (QuizSessionAbsentStudent("Student Two", "4GM22CS002"),),
+        )
 
         self.assertEqual(detail["participants"][0]["usn"], "ABC123")
         self.assertFalse(detail["participants"][0]["name_matches_usn_format"])
         self.assertNotIn("discord_id", detail["participants"][0])
+        self.assertEqual(
+            detail["not_attended"],
+            [{"display_name": "Student Two", "usn": "4GM22CS002"}],
+        )
 
 
 if __name__ == "__main__":

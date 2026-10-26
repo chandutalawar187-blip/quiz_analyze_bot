@@ -1,0 +1,171 @@
+name: Request CodeRabbit review
+
+on:
+  # Use the trusted base context for writes; this workflow never runs PR code.
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+  issue_comment:
+    types: [created]
+  # Scheduled runs use the trusted default branch and can access the token for
+  # notices on fork PRs. Never check out or execute pull-request code here.
+  schedule:
+    - cron: "*/10 * * * *"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  request-review:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    env:
+      CODERABBIT_REVIEW_TOKEN: ${{ secrets.CODERABBIT_REVIEW_TOKEN }}
+    steps:
+      - name: Require a human-authenticated review token
+        if: env.CODERABBIT_REVIEW_TOKEN == ''
+        run: |
+          echo "::error::Add the CODERABBIT_REVIEW_TOKEN repository secret using a fine-grained token from an authorized human account."
+          exit 1
+      - name: Request a full review for the latest commit
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.CODERABBIT_REVIEW_TOKEN }}
+          script: |
+            const pullNumber = context.payload.pull_request.number;
+            const { data: pull } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: pullNumber,
+            });
+            if (pull.state !== "open") {
+              core.info(`PR #${pullNumber} is not open; skipping review request.`);
+              return;
+            }
+
+            const body = [
+              "@coderabbitai full review",
+              "",
+              `<!-- coderabbit-review sha=${pull.head.sha} retry=0 -->`,
+            ].join("\n");
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: pullNumber,
+              body,
+            });
+            core.info(`Requested a full review for ${pull.head.sha}.`);
+
+  retry-rate-limited-review:
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+       (github.event.comment.user.login == 'coderabbitai' ||
+        github.event.comment.user.login == 'coderabbitai[bot]') &&
+       contains(github.event.comment.body, 'included review limit is currently reached'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CODERABBIT_REVIEW_TOKEN: ${{ secrets.CODERABBIT_REVIEW_TOKEN }}
+    concurrency:
+      group: coderabbit-review-retry
+      cancel-in-progress: false
+    steps:
+      - name: Require a human-authenticated review token
+        if: env.CODERABBIT_REVIEW_TOKEN == ''
+        run: |
+          echo "::error::Add the CODERABBIT_REVIEW_TOKEN repository secret using a fine-grained token from an authorized human account."
+          exit 1
+      - name: Retry reviews whose included review limit has expired
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.CODERABBIT_REVIEW_TOKEN }}
+          script: |
+            const { data: requester } = await github.rest.users.getAuthenticated();
+            const pulls = context.eventName === "schedule"
+              ? await github.paginate(github.rest.pulls.list, {
+                  ...context.repo, state: "open", per_page: 100,
+                })
+              : [(await github.rest.pulls.get({
+                  ...context.repo, pull_number: context.payload.issue.number,
+                })).data];
+            const commentTime = (item) => Date.parse(item.created_at ?? item.submitted_at);
+            const loadComments = (pullNumber) => Promise.all([
+              github.paginate(github.rest.issues.listComments, {
+                ...context.repo, issue_number: pullNumber, per_page: 100,
+              }),
+              github.paginate(github.rest.pulls.listReviewComments, {
+                ...context.repo, pull_number: pullNumber, per_page: 100,
+              }),
+              github.paginate(github.rest.pulls.listReviews, {
+                ...context.repo, pull_number: pullNumber, per_page: 100,
+              }),
+            ]).then((groups) => groups.flat());
+
+            for (const pull of pulls) {
+              if (pull.state !== "open") continue;
+              const marker = new RegExp(
+                `<!-- coderabbit-review sha=${pull.head.sha} retry=(\\d+) -->`
+              );
+              const reviewRequests = (comments) => comments
+                .filter((item) => item.user?.id === requester.id)
+                .map((item) => ({ item, match: item.body?.match(marker) }))
+                .filter(({ match }) => match)
+                .sort((left, right) => commentTime(left.item) - commentTime(right.item));
+              const comments = await loadComments(pull.number);
+              const latestRequest = reviewRequests(comments).at(-1);
+              if (!latestRequest) continue;
+              const comment = comments
+                .filter((item) =>
+                  ["coderabbitai", "coderabbitai[bot]"].includes(item.user?.login) &&
+                  item.body?.includes("included review limit is currently reached") &&
+                  commentTime(item) > commentTime(latestRequest.item))
+                .sort((left, right) => commentTime(left) - commentTime(right))
+                .at(-1);
+              if (!comment) continue;
+
+              const duration = comment.body.match(
+                /next included review will be available in\s+(?:(\d+)\s*hours?)?(?:\s*(?:and\s*)?(\d+)\s*minutes?)?(?:\s*(?:and\s*)?(\d+)\s*seconds?)?/i
+              );
+              if (!duration || !duration.slice(1).some((part) => part !== undefined)) {
+                core.warning(`Could not parse CodeRabbit's availability time on PR #${pull.number}.`);
+                continue;
+              }
+              const waitMs = (
+                Number(duration[1] || 0) * 3600 +
+                Number(duration[2] || 0) * 60 +
+                Number(duration[3] || 0)
+              ) * 1000 + 60_000;
+              // Polling avoids sleeping runners and retries on the first scheduled
+              // run after the stated cooldown (plus a one-minute buffer).
+              if (Date.now() < commentTime(comment) + waitMs) continue;
+              const currentAttempt = Number(latestRequest.match[1]);
+              const maxRetries = 3;
+              if (currentAttempt >= maxRetries) {
+                core.warning(`Reached the ${maxRetries}-retry limit for commit ${pull.head.sha}.`);
+                continue;
+              }
+
+              const { data: refreshedPull } = await github.rest.pulls.get({
+                ...context.repo, pull_number: pull.number,
+              });
+              if (refreshedPull.state !== "open" || refreshedPull.head.sha !== pull.head.sha) {
+                core.info(`PR #${pull.number} closed or changed; skipping stale retry.`);
+                continue;
+              }
+              const refreshedRequest = reviewRequests(await loadComments(pull.number)).at(-1);
+              if (refreshedRequest?.item.id !== latestRequest.item.id ||
+                  refreshedRequest?.match[1] !== latestRequest.match[1]) {
+                core.info(`A newer review request exists on PR #${pull.number}; skipping duplicate retry.`);
+                continue;
+              }
+              const nextAttempt = currentAttempt + 1;
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: pull.number,
+                body: [
+                  "@coderabbitai full review",
+                  "",
+                  `<!-- coderabbit-review sha=${pull.head.sha} retry=${nextAttempt} -->`,
+                ].join("\n"),
+              });
+              core.info(`Posted CodeRabbit retry ${nextAttempt} for ${pull.head.sha}.`);
+            }

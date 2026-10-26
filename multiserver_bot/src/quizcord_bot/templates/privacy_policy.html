@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Privacy Policy · Quizcord Analytics</title>
+  <style>
+    :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#e7edf8;background:#0b1020}
+    *{box-sizing:border-box}body{margin:0;line-height:1.7}main{max-width:820px;margin:48px auto;padding:0 24px 48px}
+    a{color:#a9baff}h1{line-height:1.2}h2{margin-top:32px;font-size:19px}p,li{color:#c1cbe0}
+    .updated{color:#91a0ba;font-size:13px}.card{padding:28px;border:1px solid #26334e;border-radius:14px;background:#11182b}
+  </style>
+</head>
+<body><main><div class="card">
+  <p><a href="/">Quizcord Analytics</a></p>
+  <h1>Privacy Policy</h1>
+  <p class="updated">Effective date: October 18, 2026</p>
+  <p>This policy explains how the Quizcord Analytics Discord application and dashboard (the “Service”) process information when a Discord server installs or uses the Service.</p>
+
+  <h2>Information processed</h2>
+  <ul>
+    <li><strong>Server and member information:</strong> Discord server and channel IDs, server names, member Discord IDs, account usernames, display names, and server nicknames. The bot synchronizes human member information to provide server-specific dashboards and student matching.</li>
+    <li><strong>Student mappings:</strong> identifiers such as USNs, student names, and optional Quizcord leaderboard usernames that a server administrator or authorized faculty member enters or manages.</li>
+    <li><strong>Quiz analytics:</strong> Quizcord quiz IDs, start/completion times, leaderboard participant identifiers, ranks and points, and attendance-related records. Points are Quizcord leaderboard points, not a verified count of correct answers.</li>
+    <li><strong>Faculty access data:</strong> faculty Discord IDs, server role settings, student assignments, and salted password hashes with security counters. App passwords are not stored in plaintext.</li>
+    <li><strong>Dashboard sign-in data:</strong> Discord identity and server information requested through OAuth to authenticate users and check their access. The Service does not request Discord account passwords.</li>
+    <li><strong>Security checks:</strong> faculty password sign-in uses Cloudflare Turnstile, which may process technical and device information under Cloudflare’s own privacy terms.</li>
+  </ul>
+
+  <h2>How information is used</h2>
+  <p>Information is used to collect and display server-specific quiz analytics, match leaderboard participants to student records, provide faculty and administrator access, deliver relevant bot responses, and protect the Service from abuse. Server records are scoped so dashboard users can access only servers where their Discord permissions or configured faculty role authorize them.</p>
+
+  <h2>Storage, service providers, and sharing</h2>
+  <p>The Service database is hosted on Railway and stores records separately by Discord server. Discord provides the bot, OAuth, and server data APIs. Cloudflare provides the Turnstile security challenge. If Sentry monitoring is enabled by the Service operator, Sentry receives error reports, sampled performance traces and profiles, sanitized warning-and-higher logs, and dashboard request-count and duration metrics. This may include technical runtime information, exception messages and stack traces, endpoint operation names, and timing data. The Service removes HTTP request details, request bodies, and breadcrumbs from server-side error events; log messages are replaced with generic severity labels, and log attributes are limited to safe code/logger metadata. Metrics use route templates rather than concrete URLs. Exception messages or stack traces may still contain information produced by the application.</p>
+
+  <h2>Cookies and optional analytics</h2>
+  <p>The dashboard uses a required, secure, signed <code>quizcord_dashboard</code> cookie to maintain sign-in and protect access. This cookie is necessary for the Service to work. On the admin quiz-session dashboard, administrators can use <strong>Cookie settings</strong> to allow or reject optional analytics and performance measurement. The choice is stored in a first-party <code>quizcord_analytics_consent</code> cookie for up to 180 days; it records only the preference. Optional analytics is off unless accepted and is not used on sign-in, faculty, or individual student analytics pages.</p>
+  <p>If accepted, the browser loads Sentry's analytics SDK for the admin quiz-session dashboard. It sends browser performance traces sampled at 10% and may collect page structure, interaction and timing events, and basic network metadata such as request URLs, methods, status codes, and transfer sizes to help diagnose slow or broken behavior. All page text and input values are masked, media is blocked, request/response bodies and headers are not captured, and each interaction recording is limited to 15 minutes. Faculty pages and individual student analytics pages are excluded. Administrators can change their choice at any time in <strong>Cookie settings</strong>. Turning analytics off stops recording and discards unsent interaction data, but cannot retract data already sent to Sentry. Retention is controlled by the Service operator's Sentry project settings.</p>
+
+  <p>These providers process information as needed to deliver their services and are subject to their own terms and privacy policies. The Service operator does not sell personal information.</p>
+
+  <h2>Retention and deletion</h2>
+  <p>Server analytics and configuration are retained in the Service database. When the bot leaves a server, that server is marked inactive; this does <strong>not</strong> automatically delete its stored records. A server owner may request deletion by emailing <a href="mailto:chandutalawar187@gmail.com">chandutalawar187@gmail.com</a> from an address they control and identifying the Discord server. Requests will be reviewed and handled by the Service operator. Some information may remain where required for security, legal, or operational reasons.</p>
+
+  <h2>Security</h2>
+  <p>The Service uses access checks, HTTPS for the hosted dashboard, password hashing, and request limits. No internet service can guarantee absolute security. Do not enter information that your organization is not authorized to share with this Service.</p>
+
+  <h2>Children and sensitive information</h2>
+  <p>The Service is intended for server administrators, faculty, and quiz participants in communities that choose to install it. Do not use it to store highly sensitive personal information. Server owners are responsible for ensuring they have appropriate authority and notices before entering student information.</p>
+
+  <h2>Changes and contact</h2>
+  <p>This policy may be updated as the Service changes. Questions or requests about information handled by the Service can be sent to <a href="mailto:chandutalawar187@gmail.com">chandutalawar187@gmail.com</a>.</p>
+  <p><a href="/terms">Terms of Service</a></p>
+</div></main></body></html>

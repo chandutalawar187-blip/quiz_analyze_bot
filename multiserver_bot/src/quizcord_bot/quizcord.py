@@ -17,8 +17,8 @@ QUIZ_ROW_PATTERNS = (
         r"(?:—|–|-|:)\s*(?:\*\*)?(?P<score>\d+)(?:\*\*)?(?:\s+.*)?$"
     ),
     re.compile(
-        r"(?<!\S)#?(?P<rank>\d+)\.\s*(?P<username>.+?)"
-        r".*?(?:\*\*)?(?P<score>\d+)(?:\*\*)?\s*$"
+        r"(?<!\S)#?(?P<rank>\d+)\.\s*(?P<username>.+?)\s+"
+        r"(?:\*\*)?(?P<score>\d+)(?:\*\*)?\s*$"
     ),
 )
 
@@ -47,12 +47,14 @@ def parse_quiz_rows(payload: str) -> list[tuple[str, str, str]]:
         for pattern in QUIZ_ROW_PATTERNS:
             match = pattern.search(line.strip())
             if match:
-                rows.append(
-                    (
-                        match.group("rank"),
-                        match.group("username").strip().strip("*_`"),
-                        match.group("score"),
-                    )
+                usernames = (
+                    username.strip().strip("*_`")
+                    for username in re.split(r",\s*(?=@|<@)", match.group("username"))
+                )
+                rows.extend(
+                    (match.group("rank"), username, match.group("score"))
+                    for username in usernames
+                    if username
                 )
                 if len(rows) > MAX_LEADERBOARD_ROWS:
                     raise ValueError(
@@ -120,16 +122,6 @@ def is_quiz_start_message(message: discord.Message) -> bool:
     return bool(
         re.search(r"\bquestion\s*#?\s*1\b", content, re.IGNORECASE)
         or re.search(r"\bquiz\s+(?:has\s+)?started\b", content, re.IGNORECASE)
-    )
-
-
-def is_first_question_message(message: discord.Message) -> bool:
-    sections = [message.content or ""]
-    for embed in message.embeds:
-        sections.extend((embed.title or "", embed.description or ""))
-        sections.extend(field.name + "\n" + field.value for field in embed.fields)
-    return bool(
-        re.search(r"\bquestion\s*#?\s*1\b", "\n".join(sections), re.IGNORECASE)
     )
 
 

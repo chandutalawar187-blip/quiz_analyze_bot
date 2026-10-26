@@ -36,10 +36,39 @@
 │       ├── bot.py
 │       ├── config.py
 │       ├── database.py
+│       ├── static/
+│       │   ├── admin-dashboard.css
+│       │   ├── admin-dashboard.js
+│       │   ├── dashboard-theme.css
+│       │   ├── dashboard-theme.js
+│       │   ├── faculty-dashboard.css
+│       │   ├── faculty-dashboard.js
+│       │   └── icons/
+│       │       ├── *.svg (selected Tabler Icons)
+│       │       └── LICENSE
+│       ├── templates/
+│       │   ├── admin_dashboard.html
+│       │   ├── admin_login.html
+│       │   ├── faculty_dashboard.html
+│       │   ├── faculty_login.html
+│       │   ├── faculty_password.html
+│       │   ├── faculty_password_admin.html
+│       │   ├── privacy_policy.html
+│       │   └── terms_of_service.html
+│       ├── telemetry.py
 │       ├── quizcord.py
-│       └── views.py
+│       ├── views.py
+│       └── web.py
 └── tests/
 ```
+
+Dashboard markup lives in `templates/`; browser assets live in `static/`.
+Shared theme tokens and the theme toggle are maintained separately from each
+dashboard's page-specific styles and behavior. `web.py` contains the FastAPI
+routes, authentication, and data orchestration.
+Dashboard illustrations use locally served outline SVGs from the
+[Tabler Icons](https://github.com/tabler/tabler-icons) public archive; their
+MIT license is included with the assets.
 
 The existing `fetch_users.py` remains as a small compatibility launcher.
 
@@ -160,6 +189,15 @@ templates, HTTP methods, status codes, and request durations. Exception messages
 and stack traces are retained for debugging and may still contain information
 emitted by the application. The privacy notice at `/privacy` describes this
 processing.
+
+Optional browser analytics reuses this DSN and is available only on the admin
+quiz-session dashboard. Enable Replay for the Sentry project in its Client Keys
+settings. The browser SDK is not loaded until an administrator enables optional
+analytics in **Cookie settings**; text and inputs are masked, media is blocked,
+request and response bodies and headers are excluded, and each interaction
+recording is limited to 15 minutes. Student analytics, faculty, and sign-in
+pages are excluded. Administrators can withdraw consent in **Cookie settings**;
+the dashboard privacy notice describes the data collected.
 
 ### Faculty dashboard
 
@@ -416,6 +454,10 @@ continues to use its private Discord dashboard.
   accepts `YYYY-MM-DD` for a date override; if the start was not tracked and
   no override is provided, the import timestamp is saved.
 - `/export_analytics`: Download the private aggregate Excel workbook (`.xlsx`).
+- `/clear_quiz_history`: Permanently delete saved quiz sessions, leaderboard
+  results, and analytics for the current server after entering `DELETE`.
+  Student mappings, faculty assignments/passwords, and other servers' data are
+  preserved.
 - Detect the Quizcord question-one/start signal and privately notify the server
   owner with the web dashboard link when configured. If no start signal is
   visible, monitoring begins at the first leaderboard. The same leaderboard
@@ -453,10 +495,14 @@ continues to use its private Discord dashboard.
 - Student Discord global display names are checked against `4GM` + 2 digits + `CS` + 3
   digits or `U` + 2 digits + `E` + 2 digits + `CS` + 3 digits. A mismatch
   never blocks quiz results: the dashboard shows "Name not updated to USN".
-  For a mapped student, the bot sends one private reminder per quiz
-  asking them to set their Discord global display name to their saved USN;
-  their unique account username does not need to change. The reminder is
-  skipped when Discord DMs are unavailable.
+  After a quiz completes, the bot can DM all human server members whose current
+  global display name does not match either format, including members who did
+  not attend. Server owners, administrators/moderators, and the configured
+  faculty role are excluded. Each member is reminded at most once per quiz;
+  `/remind_usn` lets faculty and server maintainers manually process reminders
+  for the latest completed quiz in that channel. Failed DMs can be retried.
+  The message asks members to update their global display name, not their
+  unique account username.
 - The first usable leaderboard revision and later edits are deduplicated by
   message/revision. Unknown USNs are retained in the quiz roster; known
   students are associated internally through Discord account username, server

@@ -4,13 +4,14 @@ import sqlite3
 import re
 import hashlib
 import hmac
+import logging
 import secrets
 import unicodedata
 import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 import time
@@ -23,15 +24,26 @@ POINTS_PATTERN = re.compile(r"^\s*(?P<points>\d+)(?:\s+Points?)?\s*$", re.IGNORE
 APP_PASSWORD_HASH_ITERATIONS = 310_000
 APP_PASSWORD_MAX_ATTEMPTS = 5
 APP_PASSWORD_LOCK_SECONDS = 900
+DISCORD_EPOCH_MILLISECONDS = 1_420_070_400_000
 USER_MENTION_PATTERN = re.compile(r"^<@!?(\d+)>$")
 USER_MENTION_IDS_PATTERN = re.compile(r"<@!?(\d+)>")
 USN_FORMAT_PATTERN = re.compile(
     r"(?:4GM\d{2}CS\d{3}|U\d{2}E\d{2}CS\d{3})", re.IGNORECASE
 )
+LOGGER = logging.getLogger("quizcord_analytics.database")
+
+
+def normalize_usn(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    return "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) != "Cf"
+    )
 
 
 def matches_usn_format(value: str) -> bool:
-    return bool(USN_FORMAT_PATTERN.fullmatch(value.strip()))
+    return bool(USN_FORMAT_PATTERN.fullmatch(normalize_usn(value)))
 
 
 def normalize_member_alias(value: str) -> str:
@@ -116,6 +128,12 @@ class DashboardUser:
     name_matches_usn_format: bool
 
 
+@dataclass(frozen=True)
+class QuizSessionAbsentStudent:
+    display_name: str
+    usn: str | None
+
+
 @dataclass
 class _StudentAggregate:
     discord_id: str
@@ -150,6 +168,7 @@ class QuizParticipant:
     discord_id: str | None
     eligible: bool = True
     name_matches_usn_format: bool | None = None
+    global_name_matches_usn_format: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -477,6 +496,14 @@ class Database:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS quiz_session_aliases (
+                    alias_session_id TEXT PRIMARY KEY,
+                    canonical_session_id TEXT NOT NULL
+                )
+                """
+            )
             participant_columns = {
                 row[1]
                 for row in connection.execute(
@@ -488,12 +515,324 @@ class Database:
                     "ALTER TABLE quiz_session_participants "
                     "ADD COLUMN eligible INTEGER NOT NULL DEFAULT 1"
                 )
+            self._merge_same_day_quiz_sessions(connection)
             self._reconcile_composite_mention_participants(connection)
             connection.execute(
                 """
                 DELETE FROM processed_quizcord_messages
                 WHERE processed_at < datetime('now', '-30 days')
                 """
+            )
+
+    @staticmethod
+    def _merge_same_day_quiz_sessions(
+        connection: sqlite3.Connection,
+    ) -> None:
+        groups = connection.execute(
+            """
+            SELECT guild_id, channel_id, substr(started_at, 1, 10) AS quiz_day
+            FROM quiz_sessions
+            WHERE status != 'merged'
+            GROUP BY guild_id, channel_id, quiz_day
+            HAVING COUNT(*) > 1
+            """
+        ).fetchall()
+        for guild_id, channel_id, quiz_day in groups:
+            sessions = connection.execute(
+                """
+                SELECT session_id, status, question_count, started_at,
+                       completed_at, quizcord_quiz_id, admin_user_id,
+                       admin_dm_channel_id, admin_dm_message_id,
+                       eligible_student_count,
+                       COALESCE(
+                           (SELECT MAX(CAST(message_id AS INTEGER))
+                            FROM quiz_session_updates
+                            WHERE session_id = quiz_sessions.session_id),
+                           0
+                       ) AS latest_message_id
+                FROM quiz_sessions
+                WHERE guild_id = ? AND channel_id = ?
+                  AND substr(started_at, 1, 10) = ?
+                  AND status != 'merged'
+                ORDER BY started_at, session_id
+                """,
+                (guild_id, channel_id, quiz_day),
+            ).fetchall()
+            quiz_ids = {
+                str(row[5]) for row in sessions if row[5] is not None
+            }
+            if len(quiz_ids) > 1:
+                LOGGER.warning(
+                    "Keeping separate quiz sessions for guild %s, channel %s "
+                    "on %s because they have conflicting Quizcord IDs: %s.",
+                    guild_id,
+                    channel_id,
+                    quiz_day,
+                    sorted(quiz_ids),
+                )
+                continue
+            if (
+                len({str(row[1]) for row in sessions}) != 1
+                or any(row[1] == "completed" for row in sessions)
+            ):
+                LOGGER.warning(
+                    "Keeping separate quiz sessions for guild %s, channel %s "
+                    "on %s because their completion states differ or are "
+                    "already completed.",
+                    guild_id,
+                    channel_id,
+                    quiz_day,
+                )
+                continue
+            session_ids = [str(row[0]) for row in sessions]
+            message_rows = connection.execute(
+                """
+                SELECT u.session_id, u.message_id
+                FROM quiz_session_updates AS u
+                JOIN quiz_sessions AS s ON s.session_id = u.session_id
+                WHERE s.guild_id = ? AND s.channel_id = ?
+                  AND substr(s.started_at, 1, 10) = ?
+                  AND s.status != 'merged'
+                """,
+                (guild_id, channel_id, quiz_day),
+            ).fetchall()
+            message_ids_by_session = {
+                session_id: set() for session_id in session_ids
+            }
+            for session_id, message_id in message_rows:
+                message_ids_by_session[str(session_id)].add(str(message_id))
+            session_message_sets = list(message_ids_by_session.values())
+            if (
+                not session_message_sets[0]
+                or any(
+                    message_ids != session_message_sets[0]
+                    for message_ids in session_message_sets[1:]
+                )
+            ):
+                LOGGER.warning(
+                    "Keeping separate quiz sessions for guild %s, channel %s "
+                    "on %s because their leaderboard message histories differ.",
+                    guild_id,
+                    channel_id,
+                    quiz_day,
+                )
+                continue
+            analytics_ids = set(session_ids) | quiz_ids
+            placeholders = ",".join("?" for _ in analytics_ids)
+            existing_analytics = connection.execute(
+                f"""
+                SELECT 1 FROM quiz_analytics
+                WHERE guild_id = ? AND quiz_id IN ({placeholders})
+                LIMIT 1
+                """,
+                (str(guild_id), *sorted(analytics_ids)),
+            ).fetchone()
+            if existing_analytics:
+                LOGGER.warning(
+                    "Keeping separate quiz sessions for guild %s, channel %s "
+                    "on %s because analytics rows already exist.",
+                    guild_id,
+                    channel_id,
+                    quiz_day,
+                )
+                continue
+
+            identified_sessions = [
+                row for row in sessions if row[5] is not None
+            ]
+            canonical = (
+                identified_sessions[0]
+                if identified_sessions
+                else sessions[0]
+            )
+            canonical_id = str(canonical[0])
+            duplicate_ids = [
+                session_id
+                for session_id in session_ids
+                if session_id != canonical_id
+            ]
+            source_sessions = sorted(
+                sessions,
+                key=lambda row: (int(row[10]), str(row[3]), str(row[0])),
+            )
+
+            for source in source_sessions:
+                source_id = str(source[0])
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO quiz_session_updates (
+                        session_id, message_id, revision_key, question_number
+                    )
+                    SELECT ?, message_id, revision_key, question_number
+                    FROM quiz_session_updates
+                    WHERE session_id = ?
+                    """,
+                    (canonical_id, source_id),
+                )
+                participants = connection.execute(
+                    """
+                    SELECT usn, rank, points, discord_id, eligible
+                    FROM quiz_session_participants
+                    WHERE session_id = ?
+                    """,
+                    (source_id,),
+                ).fetchall()
+                for participant in participants:
+                    connection.execute(
+                        """
+                        INSERT INTO quiz_session_participants (
+                            session_id, usn, rank, points, discord_id, eligible
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(session_id, usn) DO UPDATE SET
+                            rank = excluded.rank,
+                            points = excluded.points,
+                            discord_id = COALESCE(
+                                excluded.discord_id,
+                                quiz_session_participants.discord_id
+                            ),
+                            eligible = excluded.eligible
+                        """,
+                        (canonical_id, *participant),
+                    )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO quiz_session_nickname_reminders (
+                        session_id, discord_id, sent_at
+                    )
+                    SELECT ?, discord_id, sent_at
+                    FROM quiz_session_nickname_reminders
+                    WHERE session_id = ?
+                    """,
+                    (canonical_id, source_id),
+                )
+
+            completed_at_values = [
+                str(row[4]) for row in sessions if row[4] is not None
+            ]
+            status = (
+                "completed"
+                if any(row[1] == "completed" for row in sessions)
+                else (
+                    "active"
+                    if any(row[1] == "active" for row in sessions)
+                    else str(sessions[-1][1])
+                )
+            )
+            latest_session = max(
+                sessions,
+                key=lambda row: (int(row[10]), str(row[3]), str(row[0])),
+            )
+            quiz_id = next(iter(quiz_ids), None)
+            dashboard_message = next(
+                (
+                    row
+                    for row in sessions
+                    if row[7] is not None and row[8] is not None
+                ),
+                None,
+            )
+            for source_id in duplicate_ids:
+                connection.execute(
+                    """
+                    INSERT INTO quiz_session_aliases (
+                        alias_session_id, canonical_session_id
+                    )
+                    VALUES (?, ?)
+                    ON CONFLICT(alias_session_id) DO UPDATE SET
+                        canonical_session_id = excluded.canonical_session_id
+                    """,
+                    (source_id, canonical_id),
+                )
+                connection.execute(
+                    "UPDATE quiz_sessions SET status = 'merged' WHERE session_id = ?",
+                    (source_id,),
+                )
+            connection.execute(
+                """
+                UPDATE quiz_sessions
+                SET started_at = ?,
+                    completed_at = ?,
+                    quizcord_quiz_id = ?,
+                    status = ?,
+                    question_count = (
+                        SELECT COUNT(*) FROM quiz_session_updates
+                        WHERE session_id = ?
+                    ),
+                    eligible_student_count = ?,
+                    admin_dm_channel_id = ?,
+                    admin_dm_message_id = ?
+                WHERE session_id = ?
+                """,
+                (
+                    min(str(row[3]) for row in sessions),
+                    max(completed_at_values) if completed_at_values else None,
+                    quiz_id,
+                    status,
+                    canonical_id,
+                    latest_session[9],
+                    dashboard_message[7] if dashboard_message else None,
+                    dashboard_message[8] if dashboard_message else None,
+                    canonical_id,
+                ),
+            )
+
+            connection.execute(
+                """
+                DELETE FROM quiz_session_participants
+                WHERE session_id != ? AND session_id IN (
+                    SELECT alias_session_id FROM quiz_session_aliases
+                    WHERE canonical_session_id = ?
+                )
+                """,
+                (canonical_id, canonical_id),
+            )
+            connection.execute(
+                """
+                DELETE FROM quiz_session_updates
+                WHERE session_id != ? AND session_id IN (
+                    SELECT alias_session_id FROM quiz_session_aliases
+                    WHERE canonical_session_id = ?
+                )
+                """,
+                (canonical_id, canonical_id),
+            )
+            connection.execute(
+                """
+                DELETE FROM quiz_session_nickname_reminders
+                WHERE session_id != ? AND session_id IN (
+                    SELECT alias_session_id FROM quiz_session_aliases
+                    WHERE canonical_session_id = ?
+                )
+                """,
+                (canonical_id, canonical_id),
+            )
+            analytics_ids = duplicate_ids + (
+                [canonical_id] if quiz_id and quiz_id != canonical_id else []
+            )
+            if analytics_ids:
+                placeholders = ",".join("?" for _ in analytics_ids)
+                connection.execute(
+                    f"""
+                    DELETE FROM quiz_analytics
+                    WHERE guild_id = ? AND quiz_id IN ({placeholders})
+                    """,
+                    (guild_id, *analytics_ids),
+                )
+            if status == "completed":
+                Database._persist_session_results(
+                    connection,
+                    canonical_id,
+                    quiz_id or canonical_id,
+                )
+            LOGGER.info(
+                "Merged %d same-day quiz sessions for guild %s, channel %s "
+                "on %s into session %s.",
+                len(sessions),
+                guild_id,
+                channel_id,
+                quiz_day,
+                canonical_id,
             )
 
     @staticmethod
@@ -797,24 +1136,72 @@ class Database:
         channel_id: int,
         admin_user_id: int,
         started_at: str,
-        force_new: bool = False,
         eligible_student_count: int | None = None,
     ) -> QuizSession:
         with self._connect() as connection:
             active = connection.execute(
                 """
-                SELECT session_id, question_count
+                SELECT session_id, started_at,
+                       (SELECT MAX(CAST(message_id AS INTEGER))
+                        FROM quiz_session_updates
+                        WHERE session_id = quiz_sessions.session_id)
                 FROM quiz_sessions
                 WHERE channel_id = ? AND status = 'active'
                 """,
                 (str(channel_id),),
             ).fetchone()
-            if active and not (force_new and int(active[1]) > 0):
-                return self._get_session(connection, active[0])
             if active:
+                try:
+                    active_started_at = datetime.fromisoformat(str(active[1]))
+                    new_started_at = datetime.fromisoformat(started_at)
+                except ValueError:
+                    LOGGER.warning(
+                        "Keeping active quiz session %s because its start time "
+                        "could not be compared with a new start signal.",
+                        active[0],
+                    )
+                    return self._get_session(connection, active[0])
+                if active_started_at.tzinfo is None:
+                    active_started_at = active_started_at.replace(
+                        tzinfo=timezone.utc
+                    )
+                if new_started_at.tzinfo is None:
+                    new_started_at = new_started_at.replace(
+                        tzinfo=timezone.utc
+                    )
+                last_activity_at = active_started_at
+                if active[2] is not None:
+                    try:
+                        message_snowflake = int(active[2])
+                    except (TypeError, ValueError):
+                        message_snowflake = 0
+                    if message_snowflake > 0:
+                        activity_timestamp_ms = (
+                            (message_snowflake >> 22)
+                            + DISCORD_EPOCH_MILLISECONDS
+                        )
+                        message_activity_at = datetime.fromtimestamp(
+                            activity_timestamp_ms / 1000,
+                            timezone.utc,
+                        )
+                        if message_activity_at >= active_started_at:
+                            last_activity_at = message_activity_at
+                elapsed = new_started_at - last_activity_at
+                if elapsed < timedelta(hours=1):
+                    return self._get_session(connection, active[0])
                 connection.execute(
-                    "UPDATE quiz_sessions SET status = 'interrupted' WHERE session_id = ?",
+                    """
+                    UPDATE quiz_sessions
+                    SET status = 'interrupted'
+                    WHERE session_id = ? AND status = 'active'
+                    """,
                     (active[0],),
+                )
+                LOGGER.warning(
+                    "Marking stale quiz session %s interrupted before starting "
+                    "a new quiz in channel %s.",
+                    active[0],
+                    channel_id,
                 )
 
             session_id = uuid.uuid4().hex
@@ -853,11 +1240,26 @@ class Database:
             row = connection.execute(
                 """
                 SELECT session_id FROM quiz_sessions
-                WHERE channel_id = ?
+                WHERE channel_id = ? AND status != 'merged'
                 ORDER BY started_at DESC
                 LIMIT 1
                 """,
                 (str(channel_id),),
+            ).fetchone()
+            return self._get_session(connection, row[0]) if row else None
+
+    def get_latest_completed_quiz_session(
+        self, guild_id: int, channel_id: int
+    ) -> QuizSession | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT session_id FROM quiz_sessions
+                WHERE guild_id = ? AND channel_id = ? AND status = 'completed'
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (str(guild_id), str(channel_id)),
             ).fetchone()
             return self._get_session(connection, row[0]) if row else None
 
@@ -907,6 +1309,7 @@ class Database:
                 SELECT session_id FROM quiz_sessions
                 WHERE admin_dm_channel_id IS NOT NULL
                   AND admin_dm_message_id IS NOT NULL
+                  AND status != 'merged'
                 ORDER BY started_at DESC
                 """
             ).fetchall()
@@ -915,17 +1318,17 @@ class Database:
             )
 
     def get_quiz_session_summaries(
-        self, guild_id: int, limit: int = 50
+        self, guild_id: int, limit: int = 50, offset: int = 0
     ) -> tuple[QuizSessionSummary, ...]:
         with self._connect() as connection:
             session_ids = connection.execute(
                 """
                 SELECT session_id FROM quiz_sessions
-                WHERE guild_id = ?
-                ORDER BY started_at DESC
-                LIMIT ?
+                WHERE guild_id = ? AND status != 'merged'
+                ORDER BY started_at DESC, session_id DESC
+                LIMIT ? OFFSET ?
                 """,
-                (str(guild_id), limit),
+                (str(guild_id), limit, offset),
             ).fetchall()
             return tuple(
                 self._get_quiz_session_summary(connection, row[0])
@@ -1075,10 +1478,59 @@ class Database:
             except LookupError:
                 return None
 
+    def clear_guild_quiz_history(self, guild_id: int) -> tuple[int, int]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            guild_filter = str(guild_id)
+            session_count = connection.execute(
+                """
+                SELECT COUNT(*) FROM quiz_sessions
+                WHERE guild_id = ? AND status != 'merged'
+                """,
+                (guild_filter,),
+            ).fetchone()[0]
+            analytics_count = connection.execute(
+                "SELECT COUNT(*) FROM quiz_analytics WHERE guild_id = ?",
+                (guild_filter,),
+            ).fetchone()[0]
+            session_filter = """
+                session_id IN (
+                    SELECT session_id FROM quiz_sessions WHERE guild_id = ?
+                )
+            """
+            for table in (
+                "quiz_session_updates",
+                "quiz_session_participants",
+                "quiz_session_nickname_reminders",
+            ):
+                connection.execute(
+                    f"DELETE FROM {table} WHERE {session_filter}",
+                    (guild_filter,),
+                )
+            connection.execute(
+                """
+                DELETE FROM quiz_session_aliases
+                WHERE canonical_session_id IN (
+                    SELECT session_id FROM quiz_sessions WHERE guild_id = ?
+                )
+                """,
+                (guild_filter,),
+            )
+            connection.execute(
+                "DELETE FROM quiz_analytics WHERE guild_id = ?",
+                (guild_filter,),
+            )
+            connection.execute(
+                "DELETE FROM quiz_sessions WHERE guild_id = ?",
+                (guild_filter,),
+            )
+        return int(analytics_count), int(session_count)
+
     @staticmethod
     def _get_session(
         connection: sqlite3.Connection, session_id: str
     ) -> QuizSession:
+        session_id = Database._canonical_session_id(connection, session_id)
         row = connection.execute(
             """
             SELECT session_id, guild_id, channel_id, status, question_count,
@@ -1105,10 +1557,25 @@ class Database:
             eligible_student_count=int(row[11]) if row[11] is not None else None,
         )
 
+    @staticmethod
+    def _canonical_session_id(
+        connection: sqlite3.Connection, session_id: str
+    ) -> str:
+        row = connection.execute(
+            """
+            SELECT canonical_session_id
+            FROM quiz_session_aliases
+            WHERE alias_session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        return str(row[0]) if row else session_id
+
     def set_quiz_dashboard_message(
         self, session_id: str, channel_id: int, message_id: int
     ) -> None:
         with self._connect() as connection:
+            session_id = self._canonical_session_id(connection, session_id)
             connection.execute(
                 """
                 UPDATE quiz_sessions
@@ -1130,6 +1597,7 @@ class Database:
     ) -> QuizSessionSummary | None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            session_id = self._canonical_session_id(connection, session_id)
             session = self._get_session(connection, session_id)
             cursor = connection.execute(
                 """
@@ -1310,6 +1778,7 @@ class Database:
 
     def attach_quizcord_id(self, session_id: str, quizcord_quiz_id: str) -> None:
         with self._connect() as connection:
+            session_id = self._canonical_session_id(connection, session_id)
             session = self._get_session(connection, session_id)
             old_id = session.quizcord_quiz_id or session.session_id
             connection.execute(
@@ -1325,10 +1794,30 @@ class Database:
             if old_id != quizcord_quiz_id:
                 connection.execute(
                     """
-                    UPDATE quiz_analytics SET quiz_id = ?
+                    INSERT INTO quiz_analytics (
+                        guild_id, usn, quiz_id, accuracy, time_taken, rank,
+                        quiz_date
+                    )
+                    SELECT guild_id, usn, ?, accuracy, time_taken, rank,
+                           quiz_date
+                    FROM quiz_analytics
                     WHERE guild_id = ? AND quiz_id = ?
+                    ON CONFLICT(guild_id, usn, quiz_id) DO UPDATE SET
+                        accuracy = excluded.accuracy,
+                        time_taken = excluded.time_taken,
+                        rank = excluded.rank,
+                        quiz_date = COALESCE(
+                            excluded.quiz_date, quiz_analytics.quiz_date
+                        )
                     """,
                     (quizcord_quiz_id, str(session.guild_id), old_id),
+                )
+                connection.execute(
+                    """
+                    DELETE FROM quiz_analytics
+                    WHERE guild_id = ? AND quiz_id = ?
+                    """,
+                    (str(session.guild_id), old_id),
                 )
             self._persist_session_results(connection, session_id, quizcord_quiz_id)
 
@@ -1336,6 +1825,7 @@ class Database:
     def _persist_session_results(
         connection: sqlite3.Connection, session_id: str, quiz_id: str
     ) -> None:
+        session_id = Database._canonical_session_id(connection, session_id)
         session = Database._get_session(connection, session_id)
         participants = connection.execute(
             """
@@ -1370,11 +1860,90 @@ class Database:
         with self._connect() as connection:
             return self._get_quiz_session_summary(connection, session_id)
 
+    def get_quiz_session_absentees(
+        self, session_id: str
+    ) -> tuple[QuizSessionAbsentStudent, ...]:
+        with self._connect() as connection:
+            session = self._get_session(connection, session_id)
+            participant_rows = connection.execute(
+                """
+                SELECT usn, discord_id
+                FROM quiz_session_participants
+                WHERE session_id = ?
+                """,
+                (session.session_id,),
+            ).fetchall()
+            participant_usns = {
+                str(row[0]).strip().casefold()
+                for row in participant_rows
+                if row[0]
+            }
+            participant_discord_ids = {
+                str(row[1]) for row in participant_rows if row[1]
+            }
+            member_rows = connection.execute(
+                """
+                SELECT e.discord_id, u.name, e.global_name, e.display_name,
+                       r.usn, r.student_name
+                FROM guild_member_eligibility AS e
+                JOIN users AS u ON u.id = e.discord_id
+                LEFT JOIN student_registry AS r
+                    ON r.guild_id = e.guild_id AND r.discord_id = e.discord_id
+                WHERE e.guild_id = ? AND e.eligible = 1 AND e.is_bot = 0
+                ORDER BY
+                    COALESCE(
+                        NULLIF(r.student_name, ''),
+                        NULLIF(e.display_name, ''),
+                        NULLIF(e.global_name, ''),
+                        u.name
+                    ) COLLATE NOCASE
+                """,
+                (str(session.guild_id),),
+            ).fetchall()
+
+        absentees = []
+        for discord_id, account_name, global_name, display_name, usn, student_name in member_rows:
+            resolved_usn = (
+                str(usn).strip()
+                if usn
+                else (
+                    str(global_name).strip()
+                    if global_name and matches_usn_format(str(global_name))
+                    else None
+                )
+            )
+            member_identities = {
+                str(value).strip().casefold()
+                for value in (
+                    resolved_usn,
+                    student_name,
+                    global_name,
+                    display_name,
+                    account_name,
+                )
+                if value
+            }
+            if (
+                str(discord_id) in participant_discord_ids
+                or member_identities.intersection(participant_usns)
+            ):
+                continue
+            absentees.append(
+                QuizSessionAbsentStudent(
+                    display_name=str(
+                        student_name or display_name or global_name or account_name
+                    ),
+                    usn=resolved_usn,
+                )
+            )
+        return tuple(absentees)
+
     @classmethod
     def _get_quiz_session_summary(
         cls, connection: sqlite3.Connection, session_id: str
     ) -> QuizSessionSummary:
         session = cls._get_session(connection, session_id)
+        session_id = session.session_id
         rows = connection.execute(
             """
             SELECT p.usn, p.rank, p.points, p.discord_id, p.eligible,
@@ -1395,13 +1964,18 @@ class Database:
                 discord_id=row[3],
                 eligible=bool(row[4]),
                 name_matches_usn_format=(
+                    matches_usn_format(str(row[0]))
+                    or (
+                        row[5] is not None
+                        and matches_usn_format(str(row[5]))
+                    )
+                ),
+                global_name_matches_usn_format=(
                     matches_usn_format(str(row[5]))
                     if row[5] is not None
-                    else (
-                        False
-                        if row[3] is not None
-                        else matches_usn_format(str(row[0]))
-                    )
+                    else False
+                    if row[3] is not None
+                    else None
                 ),
             )
             for row in rows
@@ -1505,7 +2079,7 @@ class Database:
                     str(usn)
                     if usn
                     else (
-                        str(global_name).strip()
+                        normalize_usn(str(global_name))
                         if global_name
                         and matches_usn_format(str(global_name))
                         else None
@@ -1537,13 +2111,14 @@ class Database:
     def add_faculty_student(
         self, guild_id: int, faculty_discord_id: int, usn: str
     ) -> bool:
-        normalized_usn = usn.strip().upper()
+        normalized_usn = normalize_usn(usn).upper()
         candidate = next(
             (
                 user
                 for user in self.get_dashboard_users(guild_id)
                 if user.usn is not None
-                and user.usn.casefold() == normalized_usn.casefold()
+                and normalize_usn(user.usn).casefold()
+                == normalized_usn.casefold()
             ),
             None,
         )
@@ -1551,7 +2126,7 @@ class Database:
             candidate is None
             or not matches_usn_format(candidate.global_name or "")
             or normalized_usn.casefold()
-            != (candidate.global_name or "").strip().casefold()
+            != normalize_usn(candidate.global_name or "").casefold()
         ):
             return False
         with self._connect() as connection:
@@ -1712,9 +2287,10 @@ class Database:
                 raise LookupError("Faculty password has not been provisioned.")
 
     def claim_global_name_reminder(
-        self, session_id: str, discord_id: int
+        self, session_id: str, discord_id: int, fallback_usn: str | None = None
     ) -> str | None:
         with self._connect() as connection:
+            session_id = self._canonical_session_id(connection, session_id)
             session = self._get_session(connection, session_id)
             row = connection.execute(
                 """
@@ -1723,7 +2299,7 @@ class Database:
                 """,
                 (str(session.guild_id), str(discord_id)),
             ).fetchone()
-            if row is None:
+            if row is None and fallback_usn is None:
                 return None
             cursor = connection.execute(
                 """
@@ -1734,7 +2310,24 @@ class Database:
                 """,
                 (session_id, str(discord_id)),
             )
-            return str(row[0]) if cursor.rowcount else None
+            if not cursor.rowcount:
+                return None
+            if row is not None:
+                return str(row[0])
+            return fallback_usn or ""
+
+    def release_global_name_reminder(
+        self, session_id: str, discord_id: int
+    ) -> None:
+        with self._connect() as connection:
+            session_id = self._canonical_session_id(connection, session_id)
+            connection.execute(
+                """
+                DELETE FROM quiz_session_nickname_reminders
+                WHERE session_id = ? AND discord_id = ?
+                """,
+                (session_id, str(discord_id)),
+            )
 
     def remove_member(self, member: "Member") -> None:
         with self._connect() as connection:
