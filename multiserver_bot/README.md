@@ -423,7 +423,8 @@ UptimeRobot can alert you if the health endpoint becomes unavailable.
 
 At quiz start, the server owner receives a private Discord DM with an **Open
 live web dashboard** button. The dashboard refreshes every few seconds and
-shows the roster, final analytics, and Excel download.
+shows the roster, final analytics, and Excel download. This is the only
+member-directed DM sent by the bot; it does not send USN reminders.
 
 If you already have student mappings/results in a local `server_results.db`,
 stop the local bot and back up the database before moving it. Upload that file
@@ -495,14 +496,7 @@ continues to use its private Discord dashboard.
 - Student Discord global display names are checked against `4GM` + 2 digits + `CS` + 3
   digits or `U` + 2 digits + `E` + 2 digits + `CS` + 3 digits. A mismatch
   never blocks quiz results: the dashboard shows "Name not updated to USN".
-  After a quiz completes, the bot can DM all human server members whose current
-  global display name does not match either format, including members who did
-  not attend. Server owners, administrators/moderators, and the configured
-  faculty role are excluded. Each member is reminded at most once per quiz;
-  `/remind_usn` lets faculty and server maintainers manually process reminders
-  for the latest completed quiz in that channel. Failed DMs can be retried.
-  The message asks members to update their global display name, not their
-  unique account username.
+  USN reminders are not sent by DM, automatically or through a command.
 - The first usable leaderboard revision and later edits are deduplicated by
   message/revision. Unknown USNs are retained in the quiz roster; known
   students are associated internally through Discord account username, server

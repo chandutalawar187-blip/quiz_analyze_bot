@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import sqlite3
-from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from io import BytesIO
 
@@ -14,8 +13,6 @@ from discord.ext import commands
 from quizcord_bot.config import Settings
 from quizcord_bot.database import (
     Database,
-    QuizSessionSummary,
-    matches_usn_format,
 )
 from quizcord_bot.exports import analytics_workbook
 from quizcord_bot.quizcord import (
@@ -37,34 +34,6 @@ from quizcord_bot.views import (
 
 
 LOGGER = logging.getLogger("quizcord_analytics")
-USN_MAINTAINER_PERMISSIONS = (
-    "administrator",
-    "manage_guild",
-    "manage_roles",
-    "manage_channels",
-    "manage_messages",
-    "manage_nicknames",
-    "kick_members",
-    "ban_members",
-    "moderate_members",
-)
-
-
-def _has_usn_maintainer_permissions(permissions: discord.Permissions) -> bool:
-    return any(
-        getattr(permissions, permission, False)
-        for permission in USN_MAINTAINER_PERMISSIONS
-    )
-
-
-@dataclass(frozen=True)
-class USNReminderResult:
-    sent: int = 0
-    already_sent: int = 0
-    valid_name: int = 0
-    excluded: int = 0
-    failed: int = 0
-    unavailable: int = 0
 
 
 class AnalyticsCog(commands.Cog):
@@ -74,27 +43,6 @@ class AnalyticsCog(commands.Cog):
         self.bot = bot
         self.settings = settings
         self.database = database
-        self._reminder_tasks: set[asyncio.Task[USNReminderResult]] = set()
-
-    async def cog_unload(self) -> None:
-        tasks = tuple(self._reminder_tasks)
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    def _schedule_global_name_updates(
-        self, guild: discord.Guild, summary: QuizSessionSummary
-    ) -> None:
-        task = asyncio.create_task(self._notify_global_name_updates(guild, summary))
-        self._reminder_tasks.add(task)
-        task.add_done_callback(self._global_name_updates_done)
-
-    def _global_name_updates_done(self, task: asyncio.Task[USNReminderResult]) -> None:
-        self._reminder_tasks.discard(task)
-        if not task.cancelled():
-            error = task.exception()
-            if error is not None:
-                LOGGER.error("Automatic USN reminders failed.", exc_info=error)
 
     def restore_dashboard_views(self) -> None:
         if self.settings.dashboard_public_url:
@@ -445,64 +393,6 @@ class AnalyticsCog(commands.Cog):
         )
         await interaction.response.send_message(message, ephemeral=True)
 
-    @app_commands.command(
-        name="remind_usn",
-        description="DM server members who need to update their Discord name to their USN.",
-    )
-    @app_commands.guild_only()
-    @app_commands.checks.cooldown(1, 60, key=lambda interaction: interaction.guild_id)
-    async def remind_usn(self, interaction: discord.Interaction) -> None:
-        if (
-            interaction.guild_id is None
-            or interaction.guild is None
-            or interaction.channel_id is None
-        ):
-            await interaction.response.send_message(
-                "This command can only be used in a server channel.",
-                ephemeral=True,
-            )
-            return
-        permissions = interaction.user.guild_permissions
-        faculty_role_id = self.database.get_faculty_role_id(interaction.guild_id)
-        is_faculty = faculty_role_id is not None and any(
-            role.id == faculty_role_id for role in interaction.user.roles
-        )
-        if not (
-            interaction.user.id == interaction.guild.owner_id
-            or _has_usn_maintainer_permissions(permissions)
-            or is_faculty
-        ):
-            await interaction.response.send_message(
-                "Only faculty and server administrators can send USN reminders.",
-                ephemeral=True,
-            )
-            return
-
-        session = self.database.get_latest_completed_quiz_session(
-            interaction.guild_id, interaction.channel_id
-        )
-        if session is None:
-            await interaction.response.send_message(
-                "There is no completed quiz in this channel to send reminders for.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True)
-        summary = self.database.get_quiz_session_summary(session.session_id)
-        result = await self._notify_global_name_updates(
-            interaction.guild, summary
-        )
-        await interaction.followup.send(
-            f"USN reminder process completed for the latest quiz. "
-            f"Sent: {result.sent}; already sent: {result.already_sent}; "
-            f"already using a valid USN name: {result.valid_name}; "
-            f"excluded staff/bots: {result.excluded}; "
-            f"could not send: {result.failed}; roster unavailable: "
-            f"{result.unavailable}. Failed sends can be retried.",
-            ephemeral=True,
-        )
-
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
         self.database.sync_member(member)
@@ -568,10 +458,6 @@ class AnalyticsCog(commands.Cog):
                 self.database.attach_quizcord_id(
                     recent_session.session_id, quiz_id
                 )
-                summary = self.database.get_quiz_session_summary(
-                    recent_session.session_id
-                )
-                self._schedule_global_name_updates(message.guild, summary)
                 await self._refresh_quiz_dashboard(
                     message.guild, recent_session.session_id
                 )
@@ -628,12 +514,6 @@ class AnalyticsCog(commands.Cog):
                     self.database.attach_quizcord_id(
                         recent_session.session_id, quiz_id
                     )
-                    summary = self.database.get_quiz_session_summary(
-                        recent_session.session_id
-                    )
-                    self._schedule_global_name_updates(
-                        message.guild, summary
-                    )
                     await self._refresh_quiz_dashboard(
                         message.guild, recent_session.session_id
                     )
@@ -669,115 +549,12 @@ class AnalyticsCog(commands.Cog):
                 session.session_id,
             )
             return
-        if is_final:
-            self._schedule_global_name_updates(message.guild, summary)
         LOGGER.info(
             "Recorded Quizcord leaderboard revision for session %s: %d rows.",
             session.session_id,
             len(rows),
         )
         await self._refresh_quiz_dashboard(message.guild, session.session_id)
-
-    async def _notify_global_name_updates(
-        self, guild: discord.Guild, summary: QuizSessionSummary
-    ) -> USNReminderResult:
-        faculty_role_id = self.database.get_faculty_role_id(guild.id)
-        try:
-            members = [
-                member async for member in guild.fetch_members(limit=None)
-            ]
-        except discord.Forbidden:
-            LOGGER.warning(
-                "Cannot fetch members for USN reminders in guild %s.",
-                guild.id,
-            )
-            return USNReminderResult(unavailable=1)
-        except discord.HTTPException:
-            LOGGER.exception(
-                "Could not fetch members for USN reminders in guild %s.",
-                guild.id,
-            )
-            return USNReminderResult(unavailable=1)
-        sent_count = 0
-        already_sent_count = 0
-        valid_name_count = 0
-        excluded_count = 0
-        failed_count = 0
-        unavailable_count = 0
-        for member in members:
-            if getattr(member, "bot", False):
-                excluded_count += 1
-                continue
-            if matches_usn_format(getattr(member, "global_name", None) or ""):
-                valid_name_count += 1
-                continue
-            permissions = member.guild_permissions
-            if (
-                member.id == getattr(guild, "owner_id", None)
-                or _has_usn_maintainer_permissions(permissions)
-            ):
-                excluded_count += 1
-                continue
-            if faculty_role_id is not None and any(
-                role.id == faculty_role_id for role in member.roles
-            ):
-                excluded_count += 1
-                continue
-            usn = self.database.claim_global_name_reminder(
-                summary.session.session_id,
-                member.id,
-                "",
-            )
-            if usn is None:
-                already_sent_count += 1
-                continue
-            safe_usn = (
-                discord.utils.escape_mentions(
-                    discord.utils.escape_markdown(usn)
-                )
-                if usn
-                else None
-            )
-            safe_guild_name = discord.utils.escape_mentions(
-                discord.utils.escape_markdown(guild.name)
-            )
-            try:
-                await member.send(
-                    f"This message is from **MultiServer Bot** in **{safe_guild_name}**.\n"
-                    "Your quiz result was recorded. Please set your Discord "
-                    "global display name to your USN"
-                    f"{f': **{safe_usn}**' if safe_usn else ''}.\n"
-                    "For example: `4GM22CS001` or `U22E22CS001`. Do not change "
-                    "your unique Discord username. This helps match future "
-                    "Quizcord results correctly."
-                )
-                sent_count += 1
-            except discord.Forbidden:
-                self.database.release_global_name_reminder(
-                    summary.session.session_id, member.id
-                )
-                failed_count += 1
-                LOGGER.info(
-                    "Could not DM member %s a USN nickname reminder; DMs are unavailable.",
-                    member.id,
-                )
-            except discord.HTTPException:
-                self.database.release_global_name_reminder(
-                    summary.session.session_id, member.id
-                )
-                failed_count += 1
-                LOGGER.exception(
-                    "Could not DM member %s a USN nickname reminder.",
-                    member.id,
-                )
-        return USNReminderResult(
-            sent=sent_count,
-            already_sent=already_sent_count,
-            valid_name=valid_name_count,
-            excluded=excluded_count,
-            failed=failed_count,
-            unavailable=unavailable_count,
-        )
 
     async def _quiz_admin(
         self, guild: discord.Guild

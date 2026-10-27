@@ -1,6 +1,5 @@
-"""Automatic reminders must not block quiz dashboard updates."""
+"""Regression tests for quiz dashboard and member notification behavior."""
 
-import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 import unittest
@@ -9,59 +8,88 @@ from unittest.mock import AsyncMock, Mock, patch
 from quizcord_bot.cogs.analytics import AnalyticsCog
 
 
-class AutomaticReminderTests(unittest.IsolatedAsyncioTestCase):
-    async def test_each_automatic_completion_path_refreshes_while_reminders_wait(self):
-        for path in ("quiz-id", "empty-leaderboard", "final-leaderboard"):
-            with self.subTest(path=path):
-                database = Mock()
-                session = SimpleNamespace(session_id="session")
-                database.get_quiz_session_for_message.return_value = session
-                database.get_recent_quiz_session.return_value = session
-                cog = AnalyticsCog(Mock(), SimpleNamespace(quizcord_bot_id=None), database)
-                started = asyncio.Event()
-                release = asyncio.Event()
+class QuizNotificationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_final_leaderboard_does_not_fetch_members_for_usn_dms(self) -> None:
+        database = Mock()
+        database.get_quiz_session_for_message.return_value = SimpleNamespace(
+            session_id="session"
+        )
+        database.record_quiz_leaderboard.return_value = SimpleNamespace()
+        guild = SimpleNamespace(id=1, fetch_members=AsyncMock())
+        message = SimpleNamespace(
+            guild=guild,
+            channel=SimpleNamespace(id=2),
+            id=3,
+            author=Mock(),
+            webhook_id=None,
+            edited_at=None,
+            created_at=datetime.now(timezone.utc),
+        )
+        cog = AnalyticsCog(
+            Mock(),
+            SimpleNamespace(quizcord_bot_id=None),
+            database,
+        )
+        cog._refresh_quiz_dashboard = AsyncMock()
 
-                async def delayed_reminders(*args):
-                    started.set()
-                    await release.wait()
+        with (
+            patch(
+                "quizcord_bot.cogs.analytics.extract_leaderboard",
+                return_value=("final", "results"),
+            ),
+            patch(
+                "quizcord_bot.cogs.analytics.extract_quizcord_id",
+                return_value=None,
+            ),
+            patch(
+                "quizcord_bot.cogs.analytics.is_quiz_start_message",
+                return_value=False,
+            ),
+            patch(
+                "quizcord_bot.cogs.analytics.is_quizcord_author",
+                return_value=True,
+            ),
+            patch(
+                "quizcord_bot.cogs.analytics.parse_quiz_rows",
+                return_value=[("1", "student", "100")],
+            ),
+            patch(
+                "quizcord_bot.cogs.analytics.is_final_leaderboard",
+                return_value=True,
+            ),
+        ):
+            await cog._handle_quizcord_message(message)
 
-                cog._notify_global_name_updates = AsyncMock(side_effect=delayed_reminders)
-                cog._refresh_quiz_dashboard = AsyncMock()
-                now = datetime.now(timezone.utc)
-                message = SimpleNamespace(guild=Mock(), channel=Mock(), id=123,
-                                          author=Mock(), webhook_id=None, edited_at=None, created_at=now,
-                                          content="", embeds=[])
-                payload = None if path == "quiz-id" else (None, "synthetic results")
-                rows = [] if path == "empty-leaderboard" else [("1", "student", "100")]
-                with (patch("quizcord_bot.cogs.analytics.extract_leaderboard", return_value=payload),
-                      patch("quizcord_bot.cogs.analytics.extract_quizcord_id", return_value="quiz"),
-                      patch("quizcord_bot.cogs.analytics.is_quiz_start_message", return_value=False),
-                      patch("quizcord_bot.cogs.analytics.is_quizcord_author", return_value=True),
-                      patch("quizcord_bot.cogs.analytics.parse_quiz_rows", return_value=rows)):
-                    try:
-                        await asyncio.wait_for(cog._handle_quizcord_message(message), timeout=1)
-                        cog._refresh_quiz_dashboard.assert_awaited_once_with(message.guild, "session")
-                        await asyncio.wait_for(started.wait(), timeout=1)
-                        self.assertEqual(len(cog._reminder_tasks), 1)
-                    finally:
-                        release.set()
-                        await cog.cog_unload()
+        guild.fetch_members.assert_not_awaited()
 
-    async def test_task_errors_are_logged_and_tasks_are_released(self):
-        cog = AnalyticsCog(Mock(), Mock(), Mock())
-        cog._notify_global_name_updates = AsyncMock(side_effect=RuntimeError("delivery failed"))
-        with self.assertLogs("quizcord_analytics", level="ERROR") as logs:
-            cog._schedule_global_name_updates(Mock(), Mock())
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-        self.assertFalse(cog._reminder_tasks)
-        self.assertIn("delivery failed", "\n".join(logs.output))
+    async def test_usn_reminder_command_is_not_registered(self) -> None:
+        self.assertFalse(hasattr(AnalyticsCog, "remind_usn"))
 
-    async def test_unloading_cancels_pending_reminders(self):
-        cog = AnalyticsCog(Mock(), Mock(), Mock())
-        cog._notify_global_name_updates = AsyncMock(side_effect=lambda *args: None)
-        cog._schedule_global_name_updates(Mock(), Mock())
-        task = next(iter(cog._reminder_tasks))
-        await cog.cog_unload()
-        self.assertTrue(task.cancelled())
-        self.assertFalse(cog._reminder_tasks)
+    async def test_quiz_start_dashboard_dm_still_includes_website_link(self) -> None:
+        session = SimpleNamespace(
+            session_id="session",
+            guild_id=1,
+            admin_dm_message_id=None,
+            admin_user_id=2,
+        )
+        dashboard_message = SimpleNamespace(
+            channel=SimpleNamespace(id=4),
+            id=5,
+        )
+        admin = SimpleNamespace(send=AsyncMock(return_value=dashboard_message))
+        guild = SimpleNamespace(owner=admin, owner_id=2)
+        database = Mock()
+        database.get_quiz_session.return_value = session
+        cog = AnalyticsCog(
+            Mock(),
+            SimpleNamespace(dashboard_public_url="https://analytics.example"),
+            database,
+        )
+
+        await cog._ensure_quiz_dashboard(guild, "session")
+
+        admin.send.assert_awaited_once()
+        self.assertIn("view the live roster", admin.send.await_args.args[0])
+        database.set_quiz_dashboard_message.assert_called_once_with(
+            "session", 4, 5
+        )

@@ -487,17 +487,6 @@ class Database:
             )
             connection.execute(
                 """
-                CREATE TABLE IF NOT EXISTS quiz_session_nickname_reminders (
-                    session_id TEXT NOT NULL,
-                    discord_id TEXT NOT NULL,
-                    sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (session_id, discord_id),
-                    FOREIGN KEY(session_id) REFERENCES quiz_sessions(session_id)
-                )
-                """
-            )
-            connection.execute(
-                """
                 CREATE TABLE IF NOT EXISTS quiz_session_aliases (
                     alias_session_id TEXT PRIMARY KEY,
                     canonical_session_id TEXT NOT NULL
@@ -695,17 +684,6 @@ class Database:
                         """,
                         (canonical_id, *participant),
                     )
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO quiz_session_nickname_reminders (
-                        session_id, discord_id, sent_at
-                    )
-                    SELECT ?, discord_id, sent_at
-                    FROM quiz_session_nickname_reminders
-                    WHERE session_id = ?
-                    """,
-                    (canonical_id, source_id),
-                )
 
             completed_at_values = [
                 str(row[4]) for row in sessions if row[4] is not None
@@ -790,16 +768,6 @@ class Database:
             connection.execute(
                 """
                 DELETE FROM quiz_session_updates
-                WHERE session_id != ? AND session_id IN (
-                    SELECT alias_session_id FROM quiz_session_aliases
-                    WHERE canonical_session_id = ?
-                )
-                """,
-                (canonical_id, canonical_id),
-            )
-            connection.execute(
-                """
-                DELETE FROM quiz_session_nickname_reminders
                 WHERE session_id != ? AND session_id IN (
                     SELECT alias_session_id FROM quiz_session_aliases
                     WHERE canonical_session_id = ?
@@ -1501,7 +1469,6 @@ class Database:
             for table in (
                 "quiz_session_updates",
                 "quiz_session_participants",
-                "quiz_session_nickname_reminders",
             ):
                 connection.execute(
                     f"DELETE FROM {table} WHERE {session_filter}",
@@ -2285,49 +2252,6 @@ class Database:
             )
             if cursor.rowcount == 0:
                 raise LookupError("Faculty password has not been provisioned.")
-
-    def claim_global_name_reminder(
-        self, session_id: str, discord_id: int, fallback_usn: str | None = None
-    ) -> str | None:
-        with self._connect() as connection:
-            session_id = self._canonical_session_id(connection, session_id)
-            session = self._get_session(connection, session_id)
-            row = connection.execute(
-                """
-                SELECT usn FROM student_registry
-                WHERE guild_id = ? AND discord_id = ?
-                """,
-                (str(session.guild_id), str(discord_id)),
-            ).fetchone()
-            if row is None and fallback_usn is None:
-                return None
-            cursor = connection.execute(
-                """
-                INSERT OR IGNORE INTO quiz_session_nickname_reminders (
-                    session_id, discord_id
-                )
-                VALUES (?, ?)
-                """,
-                (session_id, str(discord_id)),
-            )
-            if not cursor.rowcount:
-                return None
-            if row is not None:
-                return str(row[0])
-            return fallback_usn or ""
-
-    def release_global_name_reminder(
-        self, session_id: str, discord_id: int
-    ) -> None:
-        with self._connect() as connection:
-            session_id = self._canonical_session_id(connection, session_id)
-            connection.execute(
-                """
-                DELETE FROM quiz_session_nickname_reminders
-                WHERE session_id = ? AND discord_id = ?
-                """,
-                (session_id, str(discord_id)),
-            )
 
     def remove_member(self, member: "Member") -> None:
         with self._connect() as connection:
