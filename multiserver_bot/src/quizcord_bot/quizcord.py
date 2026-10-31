@@ -5,7 +5,7 @@ import re
 import discord
 
 
-MAX_LEADERBOARD_LENGTH = 6000
+MAX_LEADERBOARD_LENGTH = 25_000
 MAX_LEADERBOARD_ROWS = 500
 QUIZ_ROW_PATTERNS = (
     re.compile(
@@ -43,7 +43,13 @@ def parse_quiz_rows(payload: str) -> list[tuple[str, str, str]]:
         )
 
     rows: list[tuple[str, str, str]] = []
-    for line in payload.splitlines():
+    normalized_payload = re.sub(
+        r"final\s+leaderboard",
+        "\n",
+        payload,
+        flags=re.IGNORECASE,
+    )
+    for line in normalized_payload.splitlines():
         for pattern in QUIZ_ROW_PATTERNS:
             match = pattern.search(line.strip())
             if match:

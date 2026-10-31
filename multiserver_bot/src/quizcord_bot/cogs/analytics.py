@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
 
 import discord
@@ -34,6 +34,7 @@ from quizcord_bot.views import (
 
 
 LOGGER = logging.getLogger("quizcord_analytics")
+IST = timezone(timedelta(hours=5, minutes=30), name="IST")
 
 
 class AnalyticsCog(commands.Cog):
@@ -210,6 +211,175 @@ class AnalyticsCog(commands.Cog):
                 interaction.guild_id,
                 profiles,
                 normalized_quiz_id,
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="history_update",
+        description="Re-read Quizcord results from today or yesterday in this channel.",
+    )
+    @app_commands.describe(
+        date="Choose which day's Quizcord leaderboard history to refresh."
+    )
+    @app_commands.choices(
+        date=[
+            app_commands.Choice(name="Today", value="today"),
+            app_commands.Choice(name="Yesterday", value="yesterday"),
+        ]
+    )
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.checks.cooldown(1, 60)
+    async def history_update(
+        self,
+        interaction: discord.Interaction,
+        date: app_commands.Choice[str],
+    ) -> None:
+        channel = interaction.channel
+        history = getattr(channel, "history", None)
+        if history is None:
+            await interaction.response.send_message(
+                "This command requires a text channel or thread with message history.",
+                ephemeral=True,
+            )
+            return
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "This command could not identify the current server.",
+                ephemeral=True,
+            )
+            return
+
+        target_day = datetime.now(IST).date()
+        if date.value == "yesterday":
+            target_day -= timedelta(days=1)
+        day_start = datetime.combine(target_day, time.min, tzinfo=IST)
+        day_end = day_start + timedelta(days=1)
+        await interaction.response.defer(ephemeral=True)
+
+        updated_sessions: set[str] = set()
+        candidate_messages = 0
+        oversized_messages = 0
+        try:
+            async for message in history(
+                after=day_start - timedelta(milliseconds=1),
+                before=day_end,
+                oldest_first=True,
+                limit=None,
+            ):
+                if message.created_at.astimezone(IST).date() != target_day:
+                    continue
+                try:
+                    payload = extract_leaderboard(message)
+                    quiz_id = extract_quizcord_id(message)
+                except ValueError:
+                    oversized_messages += 1
+                    LOGGER.warning(
+                        "Skipping oversized Quizcord message %s during history update.",
+                        message.id,
+                    )
+                    continue
+                if payload is None and quiz_id is None:
+                    continue
+                if not is_quizcord_author(
+                    message.author,
+                    message.webhook_id,
+                    self.settings.quizcord_bot_id,
+                    has_final_leaderboard=(
+                        payload is not None or quiz_id is not None
+                    ),
+                ):
+                    continue
+                candidate_messages += 1
+                session_id = await self._handle_quizcord_message(
+                    message,
+                    history_update=True,
+                )
+                if session_id is not None:
+                    updated_sessions.add(session_id)
+        except discord.Forbidden:
+            LOGGER.warning(
+                "Cannot read channel history for history update in guild %s, channel %s.",
+                interaction.guild_id,
+                getattr(channel, "id", None),
+            )
+            await interaction.followup.send(
+                "I could not read this channel's history. Please grant the bot "
+                "View Channel and Read Message History permissions, then retry.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException:
+            LOGGER.exception(
+                "Discord failed while reading history for guild %s, channel %s.",
+                interaction.guild_id,
+                getattr(channel, "id", None),
+            )
+            await interaction.followup.send(
+                "Discord could not finish reading this channel's history. "
+                f"{len(updated_sessions)} session(s) may already have been refreshed; "
+                "please retry after the Discord issue clears.",
+                ephemeral=True,
+            )
+            return
+        except sqlite3.Error:
+            LOGGER.exception(
+                "Could not update saved quiz history for guild %s, channel %s.",
+                interaction.guild_id,
+                getattr(channel, "id", None),
+            )
+            await interaction.followup.send(
+                "A database error interrupted the history update. Some sessions "
+                "may already have been refreshed; contact an administrator "
+                "before retrying if the dashboard appears inconsistent.",
+                ephemeral=True,
+            )
+            return
+
+        if not candidate_messages:
+            oversized_note = (
+                f" {oversized_messages} oversized message(s) were skipped."
+                if oversized_messages
+                else ""
+            )
+            await interaction.followup.send(
+                f"No Quizcord leaderboard messages were found for {target_day.isoformat()} "
+                f"in this channel.{oversized_note}",
+                ephemeral=True,
+            )
+            return
+
+        if not updated_sessions:
+            await interaction.followup.send(
+                "Quizcord messages were found, but no leaderboard results could be "
+                "updated. Check the bot logs for details.",
+                ephemeral=True,
+            )
+            return
+
+        for session_id in updated_sessions:
+            await self._refresh_quiz_dashboard(
+                guild,
+                session_id,
+                ensure=False,
+            )
+        await interaction.followup.send(
+            f"Refreshed {len(updated_sessions)} quiz session(s) from "
+            f"{candidate_messages} Quizcord message(s) for {target_day.isoformat()} "
+            "(IST)."
+            + (
+                f" Skipped {oversized_messages} oversized message(s)."
+                if oversized_messages
+                else ""
             ),
             ephemeral=True,
         )
@@ -424,15 +594,20 @@ class AnalyticsCog(commands.Cog):
     ) -> None:
         await self._handle_quizcord_message(after)
 
-    async def _handle_quizcord_message(self, message: discord.Message) -> None:
+    async def _handle_quizcord_message(
+        self,
+        message: discord.Message,
+        *,
+        history_update: bool = False,
+    ) -> str | None:
         if message.guild is None:
-            return
+            return None
         try:
             payload = extract_leaderboard(message)
             quiz_id = extract_quizcord_id(message)
             is_start = is_quiz_start_message(message)
             if payload is None and not is_start and quiz_id is None:
-                return
+                return None
             if not is_quizcord_author(
                 message.author,
                 message.webhook_id,
@@ -441,10 +616,10 @@ class AnalyticsCog(commands.Cog):
                     payload is not None or is_start or quiz_id is not None
                 ),
             ):
-                return
+                return None
         except ValueError:
             LOGGER.warning("Ignoring oversized Quizcord message %s.", message.id)
-            return
+            return None
 
         session = self.database.get_quiz_session_for_message(
             message.channel.id, message.id
@@ -458,10 +633,12 @@ class AnalyticsCog(commands.Cog):
                 self.database.attach_quizcord_id(
                     recent_session.session_id, quiz_id
                 )
-                await self._refresh_quiz_dashboard(
-                    message.guild, recent_session.session_id
-                )
-            return
+                if not history_update:
+                    await self._refresh_quiz_dashboard(
+                        message.guild, recent_session.session_id
+                    )
+                return recent_session.session_id
+            return None
 
         if session is None:
             session = self.database.get_active_quiz_session(message.channel.id)
@@ -480,11 +657,13 @@ class AnalyticsCog(commands.Cog):
             if (
                 previous_session is not None
                 and previous_session.session_id != session.session_id
+                and not history_update
             ):
                 await self._refresh_quiz_dashboard(
                     message.guild, previous_session.session_id
                 )
-            await self._ensure_quiz_dashboard(message.guild, session.session_id)
+            if not history_update:
+                await self._ensure_quiz_dashboard(message.guild, session.session_id)
         elif session is None and payload is not None:
             session = self.database.start_quiz_session(
                 message.guild.id,
@@ -496,17 +675,18 @@ class AnalyticsCog(commands.Cog):
                 ),
                 quizcord_quiz_id=quiz_id,
             )
-            await self._ensure_quiz_dashboard(message.guild, session.session_id)
+            if not history_update:
+                await self._ensure_quiz_dashboard(message.guild, session.session_id)
 
         if payload is None or session is None:
-            return
+            return None
 
         _, raw_payload = payload
         try:
             rows = parse_quiz_rows(raw_payload)
         except ValueError:
             LOGGER.warning("Ignoring oversized Quizcord leaderboard %s.", message.id)
-            return
+            return None
         if not rows:
             if quiz_id:
                 recent_session = self.database.get_recent_quiz_session(
@@ -519,13 +699,13 @@ class AnalyticsCog(commands.Cog):
                     await self._refresh_quiz_dashboard(
                         message.guild, recent_session.session_id
                     )
-                    return
+                    return recent_session.session_id
             LOGGER.warning(
                 "Quizcord leaderboard message %s had no recognizable result rows (%s).",
                 message.id,
                 leaderboard_structure(message),
             )
-            return
+            return None
 
         revision_key = (
             message.edited_at.isoformat()
@@ -533,6 +713,13 @@ class AnalyticsCog(commands.Cog):
             else message.created_at.isoformat()
         )
         is_final = is_final_leaderboard(message) or quiz_id is not None
+        completed_at = None
+        if is_final:
+            completed_at = (
+                session.completed_at or message.created_at.isoformat()
+                if history_update and session.status == "completed"
+                else datetime.now(timezone.utc).isoformat()
+            )
         summary = self.database.record_quiz_leaderboard(
             session.session_id,
             message.id,
@@ -540,9 +727,8 @@ class AnalyticsCog(commands.Cog):
             rows,
             is_final,
             quiz_id,
-            datetime.now(timezone.utc).isoformat()
-            if is_final
-            else None,
+            completed_at,
+            replace_existing=history_update,
         )
         if summary is None:
             LOGGER.debug(
@@ -550,13 +736,15 @@ class AnalyticsCog(commands.Cog):
                 revision_key,
                 session.session_id,
             )
-            return
+            return None
         LOGGER.info(
             "Recorded Quizcord leaderboard revision for session %s: %d rows.",
             session.session_id,
             len(rows),
         )
-        await self._refresh_quiz_dashboard(message.guild, session.session_id)
+        if not history_update:
+            await self._refresh_quiz_dashboard(message.guild, session.session_id)
+        return session.session_id
 
     async def _quiz_admin(
         self, guild: discord.Guild
@@ -610,9 +798,14 @@ class AnalyticsCog(commands.Cog):
         )
 
     async def _refresh_quiz_dashboard(
-        self, guild: discord.Guild, session_id: str
+        self,
+        guild: discord.Guild,
+        session_id: str,
+        *,
+        ensure: bool = True,
     ) -> None:
-        await self._ensure_quiz_dashboard(guild, session_id)
+        if ensure:
+            await self._ensure_quiz_dashboard(guild, session_id)
         if self.settings.dashboard_public_url:
             return
         session = self.database.get_quiz_session(session_id)

@@ -1506,9 +1506,68 @@ class DatabaseTests(unittest.TestCase):
             },
             {"ABC123": 9, "DEF456": 9},
         )
+
+    def test_history_update_replaces_final_roster_without_counting_a_new_update(
+        self,
+    ) -> None:
+        session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-31T10:00:00+00:00"
+        )
+        self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "original-revision",
+            [("1", "Student Nickname", "900")],
+            True,
+            "quiz-history-update",
+            "2026-10-31T10:10:00+00:00",
+        )
+
+        updated = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "reprocessed-revision",
+            [
+                ("1", "Student Nickname", "900"),
+                ("2", "New Student", "800"),
+            ],
+            True,
+            "quiz-history-update",
+            "2026-10-31T10:10:00+00:00",
+            replace_existing=True,
+        )
+
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated.session.question_count, 1)
+        self.assertEqual(len(updated.participants), 2)
+        self.assertEqual(
+            {participant.usn for participant in updated.participants},
+            {"ABC123", "NEW STUDENT"},
+        )
+        with self.database._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    """
+                    SELECT revision_key FROM quiz_session_updates
+                    WHERE session_id = ? AND message_id = ?
+                    """,
+                    (session.session_id, "5001"),
+                ).fetchone()[0],
+                "reprocessed-revision",
+            )
+            self.assertEqual(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM quiz_analytics
+                    WHERE guild_id = ? AND quiz_id = ?
+                    """,
+                    ("67890", "quiz-history-update"),
+                ).fetchone()[0],
+                2,
+            )
         self.assertEqual(
             self.database.get_student_quiz_analytics(67890, "ABC123").total_points,
-            9,
+            900,
         )
 
     def test_startup_repairs_existing_composite_mention_participant(self) -> None:

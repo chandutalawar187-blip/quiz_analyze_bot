@@ -217,6 +217,48 @@ class QuizcordParserTests(unittest.TestCase):
             ],
         )
 
+    def test_parses_more_than_96_players_in_large_grouped_leaderboard(self) -> None:
+        rows = [
+            f"#{rank}. <@{1400000000000000000 + rank}> — {10000 - rank}"
+            for rank in range(1, 96)
+        ]
+        tied_names = ", ".join(
+            f"<@{1400000000000000000 + rank}>"
+            for rank in range(96, 247)
+        )
+        payload = "\n".join((*rows, f"#96. {tied_names} — 0"))
+
+        embed = Mock()
+        embed.title = "Final leaderboard"
+        embed.description = payload
+        embed.author.name = ""
+        embed.fields = []
+        embed.footer.text = ""
+        message = Mock()
+        message.content = ""
+        message.embeds = [embed]
+        message.created_at.timestamp.return_value = 100
+
+        result = extract_leaderboard(message)
+
+        self.assertGreater(len(payload), 6000)
+        self.assertIsNotNone(result)
+        parsed_rows = parse_quiz_rows(result[1])
+        self.assertEqual(len(parsed_rows), 246)
+        self.assertEqual(parsed_rows[-1], ("96", "<@1400000000000000246>", "0"))
+
+    def test_parses_rows_after_inline_final_leaderboard_marker(self) -> None:
+        self.assertEqual(
+            parse_quiz_rows(
+                "#38. @Jyothi M E — 1783 Final leaderboard#39. "
+                "@4GM24CS007 — 1700"
+            ),
+            [
+                ("38", "@Jyothi M E", "1783"),
+                ("39", "@4GM24CS007", "1700"),
+            ],
+        )
+
     def test_does_not_treat_a_mention_id_as_a_bare_score(self) -> None:
         self.assertEqual(parse_quiz_rows("#1. <@1278920873730113539>"), [])
 

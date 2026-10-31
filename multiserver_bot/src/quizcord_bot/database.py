@@ -1552,30 +1552,63 @@ class Database:
         is_final: bool,
         quizcord_quiz_id: str | None = None,
         completed_at: str | None = None,
+        replace_existing: bool = False,
     ) -> QuizSessionSummary | None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             session_id = self._canonical_session_id(connection, session_id)
             session = self._get_session(connection, session_id)
-            cursor = connection.execute(
-                """
-                INSERT OR IGNORE INTO quiz_session_updates (
-                    session_id, message_id, revision_key, question_number
-                )
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    session_id,
-                    str(message_id),
-                    revision_key,
-                    session.question_count + 1,
-                ),
-            )
-            if cursor.rowcount == 0:
-                return None
+            existing_update = None
+            if replace_existing:
+                existing_update = connection.execute(
+                    """
+                    SELECT MAX(question_number)
+                    FROM quiz_session_updates
+                    WHERE session_id = ? AND message_id = ?
+                    """,
+                    (session_id, str(message_id)),
+                ).fetchone()[0]
 
-            question_number = session.question_count + 1
-            if is_final and session.status != "completed":
+            if existing_update is not None:
+                question_number = int(existing_update)
+                connection.execute(
+                    """
+                    DELETE FROM quiz_session_updates
+                    WHERE session_id = ? AND message_id = ?
+                    """,
+                    (session_id, str(message_id)),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO quiz_session_updates (
+                        session_id, message_id, revision_key, question_number
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (session_id, str(message_id), revision_key, question_number),
+                )
+            else:
+                question_number = session.question_count + 1
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO quiz_session_updates (
+                        session_id, message_id, revision_key, question_number
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        session_id,
+                        str(message_id),
+                        revision_key,
+                        question_number,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    return None
+
+            if is_final and (
+                replace_existing or session.status != "completed"
+            ):
                 connection.execute(
                     "DELETE FROM quiz_session_participants WHERE session_id = ?",
                     (session_id,),
@@ -1583,15 +1616,20 @@ class Database:
             connection.execute(
                 """
                 UPDATE quiz_sessions
-                SET question_count = ?,
-                    status = ?,
+                SET question_count = MAX(question_count, ?),
+                    status = CASE
+                        WHEN ? THEN 'completed'
+                        WHEN ? THEN status
+                        ELSE 'active'
+                    END,
                     completed_at = CASE WHEN ? THEN ? ELSE completed_at END,
                     quizcord_quiz_id = COALESCE(?, quizcord_quiz_id)
                 WHERE session_id = ?
                 """,
                 (
                     question_number,
-                    "completed" if is_final else "active",
+                    int(is_final),
+                    int(replace_existing and session.status == "completed"),
                     int(is_final),
                     completed_at,
                     quizcord_quiz_id,
@@ -1727,9 +1765,27 @@ class Database:
                     (session_id, usn, int(rank), points, discord_id, int(eligible)),
                 )
 
-            if is_final:
+            if is_final or (
+                replace_existing and session.status == "completed"
+            ):
+                if replace_existing:
+                    result_ids = {
+                        session_id,
+                        session.quizcord_quiz_id or session_id,
+                        quizcord_quiz_id or session.quizcord_quiz_id or session_id,
+                    }
+                    placeholders = ",".join("?" for _ in result_ids)
+                    connection.execute(
+                        f"""
+                        DELETE FROM quiz_analytics
+                        WHERE guild_id = ? AND quiz_id IN ({placeholders})
+                        """,
+                        (str(session.guild_id), *sorted(result_ids)),
+                    )
                 self._persist_session_results(
-                    connection, session_id, quizcord_quiz_id or session_id
+                    connection,
+                    session_id,
+                    quizcord_quiz_id or session.quizcord_quiz_id or session_id,
                 )
 
             return self._get_quiz_session_summary(connection, session_id)
