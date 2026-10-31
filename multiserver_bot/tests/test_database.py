@@ -1535,6 +1535,7 @@ class DatabaseTests(unittest.TestCase):
             "quiz-history-update",
             "2026-10-31T10:10:00+00:00",
             replace_existing=True,
+            reset_participants=True,
         )
 
         self.assertIsNotNone(updated)
@@ -1568,6 +1569,53 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(
             self.database.get_student_quiz_analytics(67890, "ABC123").total_points,
             900,
+        )
+
+    def test_history_update_accumulates_final_leaderboard_messages(
+        self,
+    ) -> None:
+        session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-31T10:00:00+00:00"
+        )
+        self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "old-revision",
+            [("1", "Student Nickname", "900")],
+            True,
+            "quiz-history-pages",
+            "2026-10-31T10:10:00+00:00",
+        )
+
+        first_page = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "reprocessed-page-one",
+            [("1", "Student Nickname", "900")],
+            True,
+            "quiz-history-pages",
+            "2026-10-31T10:10:00+00:00",
+            replace_existing=True,
+            reset_participants=True,
+        )
+        second_page = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5002,
+            "reprocessed-page-two",
+            [("2", "Second Student", "800")],
+            True,
+            "quiz-history-pages",
+            "2026-10-31T10:10:00+00:00",
+            replace_existing=True,
+            reset_participants=False,
+        )
+
+        self.assertIsNotNone(first_page)
+        self.assertIsNotNone(second_page)
+        self.assertEqual(second_page.session.question_count, 2)
+        self.assertEqual(
+            {participant.usn for participant in second_page.participants},
+            {"ABC123", "SECOND STUDENT"},
         )
 
     def test_startup_repairs_existing_composite_mention_participant(self) -> None:

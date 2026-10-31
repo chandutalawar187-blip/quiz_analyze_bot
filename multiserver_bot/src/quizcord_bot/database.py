@@ -1553,6 +1553,7 @@ class Database:
         quizcord_quiz_id: str | None = None,
         completed_at: str | None = None,
         replace_existing: bool = False,
+        reset_participants: bool = False,
     ) -> QuizSessionSummary | None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1606,8 +1607,8 @@ class Database:
                 if cursor.rowcount == 0:
                     return None
 
-            if is_final and (
-                replace_existing or session.status != "completed"
+            if reset_participants or (
+                is_final and session.status != "completed"
             ):
                 connection.execute(
                     "DELETE FROM quiz_session_participants WHERE session_id = ?",

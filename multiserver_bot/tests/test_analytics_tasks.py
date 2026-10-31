@@ -53,6 +53,7 @@ class QuizNotificationTests(unittest.IsolatedAsyncioTestCase):
         )
         cog._handle_quizcord_message = AsyncMock(return_value="session-1")
         cog._refresh_quiz_dashboard = AsyncMock()
+        reset_snapshot_sessions = set()
 
         with (
             patch("quizcord_bot.cogs.analytics.datetime", FixedDateTime),
@@ -75,6 +76,7 @@ class QuizNotificationTests(unittest.IsolatedAsyncioTestCase):
         cog._handle_quizcord_message.assert_awaited_once_with(
             yesterday_message,
             history_update=True,
+            reset_snapshot_sessions=reset_snapshot_sessions,
         )
         self.assertEqual(
             captured_history_args["after"],

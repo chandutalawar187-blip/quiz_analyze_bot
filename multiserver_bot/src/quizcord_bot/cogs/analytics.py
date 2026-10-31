@@ -267,6 +267,7 @@ class AnalyticsCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         updated_sessions: set[str] = set()
+        reset_snapshot_sessions: set[str] = set()
         candidate_messages = 0
         oversized_messages = 0
         try:
@@ -303,6 +304,7 @@ class AnalyticsCog(commands.Cog):
                 session_id = await self._handle_quizcord_message(
                     message,
                     history_update=True,
+                    reset_snapshot_sessions=reset_snapshot_sessions,
                 )
                 if session_id is not None:
                     updated_sessions.add(session_id)
@@ -599,6 +601,7 @@ class AnalyticsCog(commands.Cog):
         message: discord.Message,
         *,
         history_update: bool = False,
+        reset_snapshot_sessions: set[str] | None = None,
     ) -> str | None:
         if message.guild is None:
             return None
@@ -729,6 +732,11 @@ class AnalyticsCog(commands.Cog):
             quiz_id,
             completed_at,
             replace_existing=history_update,
+            reset_participants=(
+                history_update
+                and reset_snapshot_sessions is not None
+                and session.session_id not in reset_snapshot_sessions
+            ),
         )
         if summary is None:
             LOGGER.debug(
@@ -737,6 +745,8 @@ class AnalyticsCog(commands.Cog):
                 session.session_id,
             )
             return None
+        if history_update and reset_snapshot_sessions is not None:
+            reset_snapshot_sessions.add(session.session_id)
         LOGGER.info(
             "Recorded Quizcord leaderboard revision for session %s: %d rows.",
             session.session_id,
