@@ -560,71 +560,7 @@ class Database:
                     sorted(quiz_ids),
                 )
                 continue
-            if (
-                len({str(row[1]) for row in sessions}) != 1
-                or any(row[1] == "completed" for row in sessions)
-            ):
-                LOGGER.warning(
-                    "Keeping separate quiz sessions for guild %s, channel %s "
-                    "on %s because their completion states differ or are "
-                    "already completed.",
-                    guild_id,
-                    channel_id,
-                    quiz_day,
-                )
-                continue
             session_ids = [str(row[0]) for row in sessions]
-            message_rows = connection.execute(
-                """
-                SELECT u.session_id, u.message_id
-                FROM quiz_session_updates AS u
-                JOIN quiz_sessions AS s ON s.session_id = u.session_id
-                WHERE s.guild_id = ? AND s.channel_id = ?
-                  AND substr(s.started_at, 1, 10) = ?
-                  AND s.status != 'merged'
-                """,
-                (guild_id, channel_id, quiz_day),
-            ).fetchall()
-            message_ids_by_session = {
-                session_id: set() for session_id in session_ids
-            }
-            for session_id, message_id in message_rows:
-                message_ids_by_session[str(session_id)].add(str(message_id))
-            session_message_sets = list(message_ids_by_session.values())
-            if (
-                not session_message_sets[0]
-                or any(
-                    message_ids != session_message_sets[0]
-                    for message_ids in session_message_sets[1:]
-                )
-            ):
-                LOGGER.warning(
-                    "Keeping separate quiz sessions for guild %s, channel %s "
-                    "on %s because their leaderboard message histories differ.",
-                    guild_id,
-                    channel_id,
-                    quiz_day,
-                )
-                continue
-            analytics_ids = set(session_ids) | quiz_ids
-            placeholders = ",".join("?" for _ in analytics_ids)
-            existing_analytics = connection.execute(
-                f"""
-                SELECT 1 FROM quiz_analytics
-                WHERE guild_id = ? AND quiz_id IN ({placeholders})
-                LIMIT 1
-                """,
-                (str(guild_id), *sorted(analytics_ids)),
-            ).fetchone()
-            if existing_analytics:
-                LOGGER.warning(
-                    "Keeping separate quiz sessions for guild %s, channel %s "
-                    "on %s because analytics rows already exist.",
-                    guild_id,
-                    channel_id,
-                    quiz_day,
-                )
-                continue
 
             identified_sessions = [
                 row for row in sessions if row[5] is not None
@@ -775,9 +711,7 @@ class Database:
                 """,
                 (canonical_id, canonical_id),
             )
-            analytics_ids = duplicate_ids + (
-                [canonical_id] if quiz_id and quiz_id != canonical_id else []
-            )
+            analytics_ids = sorted(set(session_ids) | ({quiz_id} if quiz_id else set()))
             if analytics_ids:
                 placeholders = ",".join("?" for _ in analytics_ids)
                 connection.execute(
@@ -1105,6 +1039,7 @@ class Database:
         admin_user_id: int,
         started_at: str,
         eligible_student_count: int | None = None,
+        quizcord_quiz_id: str | None = None,
     ) -> QuizSession:
         with self._connect() as connection:
             active = connection.execute(
@@ -1112,12 +1047,36 @@ class Database:
                 SELECT session_id, started_at,
                        (SELECT MAX(CAST(message_id AS INTEGER))
                         FROM quiz_session_updates
-                        WHERE session_id = quiz_sessions.session_id)
+                        WHERE session_id = quiz_sessions.session_id),
+                       quizcord_quiz_id
                 FROM quiz_sessions
                 WHERE channel_id = ? AND status = 'active'
                 """,
                 (str(channel_id),),
             ).fetchone()
+            if (
+                active
+                and quizcord_quiz_id
+                and active[3]
+                and active[3] != quizcord_quiz_id
+            ):
+                connection.execute(
+                    """
+                    UPDATE quiz_sessions
+                    SET status = 'interrupted'
+                    WHERE session_id = ? AND status = 'active'
+                    """,
+                    (active[0],),
+                )
+                LOGGER.warning(
+                    "Starting a separate quiz session in channel %s because "
+                    "Quizcord ID %s conflicts with active session %s ID %s.",
+                    channel_id,
+                    quizcord_quiz_id,
+                    active[0],
+                    active[3],
+                )
+                active = None
             if active:
                 try:
                     active_started_at = datetime.fromisoformat(str(active[1]))
@@ -1171,6 +1130,38 @@ class Database:
                     active[0],
                     channel_id,
                 )
+                active = None
+
+            completed_today = connection.execute(
+                """
+                SELECT session_id
+                FROM quiz_sessions
+                WHERE guild_id = ? AND channel_id = ?
+                  AND status = 'completed'
+                  AND substr(started_at, 1, 10) = substr(?, 1, 10)
+                  AND (
+                      ? IS NULL OR quizcord_quiz_id IS NULL
+                      OR quizcord_quiz_id = ?
+                  )
+                ORDER BY completed_at DESC, started_at DESC
+                LIMIT 1
+                """,
+                (
+                    str(guild_id),
+                    str(channel_id),
+                    started_at,
+                    quizcord_quiz_id,
+                    quizcord_quiz_id,
+                ),
+            ).fetchone()
+            if completed_today:
+                LOGGER.info(
+                    "Reusing completed quiz session %s for another same-day "
+                    "Quizcord leaderboard in channel %s.",
+                    completed_today[0],
+                    channel_id,
+                )
+                return self._get_session(connection, completed_today[0])
 
             session_id = uuid.uuid4().hex
             connection.execute(
@@ -1584,7 +1575,7 @@ class Database:
                 return None
 
             question_number = session.question_count + 1
-            if is_final:
+            if is_final and session.status != "completed":
                 connection.execute(
                     "DELETE FROM quiz_session_participants WHERE session_id = ?",
                     (session_id,),

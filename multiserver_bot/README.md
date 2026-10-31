@@ -511,6 +511,9 @@ continues to use its private Discord dashboard.
 - The final leaderboard completes the session when labeled as final. If
   Quizcord posts the Quiz ID in a separate follow-up embed, that ID also marks
   the session complete and is attached to the final result.
+- Multiple leaderboard messages for the same channel and quiz day are combined
+  into one session, including completed fragments. Sessions with conflicting
+  Quizcord IDs are kept separate.
 - Scorecards show the student's rank, score, and the number of **distinct
   Quizcord quizzes** in which they appear in imported results. Re-importing or
   updating the same quiz does not increase the attendance count.

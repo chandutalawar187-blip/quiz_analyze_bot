@@ -475,6 +475,7 @@ class AnalyticsCog(commands.Cog):
                 eligible_student_count=self.database.get_human_member_count(
                     message.guild.id
                 ),
+                quizcord_quiz_id=quiz_id,
             )
             if (
                 previous_session is not None
@@ -493,6 +494,7 @@ class AnalyticsCog(commands.Cog):
                 eligible_student_count=self.database.get_human_member_count(
                     message.guild.id
                 ),
+                quizcord_quiz_id=quiz_id,
             )
             await self._ensure_quiz_dashboard(message.guild, session.session_id)
 
