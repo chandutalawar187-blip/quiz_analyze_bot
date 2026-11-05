@@ -1618,6 +1618,53 @@ class DatabaseTests(unittest.TestCase):
             {"ABC123", "SECOND STUDENT"},
         )
 
+    def test_unmapped_grouped_mentions_without_member_cache_remain_distinct(
+        self,
+    ) -> None:
+        leaderboard_lines = []
+        for rank in range(1, 96):
+            discord_id = 12345 if rank == 1 else 2000 + rank
+            if rank > 1:
+                member = SimpleNamespace(
+                    id=discord_id,
+                    name=f"student_{rank}",
+                    display_name=f"Student {rank}",
+                    status=SimpleNamespace(name="online"),
+                    bot=False,
+                )
+                self.database.map_student(
+                    member, f"USN{rank:03}", f"Student {rank}"
+                )
+            leaderboard_lines.append(
+                f"#{rank}. <@{discord_id}> — {1000 - rank}"
+            )
+        grouped_mentions = ", ".join(
+            f"<@{discord_id}>" for discord_id in range(3000, 3150)
+        )
+        leaderboard_lines.append(f"#96. {grouped_mentions} — 0")
+        rows = parse_quiz_rows("\n".join(leaderboard_lines))
+        session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-31T10:00:00+00:00"
+        )
+
+        summary = self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "final",
+            rows,
+            True,
+            "quiz-unmapped-mentions",
+        )
+
+        self.assertIsNotNone(summary)
+        self.assertEqual(len(rows), 245)
+        self.assertEqual(len(summary.participants), 245)
+        self.assertEqual(summary.attendance_count, 245)
+        self.assertEqual(
+            len({participant.discord_id for participant in summary.participants}),
+            245,
+        )
+
     def test_startup_repairs_existing_composite_mention_participant(self) -> None:
         session = self.database.start_quiz_session(
             67890, 1001, 12345, "2026-10-01T10:00:00+00:00"

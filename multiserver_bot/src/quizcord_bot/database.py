@@ -1706,11 +1706,13 @@ class Database:
                         """,
                         (str(session.guild_id), discord_id),
                     ).fetchone()
-                    eligible = not bool(member_record[0]) if member_record else False
+                    eligible = (
+                        not bool(member_record[0]) if member_record else True
+                    )
                     display_name = (
                         str(member_record[1]).strip()
                         if member_record and member_record[1]
-                        else "Unmapped Discord member"
+                        else f"Discord user {discord_id}"
                     )
                     usn = display_name
                     connection.execute(
@@ -1747,6 +1749,19 @@ class Database:
                     continue
                 if not usn:
                     continue
+                if discord_id is not None:
+                    existing_identity = connection.execute(
+                        """
+                        SELECT discord_id FROM quiz_session_participants
+                        WHERE session_id = ? AND usn = ?
+                        """,
+                        (session_id, usn),
+                    ).fetchone()
+                    if (
+                        existing_identity is not None
+                        and existing_identity[0] != discord_id
+                    ):
+                        usn = f"{usn} ({discord_id})"
                 points = int(score)
                 connection.execute(
                     """
