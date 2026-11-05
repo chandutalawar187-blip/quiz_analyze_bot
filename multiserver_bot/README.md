@@ -487,6 +487,8 @@ continues to use its private Discord dashboard.
   global display name exactly matches an accepted USN format, the directory
   shows that value as their USN; this inferred value does not create a student
   mapping or populate a student name.
+  The **Top leaderboard** tab previews weekly and lifelong best performers;
+  its rankings are marked as coming soon.
   The Discord fallback buttons remain usable after a bot restart.
 - Quiz attendance summaries show attendees over the human guild-member count
   and an attendance percentage. The dashboard labels this count

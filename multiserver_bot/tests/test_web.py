@@ -1051,6 +1051,16 @@ class DashboardWebTests(unittest.TestCase):
         )
         self.assertIn('data-session-replay-enabled="false"', disabled)
         self.assertIn('data-session-replay-dsn=""', disabled)
+        self.assertIn('data-view="top-leaderboard"', enabled)
+        dashboard_script = self.client.get("/static/admin-dashboard.js")
+        self.assertEqual(dashboard_script.status_code, 200)
+        self.assertIn("function renderTopLeaderboard()", dashboard_script.text)
+        self.assertIn("Weekly best performer", dashboard_script.text)
+        self.assertIn("Lifelong best performer", dashboard_script.text)
+        dashboard_styles = self.client.get("/static/admin-dashboard.css")
+        self.assertEqual(dashboard_styles.status_code, 200)
+        self.assertIn(".skeleton::after", dashboard_styles.text)
+        self.assertIn("leaderboard-skeleton-shimmer", dashboard_styles.text)
 
     def test_sentry_browser_csp_allows_only_configured_ingest_origin(self) -> None:
         settings = replace(
