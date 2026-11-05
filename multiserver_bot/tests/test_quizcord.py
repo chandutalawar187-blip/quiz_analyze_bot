@@ -247,6 +247,27 @@ class QuizcordParserTests(unittest.TestCase):
         self.assertEqual(len(parsed_rows), 246)
         self.assertEqual(parsed_rows[-1], ("96", "<@1400000000000000246>", "0"))
 
+    def test_parses_unranked_group_after_final_leaderboard_marker(self) -> None:
+        ranked_lines = [
+            f"#{rank}. <@{2000 + rank}> — {1000 - rank}"
+            for rank in range(1, 95)
+        ]
+        trailing_mentions = ", ".join(
+            f"<@{3000 + rank}>" for rank in range(150)
+        )
+        payload = "\n".join(
+            (
+                *ranked_lines,
+                f"#95. <@2095> — 905Final leaderboard{trailing_mentions} — 0 Total players 245",
+            )
+        )
+
+        rows = parse_quiz_rows(payload)
+
+        self.assertEqual(len(rows), 245)
+        self.assertEqual(rows[-150][0], "96")
+        self.assertEqual(rows[-1], ("96", "<@3149>", "0"))
+
     def test_parses_rows_after_inline_final_leaderboard_marker(self) -> None:
         self.assertEqual(
             parse_quiz_rows(

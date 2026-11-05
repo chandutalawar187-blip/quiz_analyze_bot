@@ -1641,7 +1641,9 @@ class DatabaseTests(unittest.TestCase):
         grouped_mentions = ", ".join(
             f"<@{discord_id}>" for discord_id in range(3000, 3150)
         )
-        leaderboard_lines.append(f"#96. {grouped_mentions} — 0")
+        leaderboard_lines[-1] += (
+            f"Final leaderboard{grouped_mentions} — 0 Total players 245"
+        )
         rows = parse_quiz_rows("\n".join(leaderboard_lines))
         session = self.database.start_quiz_session(
             67890, 1001, 12345, "2026-10-31T10:00:00+00:00"
