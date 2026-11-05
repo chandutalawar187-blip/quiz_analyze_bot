@@ -7,6 +7,8 @@ import discord
 
 MAX_LEADERBOARD_LENGTH = 25_000
 MAX_LEADERBOARD_ROWS = 500
+FINAL_LEADERBOARD_MARKER = "FINAL_LEADERBOARD_MARKER"
+DISCORD_MENTION_PATTERN = re.compile(r"<@!?\d+>")
 QUIZ_ROW_PATTERNS = (
     re.compile(
         r"(?<!\S)#?(?P<rank>\d+)\.\s*(?P<username>.+?)\s*"
@@ -21,6 +23,24 @@ QUIZ_ROW_PATTERNS = (
         r"(?:\*\*)?(?P<score>\d+)(?:\*\*)?\s*$"
     ),
 )
+UNRANKED_GROUP_PATTERN = re.compile(
+    r"(?P<username>.+?)\s*(?:—|–|-|:)\s*"
+    r"(?:\*\*)?(?P<score>\d+)(?:\*\*)?(?:\s+.*)?$"
+)
+RANKED_GROUP_WITHOUT_SCORE_PATTERN = re.compile(
+    r"(?<!\S)#?(?P<rank>\d+)\.\s*(?P<username>.+?)\s*$"
+)
+
+
+def _split_grouped_usernames(username: str) -> list[str]:
+    return [
+        value
+        for value in (
+            item.strip().strip("*_`")
+            for item in re.split(r",\s*(?=@|<@)", username)
+        )
+        if value
+    ]
 
 
 def is_quizcord_author(
@@ -45,28 +65,97 @@ def parse_quiz_rows(payload: str) -> list[tuple[str, str, str]]:
     rows: list[tuple[str, str, str]] = []
     normalized_payload = re.sub(
         r"final\s+leaderboard",
-        "\n",
+        f"\n{FINAL_LEADERBOARD_MARKER}\n",
         payload,
         flags=re.IGNORECASE,
     )
+    highest_rank = 0
+    after_final_marker = False
+    pending_groups: list[tuple[str, list[str]]] = []
     for line in normalized_payload.splitlines():
+        if line.strip() == FINAL_LEADERBOARD_MARKER:
+            after_final_marker = True
+            continue
+
         for pattern in QUIZ_ROW_PATTERNS:
             match = pattern.search(line.strip())
             if match:
-                usernames = (
-                    username.strip().strip("*_`")
-                    for username in re.split(r",\s*(?=@|<@)", match.group("username"))
-                )
+                rank = match.group("rank")
+                score = match.group("score")
+                if (
+                    after_final_marker
+                    and pending_groups
+                    and rank == "1"
+                    and score == "0"
+                ):
+                    for pending_rank, usernames in pending_groups:
+                        rows.extend(
+                            (pending_rank, username, score)
+                            for username in usernames
+                        )
+                    rank = pending_groups[-1][0]
+                    pending_groups.clear()
+                highest_rank = max(highest_rank, int(rank))
+                usernames = _split_grouped_usernames(match.group("username"))
                 rows.extend(
-                    (match.group("rank"), username, match.group("score"))
+                    (rank, username, score)
                     for username in usernames
-                    if username
                 )
                 if len(rows) > MAX_LEADERBOARD_ROWS:
                     raise ValueError(
                         f"A leaderboard cannot contain more than {MAX_LEADERBOARD_ROWS} entries."
                     )
+                after_final_marker = False
                 break
+        else:
+            if not after_final_marker:
+                continue
+            line_value = line.strip()
+            rank_only_match = RANKED_GROUP_WITHOUT_SCORE_PATTERN.fullmatch(
+                line_value
+            )
+            if rank_only_match is not None:
+                usernames = _split_grouped_usernames(
+                    rank_only_match.group("username")
+                )
+                if len(usernames) > 1 and any(
+                    DISCORD_MENTION_PATTERN.fullmatch(username)
+                    for username in usernames
+                ):
+                    rank = rank_only_match.group("rank")
+                    highest_rank = max(highest_rank, int(rank))
+                    pending_groups.append((rank, usernames))
+                continue
+
+            match = UNRANKED_GROUP_PATTERN.fullmatch(line_value)
+            if match is None:
+                continue
+            usernames = _split_grouped_usernames(match.group("username"))
+            if len(usernames) < 2 or not any(
+                DISCORD_MENTION_PATTERN.fullmatch(username)
+                for username in usernames
+            ):
+                continue
+            inferred_rank = (
+                pending_groups[-1][0]
+                if pending_groups
+                else str(highest_rank + 1)
+            )
+            for rank, group_usernames in pending_groups:
+                rows.extend(
+                    (rank, username, match.group("score"))
+                    for username in group_usernames
+                )
+            rows.extend(
+                (inferred_rank, username, match.group("score"))
+                for username in usernames
+            )
+            pending_groups.clear()
+            highest_rank = max(highest_rank, int(inferred_rank))
+            if len(rows) > MAX_LEADERBOARD_ROWS:
+                raise ValueError(
+                    f"A leaderboard cannot contain more than {MAX_LEADERBOARD_ROWS} entries."
+                )
     return rows
 
 
