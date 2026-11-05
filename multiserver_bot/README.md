@@ -94,7 +94,7 @@ you want.
    this step if you do not need faculty dashboard access.
 5. Use the slash commands when needed: `/map_student` to link a member to a
    student identifier, `/process_quizcord` to import a leaderboard manually,
-   `/history_update` to refresh today's or yesterday's Quizcord results in the
+   `/history_update` to refresh Quizcord results for a chosen date in the
    current channel, and `/export_analytics` to download analytics.
 
 If the publisher has enabled the web dashboard, server administrators sign in
@@ -455,9 +455,10 @@ continues to use its private Discord dashboard.
   start date and time are saved automatically. Its optional `quiz_date` field
   accepts `YYYY-MM-DD` for a date override; if the start was not tracked and
   no override is provided, the import timestamp is saved.
-- `/history_update`: Re-read today's or yesterday's Quizcord messages in the
-  current channel and replace previously saved leaderboard rows. Dates use
-  India Standard Time; the bot needs View Channel and Read Message History.
+- `/history_update`: Re-read Quizcord messages for `today`, `yesterday`, or a
+  custom `YYYY-MM-DD` date in the current channel and replace previously saved
+  leaderboard rows. Relative dates use India Standard Time; the bot needs View
+  Channel and Read Message History.
 - `/export_analytics`: Download the private aggregate Excel workbook (`.xlsx`).
 - `/clear_quiz_history`: Permanently delete saved quiz sessions, leaderboard
   results, and analytics for the current server after entering `DELETE`.

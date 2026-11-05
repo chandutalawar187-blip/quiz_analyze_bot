@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import sqlite3
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date as Date, datetime, time, timedelta, timezone
 from io import BytesIO
 
 import discord
@@ -170,7 +170,7 @@ class AnalyticsCog(commands.Cog):
         if quiz_date and quiz_date.strip():
             date_value = quiz_date.strip()
             try:
-                parsed_date = date.fromisoformat(date_value)
+                parsed_date = Date.fromisoformat(date_value)
             except ValueError:
                 await interaction.response.send_message(
                     "Enter the quiz date in YYYY-MM-DD format, for example 2026-10-17.",
@@ -217,17 +217,9 @@ class AnalyticsCog(commands.Cog):
 
     @app_commands.command(
         name="history_update",
-        description="Re-read Quizcord results from today or yesterday in this channel.",
+        description="Re-read Quizcord results for a date in this channel.",
     )
-    @app_commands.describe(
-        date="Choose which day's Quizcord leaderboard history to refresh."
-    )
-    @app_commands.choices(
-        date=[
-            app_commands.Choice(name="Today", value="today"),
-            app_commands.Choice(name="Yesterday", value="yesterday"),
-        ]
-    )
+    @app_commands.describe(date="Enter today, yesterday, or a date as YYYY-MM-DD.")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -235,7 +227,7 @@ class AnalyticsCog(commands.Cog):
     async def history_update(
         self,
         interaction: discord.Interaction,
-        date: app_commands.Choice[str],
+        date: str,
     ) -> None:
         channel = interaction.channel
         history = getattr(channel, "history", None)
@@ -259,9 +251,25 @@ class AnalyticsCog(commands.Cog):
             )
             return
 
+        date_value = date.strip().casefold()
         target_day = datetime.now(IST).date()
-        if date.value == "yesterday":
+        if date_value == "yesterday":
             target_day -= timedelta(days=1)
+        elif date_value != "today":
+            try:
+                target_day = Date.fromisoformat(date_value)
+            except ValueError:
+                await interaction.response.send_message(
+                    "Enter today, yesterday, or a calendar date in YYYY-MM-DD format.",
+                    ephemeral=True,
+                )
+                return
+            if target_day.isoformat() != date_value:
+                await interaction.response.send_message(
+                    "Enter today, yesterday, or a calendar date in YYYY-MM-DD format.",
+                    ephemeral=True,
+                )
+                return
         day_start = datetime.combine(target_day, time.min, tzinfo=IST)
         day_end = day_start + timedelta(days=1)
         await interaction.response.defer(ephemeral=True)

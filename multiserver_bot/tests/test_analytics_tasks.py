@@ -5,8 +5,6 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-from discord import app_commands
-
 from quizcord_bot.cogs.analytics import AnalyticsCog
 
 
@@ -69,7 +67,7 @@ class QuizNotificationTests(unittest.IsolatedAsyncioTestCase):
             await AnalyticsCog.history_update.callback(
                 cog,
                 interaction,
-                app_commands.Choice(name="Yesterday", value="yesterday"),
+                "2026-10-30",
             )
 
         interaction.response.defer.assert_awaited_once_with(ephemeral=True)
