@@ -18,12 +18,16 @@ class QuizNotificationTests(unittest.IsolatedAsyncioTestCase):
             created_at=datetime(2026, 10, 30, 5, tzinfo=timezone.utc),
             author=SimpleNamespace(id=3, bot=True, name="Quizcord"),
             webhook_id=None,
+            content="Final leaderboard #1. student_one — 500 Total players 1",
+            embeds=[],
         )
         outside_message = SimpleNamespace(
             id=2,
             created_at=datetime(2026, 10, 31, 19, tzinfo=timezone.utc),
             author=SimpleNamespace(id=3, bot=True, name="Quizcord"),
             webhook_id=None,
+            content="Final leaderboard #1. student_two — 500 Total players 1",
+            embeds=[],
         )
 
         async def channel_history(**kwargs):
@@ -75,6 +79,8 @@ class QuizNotificationTests(unittest.IsolatedAsyncioTestCase):
             yesterday_message,
             history_update=True,
             reset_snapshot_sessions=reset_snapshot_sessions,
+            leaderboard_payload="leaderboard",
+            quizcord_quiz_id=None,
         )
         self.assertEqual(
             captured_history_args["after"],
@@ -92,6 +98,106 @@ class QuizNotificationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             "for 2026-10-30 (IST)",
+            interaction.followup.send.await_args.args[0],
+        )
+        self.assertIn(
+            "1 final leaderboard message(s)",
+            interaction.followup.send.await_args.args[0],
+        )
+
+    async def test_history_update_processes_only_final_leaderboard_until_end(
+        self,
+    ) -> None:
+        day = datetime(2026, 10, 30, 5, tzinfo=timezone.utc)
+        author = SimpleNamespace(id=3, bot=True, name="Quizcord")
+        messages = [
+            SimpleNamespace(
+                id=index,
+                created_at=day,
+                author=author,
+                webhook_id=None,
+                content=f"Leaderboard update #{index}. student — {index}",
+                embeds=[],
+            )
+            for index in range(1, 24)
+        ]
+        final_start = SimpleNamespace(
+            id=24,
+            created_at=day,
+            author=author,
+            webhook_id=None,
+            content="Final leaderboard #96. <@1001>, <@1002>",
+            embeds=[],
+        )
+        final_end = SimpleNamespace(
+            id=25,
+            created_at=day,
+            author=author,
+            webhook_id=None,
+            content="<@1003>, <@1004> — 0 Total players 246",
+            embeds=[],
+        )
+        messages.extend((final_start, final_end))
+
+        async def channel_history(**kwargs):
+            for message in messages:
+                yield message
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 10, 31, 10, tzinfo=timezone.utc).astimezone(tz)
+
+        channel = SimpleNamespace(id=12, history=channel_history)
+        interaction = SimpleNamespace(
+            channel=channel,
+            guild_id=1,
+            guild=Mock(),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        cog = AnalyticsCog(
+            Mock(),
+            SimpleNamespace(quizcord_bot_id=None),
+            Mock(),
+        )
+        cog._handle_quizcord_message = AsyncMock(return_value="session-1")
+        cog._refresh_quiz_dashboard = AsyncMock()
+
+        def extracted_leaderboard(message):
+            if "leaderboard" in message.content.casefold():
+                return "quiz", message.content
+            return None
+
+        with (
+            patch("quizcord_bot.cogs.analytics.datetime", FixedDateTime),
+            patch(
+                "quizcord_bot.cogs.analytics.extract_leaderboard",
+                side_effect=extracted_leaderboard,
+            ),
+            patch(
+                "quizcord_bot.cogs.analytics.extract_quizcord_id",
+                return_value=None,
+            ),
+        ):
+            await AnalyticsCog.history_update.callback(
+                cog,
+                interaction,
+                "2026-10-30",
+            )
+
+        cog._handle_quizcord_message.assert_awaited_once_with(
+            final_start,
+            history_update=True,
+            reset_snapshot_sessions=set(),
+            leaderboard_payload=(
+                "Final leaderboard #96. <@1001>, <@1002>\n"
+                "<@1003>, <@1004> — 0 Total players 246"
+            ),
+            quizcord_quiz_id=None,
+        )
+        self.assertIn(
+            "2 final leaderboard message(s)",
             interaction.followup.send.await_args.args[0],
         )
 

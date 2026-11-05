@@ -160,38 +160,36 @@ def parse_quiz_rows(payload: str) -> list[tuple[str, str, str]]:
 
 
 def extract_leaderboard(message: discord.Message) -> tuple[str, str] | None:
-    sections: list[str] = []
-    is_leaderboard = False
+    content = leaderboard_message_text(message)
     quiz_id = extract_quizcord_id(message)
-
-    message_content = message.content or ""
-    if message_content:
-        if "leaderboard" in message_content.casefold():
-            is_leaderboard = True
-        sections.append(message_content)
-
+    is_leaderboard = "leaderboard" in (message.content or "").casefold()
     for embed in message.embeds:
         title = embed.title or ""
         description = embed.description or ""
         if "leaderboard" in title.casefold() or "leaderboard" in description.casefold():
             is_leaderboard = True
-        sections.extend((title, description))
+
+    if not is_leaderboard:
+        return None
+
+    if len(content) > MAX_LEADERBOARD_LENGTH:
+        raise ValueError(
+            f"Quizcord embed text cannot exceed {MAX_LEADERBOARD_LENGTH} characters."
+        )
+    return quiz_id or f"Auto_{int(message.created_at.timestamp())}", content
+
+
+def leaderboard_message_text(message: discord.Message) -> str:
+    sections = [message.content or ""]
+    for embed in message.embeds:
+        sections.extend((embed.title or "", embed.description or ""))
         if embed.author.name:
             sections.append(embed.author.name)
         for field in embed.fields:
             sections.extend((field.name, field.value))
         if embed.footer.text:
             sections.append(embed.footer.text)
-
-    if not is_leaderboard:
-        return None
-
-    payload = "\n".join(sections)
-    if len(payload) > MAX_LEADERBOARD_LENGTH:
-        raise ValueError(
-            f"Quizcord embed text cannot exceed {MAX_LEADERBOARD_LENGTH} characters."
-        )
-    return quiz_id or f"Auto_{int(message.created_at.timestamp())}", payload
+    return "\n".join(sections)
 
 
 def extract_quizcord_id(message: discord.Message) -> str | None:
@@ -226,6 +224,16 @@ def is_final_leaderboard(message: discord.Message) -> bool:
         sections.extend((embed.title or "", embed.description or ""))
         sections.extend(field.name + "\n" + field.value for field in embed.fields)
     return "final leaderboard" in "\n".join(sections).casefold()
+
+
+def is_final_leaderboard_end(message: discord.Message) -> bool:
+    return bool(
+        re.search(
+            r"\btotal\s+players\b",
+            leaderboard_message_text(message),
+            re.IGNORECASE,
+        )
+    )
 
 
 def leaderboard_structure(message: discord.Message) -> str:

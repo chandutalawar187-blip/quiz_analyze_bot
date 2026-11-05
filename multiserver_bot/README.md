@@ -457,9 +457,11 @@ continues to use its private Discord dashboard.
   accepts `YYYY-MM-DD` for a date override; if the start was not tracked and
   no override is provided, the import timestamp is saved.
 - `/history_update`: Re-read Quizcord messages for `today`, `yesterday`, or a
-  custom `YYYY-MM-DD` date in the current channel and replace previously saved
-  leaderboard rows. Relative dates use India Standard Time; the bot needs View
-  Channel and Read Message History.
+  custom `YYYY-MM-DD` date in the current channel. It refreshes results only
+  from each final leaderboard sequence, from its `Final leaderboard` marker
+  through `Total players`, and ignores earlier live leaderboard updates.
+  Relative dates use India Standard Time; the bot needs View Channel and Read
+  Message History.
 - `/export_analytics`: Download the private aggregate Excel workbook (`.xlsx`).
 - `/clear_quiz_history`: Permanently delete saved quiz sessions, leaderboard
   results, and analytics for the current server after entering `DELETE`.

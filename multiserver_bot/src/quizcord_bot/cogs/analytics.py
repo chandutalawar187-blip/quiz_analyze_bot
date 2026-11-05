@@ -19,8 +19,10 @@ from quizcord_bot.quizcord import (
     extract_leaderboard,
     extract_quizcord_id,
     is_final_leaderboard,
+    is_final_leaderboard_end,
     is_quizcord_author,
     is_quiz_start_message,
+    leaderboard_message_text,
     leaderboard_structure,
     parse_quiz_rows,
 )
@@ -278,6 +280,14 @@ class AnalyticsCog(commands.Cog):
         reset_snapshot_sessions: set[str] = set()
         candidate_messages = 0
         oversized_messages = 0
+        final_sequences: list[
+            tuple[list[discord.Message], str, str | None]
+        ] = []
+        sequence_messages: list[discord.Message] = []
+        sequence_parts: list[str] = []
+        sequence_quiz_id: str | None = None
+        sequence_author_id: int | None = None
+        sequence_webhook_id: int | None = None
         try:
             async for message in history(
                 after=day_start - timedelta(milliseconds=1),
@@ -290,6 +300,13 @@ class AnalyticsCog(commands.Cog):
                 try:
                     payload = extract_leaderboard(message)
                     quiz_id = extract_quizcord_id(message)
+                    final_start = is_final_leaderboard(message)
+                    final_end = is_final_leaderboard_end(message)
+                    message_text = (
+                        payload[1]
+                        if payload is not None
+                        else leaderboard_message_text(message)
+                    )
                 except ValueError:
                     oversized_messages += 1
                     LOGGER.warning(
@@ -297,22 +314,59 @@ class AnalyticsCog(commands.Cog):
                         message.id,
                     )
                     continue
-                if payload is None and quiz_id is None:
-                    continue
-                if not is_quizcord_author(
+
+                if sequence_messages:
+                    if (
+                        message.author.id != sequence_author_id
+                        or message.webhook_id != sequence_webhook_id
+                    ):
+                        continue
+                    sequence_messages.append(message)
+                    sequence_parts.append(message_text)
+                    sequence_quiz_id = quiz_id or sequence_quiz_id
+                elif final_start and is_quizcord_author(
                     message.author,
                     message.webhook_id,
                     self.settings.quizcord_bot_id,
-                    has_final_leaderboard=(
-                        payload is not None or quiz_id is not None
-                    ),
+                    has_final_leaderboard=True,
                 ):
+                    sequence_messages = [message]
+                    sequence_parts = [message_text]
+                    sequence_quiz_id = quiz_id
+                    sequence_author_id = message.author.id
+                    sequence_webhook_id = message.webhook_id
+                else:
                     continue
-                candidate_messages += 1
+
+                if final_end:
+                    final_sequences.append(
+                        (
+                            sequence_messages,
+                            "\n".join(sequence_parts),
+                            sequence_quiz_id,
+                        )
+                    )
+                    sequence_messages = []
+                    sequence_parts = []
+                    sequence_quiz_id = None
+                    sequence_author_id = None
+                    sequence_webhook_id = None
+
+            if sequence_messages:
+                LOGGER.warning(
+                    "Ignoring incomplete final leaderboard sequence beginning with "
+                    "Quizcord message %s; no Total players marker was found.",
+                    sequence_messages[0].id,
+                )
+
+            for messages, final_payload, final_quiz_id in final_sequences:
+                candidate_messages += len(messages)
                 session_id = await self._handle_quizcord_message(
-                    message,
+                    messages[0],
                     history_update=True,
                     reset_snapshot_sessions=reset_snapshot_sessions,
+                    leaderboard_payload=final_payload,
+                    quizcord_quiz_id=final_quiz_id,
                 )
                 if session_id is not None:
                     updated_sessions.add(session_id)
@@ -362,8 +416,8 @@ class AnalyticsCog(commands.Cog):
                 else ""
             )
             await interaction.followup.send(
-                f"No Quizcord leaderboard messages were found for {target_day.isoformat()} "
-                f"in this channel.{oversized_note}",
+                f"No complete final Quizcord leaderboard was found for "
+                f"{target_day.isoformat()} in this channel.{oversized_note}",
                 ephemeral=True,
             )
             return
@@ -384,7 +438,8 @@ class AnalyticsCog(commands.Cog):
             )
         await interaction.followup.send(
             f"Refreshed {len(updated_sessions)} quiz session(s) from "
-            f"{candidate_messages} Quizcord message(s) for {target_day.isoformat()} "
+            f"{candidate_messages} final leaderboard message(s) for "
+            f"{target_day.isoformat()} "
             "(IST)."
             + (
                 f" Skipped {oversized_messages} oversized message(s)."
@@ -610,12 +665,20 @@ class AnalyticsCog(commands.Cog):
         *,
         history_update: bool = False,
         reset_snapshot_sessions: set[str] | None = None,
+        leaderboard_payload: str | None = None,
+        quizcord_quiz_id: str | None = None,
     ) -> str | None:
         if message.guild is None:
             return None
         try:
             payload = extract_leaderboard(message)
-            quiz_id = extract_quizcord_id(message)
+            quiz_id = quizcord_quiz_id or extract_quizcord_id(message)
+            if leaderboard_payload is not None:
+                payload = (
+                    quiz_id
+                    or f"Auto_{int(message.created_at.timestamp())}",
+                    leaderboard_payload,
+                )
             is_start = is_quiz_start_message(message)
             if payload is None and not is_start and quiz_id is None:
                 return None
