@@ -7,8 +7,6 @@ import discord
 
 MAX_LEADERBOARD_LENGTH = 25_000
 MAX_LEADERBOARD_ROWS = 500
-FINAL_LEADERBOARD_MARKER = "FINAL_LEADERBOARD_MARKER"
-DISCORD_MENTION_PATTERN = re.compile(r"<@!?\d+>")
 QUIZ_ROW_PATTERNS = (
     re.compile(
         r"(?<!\S)#?(?P<rank>\d+)\.\s*(?P<username>.+?)\s*"
@@ -22,10 +20,6 @@ QUIZ_ROW_PATTERNS = (
         r"(?<!\S)#?(?P<rank>\d+)\.\s*(?P<username>.+?)\s+"
         r"(?:\*\*)?(?P<score>\d+)(?:\*\*)?\s*$"
     ),
-)
-UNRANKED_GROUP_PATTERN = re.compile(
-    r"(?P<username>.+?)\s*(?:—|–|-|:)\s*"
-    r"(?:\*\*)?(?P<score>\d+)(?:\*\*)?(?:\s+.*)?$"
 )
 
 
@@ -51,28 +45,20 @@ def parse_quiz_rows(payload: str) -> list[tuple[str, str, str]]:
     rows: list[tuple[str, str, str]] = []
     normalized_payload = re.sub(
         r"final\s+leaderboard",
-        f"\n{FINAL_LEADERBOARD_MARKER}\n",
+        "\n",
         payload,
         flags=re.IGNORECASE,
     )
-    highest_rank = 0
-    after_final_marker = False
     for line in normalized_payload.splitlines():
-        if line.strip() == FINAL_LEADERBOARD_MARKER:
-            after_final_marker = True
-            continue
-
         for pattern in QUIZ_ROW_PATTERNS:
             match = pattern.search(line.strip())
             if match:
-                rank = match.group("rank")
-                highest_rank = max(highest_rank, int(rank))
                 usernames = (
                     username.strip().strip("*_`")
                     for username in re.split(r",\s*(?=@|<@)", match.group("username"))
                 )
                 rows.extend(
-                    (rank, username, match.group("score"))
+                    (match.group("rank"), username, match.group("score"))
                     for username in usernames
                     if username
                 )
@@ -80,36 +66,7 @@ def parse_quiz_rows(payload: str) -> list[tuple[str, str, str]]:
                     raise ValueError(
                         f"A leaderboard cannot contain more than {MAX_LEADERBOARD_ROWS} entries."
                     )
-                after_final_marker = False
                 break
-        else:
-            if not after_final_marker:
-                continue
-            match = UNRANKED_GROUP_PATTERN.fullmatch(line.strip())
-            if match is None:
-                continue
-            usernames = [
-                username.strip().strip("*_`")
-                for username in re.split(
-                    r",\s*(?=@|<@)", match.group("username")
-                )
-                if username.strip()
-            ]
-            if len(usernames) < 2 or not any(
-                DISCORD_MENTION_PATTERN.fullmatch(username)
-                for username in usernames
-            ):
-                continue
-            inferred_rank = str(highest_rank + 1)
-            rows.extend(
-                (inferred_rank, username, match.group("score"))
-                for username in usernames
-            )
-            highest_rank += 1
-            if len(rows) > MAX_LEADERBOARD_ROWS:
-                raise ValueError(
-                    f"A leaderboard cannot contain more than {MAX_LEADERBOARD_ROWS} entries."
-                )
     return rows
 
 
