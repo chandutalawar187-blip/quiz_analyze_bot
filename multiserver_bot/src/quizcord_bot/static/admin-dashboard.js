@@ -117,7 +117,7 @@ const select = document.getElementById("session-select");
       const rows=el("div","summary-list");
       [["Human server members",eligibleCount??"Unavailable"],["Started",new Date(session.started_at).toLocaleString()]].forEach(([label,value])=>{const row=el("div","summary-row");row.append(el("span","",label),el("strong","",safe(value)));rows.append(row);});
       side.append(rows,el("div","note","Attendance includes human members regardless of server permissions. Bot accounts are excluded."));
-      if(complete){const link=document.createElement("a");link.className="export-link";link.href="/api/sessions/"+encodeURIComponent(session.session_id)+"/export.xlsx";link.append(actionContent("download","Download Excel"));link.style.display="flex";link.style.margin="0 20px 20px";side.append(link);}
+      if(complete){const link=document.createElement("a");link.className="export-link";link.href="/api/sessions/"+encodeURIComponent(session.session_id)+"/export.xlsx";link.setAttribute("aria-label","Export Excel analytics for the selected quiz");link.append(actionContent("download","Export Excel Analytics"));link.style.display="flex";link.style.margin="0 20px 20px";side.append(link);}
       layout.append(roster,side);content.replaceChildren(grid,layout);filterLeaderboard();
       const tableWrap=content.querySelector(".table-wrap");
       if(tableWrap)tableWrap.scrollTop=scrollTop;

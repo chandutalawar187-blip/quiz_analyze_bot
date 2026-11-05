@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import nullcontext
 from dataclasses import replace
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
+from openpyxl import load_workbook
 
 from quizcord_bot.config import Settings
 from quizcord_bot.database import (
@@ -323,6 +325,37 @@ class DashboardWebTests(unittest.TestCase):
         )
         self.assertEqual(self.client.get("/", follow_redirects=False).status_code, 200)
         self.assertEqual(self.client.get("/api/sessions").status_code, 200)
+        selected_session = self.database.start_quiz_session(
+            67890,
+            1001,
+            987654,
+            "2026-10-17T15:00:00+00:00",
+        )
+        self.database.record_quiz_leaderboard(
+            selected_session.session_id,
+            5001,
+            "revision-1",
+            [("1", "U26E01CS001", "900")],
+            True,
+            "quiz-selected",
+            "2026-10-17T15:30:00+00:00",
+        )
+        export = self.client.get(
+            f"/api/sessions/{selected_session.session_id}/export.xlsx"
+        )
+        self.assertEqual(export.status_code, 200)
+        self.assertEqual(
+            export.headers["content-disposition"],
+            'attachment; filename="quizcord-2026-10-17-quiz-selected.xlsx"',
+        )
+        exported_workbook = load_workbook(BytesIO(export.content))
+        self.assertEqual(
+            exported_workbook["Quiz Summary"]["B3"].value, "2026-10-17"
+        )
+        self.assertEqual(
+            exported_workbook["Participants"]["B2"].value, "U26E01CS001"
+        )
+        self.assertEqual(exported_workbook["Participants"]["D2"].value, 900)
         with patch.object(self.database, "get_quiz_session_summaries", return_value=()) as summaries:
             page = self.client.get("/api/sessions?guild_id=67890&offset=50")
             self.assertEqual(page.status_code, 200)

@@ -87,16 +87,30 @@ class AnalyticsExportTests(unittest.TestCase):
         workbook = load_workbook(BytesIO(quiz_session_workbook(summary)))
 
         self.assertEqual(workbook["Quiz Summary"]["B2"].value, "quiz-123")
-        self.assertEqual(workbook["Quiz Summary"]["B5"].value, "2 / 10")
-        self.assertEqual(workbook["Quiz Summary"]["B6"].value, 0.2)
+        self.assertEqual(workbook["Quiz Summary"]["A3"].value, "Quiz date")
+        self.assertEqual(workbook["Quiz Summary"]["B3"].value, "2026-10-17")
+        self.assertEqual(workbook["Quiz Summary"]["B6"].value, "2 / 10")
+        self.assertEqual(workbook["Quiz Summary"]["B7"].value, 0.2)
         self.assertIn(
             "regardless of server permissions",
-            workbook["Quiz Summary"]["B8"].value,
+            workbook["Quiz Summary"]["B9"].value,
         )
         roster = workbook["Participants"]
+        self.assertEqual(
+            [cell.value for cell in roster[1]],
+            [
+                "Rank",
+                "Student / Quizcord Name",
+                "Discord ID",
+                "Final Quizcord Points",
+            ],
+        )
+        self.assertEqual(roster.max_row, 3)
         self.assertEqual(roster["B2"].value, "ABC123")
+        self.assertEqual(roster["C2"].value, "12345")
         self.assertEqual(roster["B3"].value, "'=UNMAPPED")
-        self.assertEqual(roster["C3"].value, 700)
+        self.assertIsNone(roster["C3"].value)
+        self.assertEqual(roster["D3"].value, 700)
 
     def test_exports_student_summary_and_datewise_quiz_history(self) -> None:
         analytics = StudentQuizAnalytics(

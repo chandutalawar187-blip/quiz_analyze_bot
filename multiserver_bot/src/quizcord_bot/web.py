@@ -1280,11 +1280,20 @@ _read_web_template("admin_login.html").replace(
         safe_quiz_id = "".join(
             character for character in quiz_id if character.isalnum() or character in "-_"
         )[:80]
+        quiz_date = summary.session.started_at[:10]
+        safe_quiz_date = "".join(
+            character
+            for character in quiz_date
+            if character.isascii() and (character.isdigit() or character == "-")
+        )
         return Response(
             content=quiz_session_workbook(summary),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={
-                "Content-Disposition": f'attachment; filename="quizcord-{safe_quiz_id}.xlsx"'
+                "Content-Disposition": (
+                    f'attachment; filename="quizcord-{safe_quiz_date}-'
+                    f'{safe_quiz_id}.xlsx"'
+                )
             },
         )
 

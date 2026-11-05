@@ -424,8 +424,9 @@ UptimeRobot can alert you if the health endpoint becomes unavailable.
 
 At quiz start, the server owner receives a private Discord DM with an **Open
 live web dashboard** button. The dashboard refreshes every few seconds and
-shows the roster, final analytics, and Excel download. This is the only
-member-directed DM sent by the bot; it does not send USN reminders.
+shows the roster, final analytics, and an Excel export for the selected
+completed quiz, including its date and full participant results. This is the
+only member-directed DM sent by the bot; it does not send USN reminders.
 
 If you already have student mappings/results in a local `server_results.db`,
 stop the local bot and back up the database before moving it. Upload that file
@@ -475,7 +476,8 @@ continues to use its private Discord dashboard.
   chart, and Quizcord points by quiz. Each student page offers an Excel
   download with that student's summary and date-wise quiz history. The roster
   and student pages do not expose internal mapping status; final quiz data
-  can also be exported to Excel. Administrators can open the **All users**
+  can also be exported to Excel for the selected completed quiz, with its date
+  and complete participant results. Administrators can open the **All users**
   dashboard tab to search the selected server's synchronized human members,
   see their global display name, account username, server nickname, and student
   mapping, and identify users whose global display name is missing or does not

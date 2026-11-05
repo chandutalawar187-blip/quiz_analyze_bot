@@ -119,6 +119,7 @@ def quiz_session_workbook(summary: QuizSessionSummary) -> bytes:
     overview.title = "Quiz Summary"
     overview.append(("Metric", "Value"))
     overview.append(("Quizcord Quiz ID", summary.session.quizcord_quiz_id or "Not provided"))
+    overview.append(("Quiz date", summary.session.started_at[:10]))
     overview.append(("Status", summary.session.status.title()))
     overview.append(("Leaderboard updates", summary.question_count))
     human_count = summary.session.eligible_student_count
@@ -156,16 +157,19 @@ def quiz_session_workbook(summary: QuizSessionSummary) -> bytes:
     overview.freeze_panes = "A2"
     overview.column_dimensions["A"].width = 30
     overview.column_dimensions["B"].width = 72
-    overview["B6"].number_format = "0.0%"
-    overview["B8"].alignment = Alignment(wrap_text=True, vertical="top")
+    overview["B7"].number_format = "0.0%"
+    overview["B9"].alignment = Alignment(wrap_text=True, vertical="top")
 
     roster = workbook.create_sheet("Participants")
-    roster.append(("Rank", "Student USN", "Final Quizcord Points"))
+    roster.append(
+        ("Rank", "Student / Quizcord Name", "Discord ID", "Final Quizcord Points")
+    )
     for participant in summary.participants:
         roster.append(
             [
                 participant.rank,
                 _safe_spreadsheet_text(participant.usn),
+                _safe_spreadsheet_text(participant.discord_id or ""),
                 participant.points,
             ]
         )
@@ -173,8 +177,9 @@ def quiz_session_workbook(summary: QuizSessionSummary) -> bytes:
     roster.freeze_panes = "A2"
     roster.auto_filter.ref = roster.dimensions
     roster.column_dimensions["A"].width = 12
-    roster.column_dimensions["B"].width = 24
-    roster.column_dimensions["C"].width = 28
+    roster.column_dimensions["B"].width = 30
+    roster.column_dimensions["C"].width = 22
+    roster.column_dimensions["D"].width = 28
 
     output = BytesIO()
     workbook.save(output)
