@@ -80,71 +80,43 @@ const select = document.getElementById("session-select");
       );
       heading.append(title);
 
-      const notice=el("section","top-leaderboard-notice");
-      notice.setAttribute("role","note");
-      notice.append(
-        el("span","top-leaderboard-notice-dot"),
-        el("div","", "How the rankings work"),
-        el("p","","Each quiz is normalized separately: (opponents scored below + half of tied opponents) ÷ all other eligible players. Percentiles are averaged equally across completed quizzes; points and correct-answer counts are never added together. Bots, incomplete quizzes, single-player quizzes, and imports without a complete participant leaderboard are excluded. Weekly rankings use Monday–Sunday UTC.")
+      const method=el("details","leaderboard-method");
+      method.append(
+        el("summary","","How rankings are calculated"),
+        el("p","","Each completed quiz is normalized separately: (opponents scored below + half of tied opponents) ÷ all other eligible players. Percentiles are averaged equally across quizzes, so points and correct-answer counts are never added together. Bots, incomplete quizzes, single-player quizzes, and imports without a complete participant leaderboard are excluded.")
       );
-
-      const cards=el("section","top-leaderboard-cards");
-      cards.setAttribute("aria-label","Leaderboard summary loading");
-      cards.setAttribute("aria-busy","true");
-      [
-        ["Weekly best performer","Top student this UTC week"],
-        ["Lifelong best performer","Top student across all quizzes"]
-      ].forEach(([titleText,subtitle])=>{
-        const card=el("article","card top-leaderboard-card");
-        const header=el("div","top-leaderboard-card-heading");
-        header.append(
-          el("div","top-leaderboard-card-title",titleText),
-          el("span","top-leaderboard-period",titleText.startsWith("Weekly")?"This week":"Lifelong")
-        );
-        const performer=el("div","top-leaderboard-performer");
-        const details=el("div","top-leaderboard-performer-details");
-        const name=el("span","skeleton skeleton-name");
-        const caption=el("span","skeleton skeleton-caption");
-        name.setAttribute("aria-hidden","true");
-        caption.setAttribute("aria-hidden","true");
-        details.append(name,caption);
-        performer.append(details);
-        const points=el("div","top-leaderboard-points");
+      const skeleton=el("section","leaderboard-loading");
+      skeleton.setAttribute("aria-label","Loading leaderboard");
+      skeleton.setAttribute("aria-busy","true");
+      const podiumSkeleton=el("div","leaderboard-podium leaderboard-podium-skeleton");
+      for(let index=0;index<3;index++){
+        const card=el("div","leaderboard-podium-card leaderboard-podium-placeholder");
+        const rank=el("span","skeleton skeleton-rank");
+        const avatar=el("span","skeleton skeleton-avatar");
+        const name=el("span","skeleton skeleton-row-name");
         const score=el("span","skeleton skeleton-score");
-        score.setAttribute("aria-hidden","true");
-        points.append(score);
-        card.append(header,el("div","top-leaderboard-card-subtitle",subtitle),performer,points);
-        cards.append(card);
-      });
-
-      const layouts=el("section","top-leaderboard-layouts");
-      layouts.setAttribute("aria-label","Leaderboard tables loading");
-      layouts.setAttribute("aria-busy","true");
-      [
-        ["Weekly leaderboard","This week's normalized standings"],
-        ["Lifelong leaderboard","Top performers across all quizzes"]
-      ].forEach(([titleText,subtitle])=>{
-        const panel=el("article","panel top-leaderboard-panel");
-        const panelHeading=el("div","panel-head");
-        panelHeading.append(
-          el("div","",titleText),
-          el("span","top-leaderboard-period",titleText.startsWith("Weekly")?"This week":"Lifelong")
-        );
-        panel.append(panelHeading,el("div","panel-sub top-leaderboard-panel-subtitle",subtitle));
-        const rows=el("div","top-leaderboard-skeleton-rows");
-        for(let index=0;index<5;index++){
-          const row=el("div","top-leaderboard-skeleton-row");
-          const rank=el("span","skeleton skeleton-rank");
-          const name=el("span","skeleton skeleton-row-name");
-          const points=el("span","skeleton skeleton-row-points");
-          [rank,name,points].forEach(part=>part.setAttribute("aria-hidden","true"));
-          row.append(rank,name,points);
-          rows.append(row);
-        }
-        panel.append(rows);
-        layouts.append(panel);
-      });
-      content.replaceChildren(heading,notice,cards,layouts);
+        [rank,avatar,name,score].forEach(part=>part.setAttribute("aria-hidden","true"));
+        card.append(rank,avatar,name,score);
+        podiumSkeleton.append(card);
+      }
+      const listSkeleton=el("section","panel leaderboard-list-panel");
+      const skeletonHeading=el("div","leaderboard-list-heading");
+      skeletonHeading.append(el("strong","","Rankings"));
+      listSkeleton.append(skeletonHeading);
+      const skeletonRows=el("div","leaderboard-rows");
+      for(let index=0;index<6;index++){
+        const row=el("div","leaderboard-row leaderboard-row-placeholder");
+        const rank=el("span","skeleton skeleton-rank");
+        const avatar=el("span","skeleton skeleton-row-avatar");
+        const name=el("span","skeleton skeleton-row-name");
+        const score=el("span","skeleton skeleton-row-points");
+        [rank,avatar,name,score].forEach(part=>part.setAttribute("aria-hidden","true"));
+        row.append(rank,avatar,name,score);
+        skeletonRows.append(row);
+      }
+      listSkeleton.append(skeletonRows);
+      skeleton.append(podiumSkeleton,listSkeleton);
+      content.replaceChildren(heading,method,skeleton);
       try{
         const response=await fetch("/api/top-leaderboard",{cache:"no-store"});
         if(response.status===401){location.replace("/");return;}
@@ -154,100 +126,135 @@ const select = document.getElementById("session-select");
         }
         const data=await response.json();
         if(requestId!==leaderboardRequestId||activeView!=="top-leaderboard")return;
-        const summaryCards=el("section","top-leaderboard-cards");
-        summaryCards.setAttribute("aria-label","Leaderboard leaders");
-        const boards=el("section","top-leaderboard-layouts");
-        const periods=[
-          {
-            key:"weekly",
-            title:"Weekly best performer",
-            period:"Week of "+data.week_start+" UTC",
-            subtitle:"Top student this UTC week",
-            entries:data.weekly
-          },
-          {
-            key:"lifelong",
-            title:"Lifelong best performer",
-            period:"All time",
-            subtitle:"Top student across all completed quizzes",
-            entries:data.lifelong
-          }
-        ];
-        periods.forEach(board=>{
-          const entries=Array.isArray(board.entries)?board.entries:[];
-          const leader=entries[0];
-          const card=el("article","card top-leaderboard-card");
-          const cardHeader=el("div","top-leaderboard-card-heading");
-          cardHeader.append(
-            el("div","top-leaderboard-card-title",board.title),
-            el("span","top-leaderboard-period",board.period)
-          );
-          card.append(cardHeader,el("div","top-leaderboard-card-subtitle",board.subtitle));
-          if(leader){
-            const performer=el("div","top-leaderboard-performer");
-            const details=el("div","top-leaderboard-performer-details");
-            details.append(
-              el("strong","top-leaderboard-leader-name",leader.student_name),
-              el("span","panel-sub",leader.quizzes_ranked+" ranked quizzes")
-            );
-            performer.append(details);
-            card.append(
-              performer,
-              el("div","top-leaderboard-points",Number(leader.average_percentile).toFixed(2)+"% average percentile")
-            );
-          }else{
-            card.append(el("div","empty top-leaderboard-empty","No ranked results yet."));
-          }
-          summaryCards.append(card);
-
-          const panel=el("article","panel top-leaderboard-panel");
-          const panelHeading=el("div","panel-head");
-          panelHeading.append(
-            el("h2","",board.key==="weekly"?"Weekly leaderboard":"Lifelong leaderboard"),
-            el("span","top-leaderboard-period",board.period)
-          );
-          panel.append(
-            panelHeading,
-            el("div","panel-sub top-leaderboard-panel-subtitle","Average normalized standing · "+entries.length+" students")
-          );
-          if(!entries.length){
-            panel.append(el("div","empty","No completed multi-player quizzes are available for this period."));
-          }else{
-            const tableWrap=el("div","table-wrap top-leaderboard-table-wrap");
-            const table=el("table","top-leaderboard-table");
-            const thead=el("thead");
-            const headRow=el("tr");
-            ["Rank","Student","Average percentile","Quizzes ranked"].forEach(label=>headRow.append(el("th","",label)));
-            thead.append(headRow);
-            table.append(thead);
-            const tbody=el("tbody");
-            entries.forEach(entry=>{
-              const row=el("tr");
-              row.append(el("td","rank","#"+entry.rank));
-              const nameCell=el("td","");
-              if(entry.usn){
-                const link=document.createElement("a");
-                link.className="student-link";
-                link.href="/students/"+encodeURIComponent(entry.usn);
-                link.textContent=entry.student_name;
-                nameCell.append(link);
-              }else{
-                nameCell.textContent=entry.student_name;
-              }
-              row.append(
-                nameCell,
-                el("td","points",Number(entry.average_percentile).toFixed(2)+"%"),
-                el("td","",String(entry.quizzes_ranked))
-              );
-              tbody.append(row);
-            });
-            table.append(tbody);
-            tableWrap.append(table);
-            panel.append(tableWrap);
-          }
-          boards.append(panel);
+        let selectedPeriod="weekly";
+        let searchTerm="";
+        const controls=el("section","leaderboard-controls");
+        const tabs=el("div","leaderboard-period-tabs");
+        tabs.setAttribute("role","group");
+        tabs.setAttribute("aria-label","Choose leaderboard period");
+        const periodLabel=el("span","leaderboard-current-period");
+        const search=document.createElement("input");
+        search.className="leaderboard-search";
+        search.type="search";
+        search.placeholder="Search students";
+        search.setAttribute("aria-label","Search leaderboard students");
+        const searchField=el("label","leaderboard-search-field");
+        searchField.append(icon("search"),search);
+        const results=el("section","leaderboard-results");
+        const periodButtons=[];
+        [["weekly","This week"],["lifelong","All time"]].forEach(([key,label])=>{
+          const button=el("button","leaderboard-period-tab",label);
+          button.type="button";
+          button.addEventListener("click",()=>{
+            selectedPeriod=key;
+            renderPeriod();
+          });
+          periodButtons.push([key,button]);
+          tabs.append(button);
         });
-        content.replaceChildren(heading,notice,summaryCards,boards);
+        controls.append(tabs,periodLabel,searchField);
+
+        const initials=name=>name.trim().split(/\s+/).slice(0,2).map(part=>part[0]).join("").toUpperCase()||"?";
+        const profileLink=(entry,className)=>{
+          if(!entry.usn)return el("span",className,entry.student_name);
+          const link=document.createElement("a");
+          link.className=className+" student-link";
+          link.href="/students/"+encodeURIComponent(entry.usn);
+          link.textContent=entry.student_name;
+          return link;
+        };
+        const renderPeriod=()=>{
+          const isWeekly=selectedPeriod==="weekly";
+          const entries=Array.isArray(data[selectedPeriod])?data[selectedPeriod]:[];
+          periodLabel.textContent=isWeekly?"Week of "+data.week_start+" · UTC":"All completed quizzes";
+          periodButtons.forEach(([key,button])=>{
+            const active=key===selectedPeriod;
+            button.setAttribute("aria-pressed",String(active));
+          });
+          const podium=el("section","leaderboard-podium");
+          podium.setAttribute("aria-label","Top three performers");
+          if(entries.length){
+            entries.slice(0,3).forEach(entry=>{
+              const card=el("article","leaderboard-podium-card podium-rank-"+entry.rank);
+              const badge=el("span","leaderboard-rank-badge","Rank #"+entry.rank);
+              const avatar=el("span","leaderboard-avatar",initials(entry.student_name));
+              avatar.setAttribute("aria-hidden","true");
+              const identity=el("div","leaderboard-podium-identity");
+              identity.append(profileLink(entry,"leaderboard-podium-name"));
+              const score=Number(entry.average_percentile);
+              card.append(
+                badge,
+                avatar,
+                identity,
+                el("strong","leaderboard-podium-score",score.toFixed(2)+"%"),
+                el("span","leaderboard-podium-caption","average percentile")
+              );
+              podium.append(card);
+            });
+          }else{
+            podium.append(el("div","empty leaderboard-empty","No ranked results for this period yet."));
+          }
+
+          const list=el("section","panel leaderboard-list-panel");
+          const listHeading=el("div","leaderboard-list-heading");
+          const listTitle=el("div");
+          listTitle.append(
+            el("h2","","All rankings"),
+            el("span","panel-sub",entries.length+" students · normalized standing")
+          );
+          listHeading.append(listTitle,el("span","leaderboard-list-period",isWeekly?"Weekly":"Lifelong"));
+          list.append(listHeading);
+          const columns=el("div","leaderboard-columns");
+          ["Rank","Student","Percentile","Quizzes"].forEach(label=>columns.append(el("span","",label)));
+          list.append(columns);
+          const rows=el("div","leaderboard-rows");
+          entries.forEach(entry=>{
+            const row=el("div","leaderboard-row");
+            row.dataset.search=[entry.student_name,entry.usn,entry.rank].filter(Boolean).join(" ").toLocaleLowerCase();
+            const rank=el("span","leaderboard-row-rank rank-"+entry.rank,"#"+entry.rank);
+            const identity=el("div","leaderboard-row-identity");
+            const avatar=el("span","leaderboard-row-avatar",initials(entry.student_name));
+            avatar.setAttribute("aria-hidden","true");
+            const student=el("div","leaderboard-row-student");
+            student.append(profileLink(entry,"leaderboard-row-name"));
+            if(entry.usn)student.append(el("span","leaderboard-row-usn",entry.usn));
+            identity.append(avatar,student);
+            const percentile=Math.min(100,Math.max(0,Number(entry.average_percentile)||0));
+            const score=el("div","leaderboard-row-score");
+            const bar=document.createElement("span");
+            bar.style.width=percentile+"%";
+            const track=el("span","leaderboard-progress");
+            track.setAttribute("role","progressbar");
+            track.setAttribute("aria-label",entry.student_name+" average percentile");
+            track.setAttribute("aria-valuemin","0");
+            track.setAttribute("aria-valuemax","100");
+            track.setAttribute("aria-valuenow",String(percentile));
+            track.append(bar);
+            score.append(track,el("strong","",percentile.toFixed(2)+"%"));
+            row.append(rank,identity,score,el("span","leaderboard-row-quizzes",String(entry.quizzes_ranked)));
+            rows.append(row);
+          });
+          const noMatches=el("div","empty leaderboard-empty","No students match your search.");
+          rows.append(noMatches);
+          const filterRows=()=>{
+            let visible=0;
+            rows.querySelectorAll(".leaderboard-row").forEach(row=>{
+              row.hidden=!row.dataset.search.includes(searchTerm);
+              if(!row.hidden)visible++;
+            });
+            podium.hidden=Boolean(searchTerm);
+            noMatches.hidden=visible>0||entries.length===0;
+          };
+          filterRows();
+          search.oninput=()=>{
+            searchTerm=search.value.trim().toLocaleLowerCase();
+            filterRows();
+          };
+          list.append(rows);
+          results.replaceChildren(podium,list);
+        };
+        renderPeriod();
+        content.replaceChildren(heading,method,controls,results);
       }catch(error){
         if(requestId!==leaderboardRequestId||activeView!=="top-leaderboard")return;
         content.replaceChildren(heading,el("div","empty error",error.message));
@@ -375,7 +382,37 @@ const select = document.getElementById("session-select");
       const historyPanel=el("article","panel"),historyHead=el("div","panel-head");historyHead.append(el("div","","Date-wise attendance and results"));historyPanel.append(historyHead);
       if(!student.history.length){historyPanel.append(el("div","empty","No quiz attendance has been recorded for this student."));}
       else{const wrap=el("div","table-wrap"),table=el("table"),thead=el("thead"),headRow=el("tr");["Date","Quiz ID","Status","Rank","Points"].forEach(label=>headRow.append(el("th","",label)));thead.append(headRow);table.append(thead);const body=el("tbody");student.history.forEach(item=>{const row=el("tr"),date=dateLabel(item.started_at,true),status=item.status==="completed"?"Complete":item.status==="active"?"Live":item.status==="historical"?"Historical import":"Interrupted";row.append(el("td","",date),el("td","",item.quizcord_quiz_id||"Not provided"),el("td","",status),el("td","rank",item.rank?"#"+safe(item.rank):"—"),el("td","points",safe(item.points)));body.append(row);});table.append(body);wrap.append(table);historyPanel.append(wrap);}
-      content.replaceChildren(pageHeading,heading,grid,profile,historyPanel);
+      const sections=[pageHeading,heading,grid];
+      if(student.leaderboard){
+        const leaderboardPanel=el("article","panel student-ranking-panel");
+        const leaderboardHead=el("div","panel-head");
+        leaderboardHead.append(el("h2","","Leaderboard ranking"));
+        leaderboardPanel.append(leaderboardHead);
+        const rankingGrid=el("div","student-ranking-grid");
+        [
+          ["Weekly rank",student.leaderboard.weekly,"Week of "+student.leaderboard.week_start+" UTC"],
+          ["Lifelong rank",student.leaderboard.lifelong,"All time"]
+        ].forEach(([label,ranking,period])=>{
+          const card=el("div","student-ranking-card");
+          card.append(
+            el("div","student-ranking-label",label),
+            el("div","student-ranking-value",ranking?"#"+ranking.rank:"Not ranked"),
+            el(
+              "div",
+              "student-ranking-detail",
+              ranking
+                ?Number(ranking.average_percentile).toFixed(2)+"% average percentile · "+ranking.quizzes_ranked+" quizzes ranked"
+                :"No qualifying completed quizzes"
+            ),
+            el("div","student-ranking-period",period)
+          );
+          rankingGrid.append(card);
+        });
+        leaderboardPanel.append(rankingGrid);
+        sections.push(leaderboardPanel);
+      }
+      sections.push(profile,historyPanel);
+      content.replaceChildren(...sections);
       const tableWrap=content.querySelector(".table-wrap");
       if(tableWrap)tableWrap.scrollTop=scrollTop;
     }

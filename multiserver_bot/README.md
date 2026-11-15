@@ -499,7 +499,10 @@ continues to use its private Discord dashboard.
   global display name exactly matches an accepted USN format, the directory
   shows that value as their USN; this inferred value does not create a student
   mapping or populate a student name.
-  The **Top leaderboard** tab shows weekly and lifelong best performers.
+  The **Top leaderboard** tab shows weekly and lifelong best performers in a
+  searchable ranked view with a top-three podium. Each student links to their
+  profile, which also shows their weekly and lifelong leaderboard rank and
+  normalized percentile.
   Quiz scores are normalized separately within each completed quiz as
   `(players scored below + half of tied players) / other eligible players`,
   then averaged equally per student. This makes point-based and

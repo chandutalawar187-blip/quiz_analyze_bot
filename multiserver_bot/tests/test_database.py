@@ -227,6 +227,14 @@ class DatabaseTests(unittest.TestCase):
             {entry.student_name for entry in leaderboards.lifelong},
             {"ALPHA", "BETA", "GAMMA", "DELTA"},
         )
+        self.assertEqual(
+            {
+                entry.usn
+                for entry in leaderboards.lifelong
+                if entry.usn is not None
+            },
+            {"ALPHA", "BETA", "GAMMA", "DELTA"},
+        )
         self.assertAlmostEqual(
             next(
                 entry.average_percentile

@@ -1428,7 +1428,11 @@ class Database:
             participant = _LeaderboardParticipant(
                 score=int(score),
                 discord_id=discord_id_text,
-                usn=str(registered_usn) if registered_usn is not None else None,
+                usn=(
+                    str(registered_usn)
+                    if registered_usn is not None
+                    else participant_usn_text
+                ),
                 student_name=str(student_name or participant_usn_text),
             )
             existing = quiz.participants.get(identity_key)

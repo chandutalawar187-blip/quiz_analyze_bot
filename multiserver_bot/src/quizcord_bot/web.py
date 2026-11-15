@@ -1296,9 +1296,38 @@ _read_web_template("admin_login.html").replace(
         await current_admin(request)
         if not usn.strip() or len(usn) > 100:
             raise HTTPException(status_code=404, detail="Student not found.")
-        return _student_analytics(
-            database.get_student_quiz_analytics(request.state.guild_id, usn)
+        analytics = database.get_student_quiz_analytics(
+            request.state.guild_id, usn
         )
+        leaderboards = database.get_top_leaderboards(request.state.guild_id)
+
+        def find_rank(
+            entries: tuple[TopLeaderboardEntry, ...],
+        ) -> dict[str, Any] | None:
+            entry = next(
+                (
+                    candidate
+                    for candidate in entries
+                    if candidate.usn is not None
+                    and candidate.usn.casefold() == analytics.usn.casefold()
+                ),
+                None,
+            )
+            if entry is None:
+                return None
+            return {
+                "rank": entry.rank,
+                "average_percentile": round(entry.average_percentile, 2),
+                "quizzes_ranked": entry.quizzes_ranked,
+            }
+
+        result = _student_analytics(analytics)
+        result["leaderboard"] = {
+            "week_start": leaderboards.week_start,
+            "weekly": find_rank(leaderboards.weekly),
+            "lifelong": find_rank(leaderboards.lifelong),
+        }
+        return result
 
     @app.get("/api/students/{usn}/export.xlsx")
     async def export_student_analytics(usn: str, request: Request) -> Response:

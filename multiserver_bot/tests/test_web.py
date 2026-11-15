@@ -391,6 +391,21 @@ class DashboardWebTests(unittest.TestCase):
             ],
             [(1, "U26E01CS001", 100.0), (2, "OTHER_STUDENT", 0.0)],
         )
+        self.assertEqual(top_data["lifelong"][0]["usn"], "U26E01CS001")
+        student_profile = self.client.get("/api/students/U26E01CS001")
+        self.assertEqual(student_profile.status_code, 200)
+        self.assertEqual(
+            student_profile.json()["leaderboard"],
+            {
+                "week_start": top_data["week_start"],
+                "weekly": None,
+                "lifelong": {
+                    "rank": 1,
+                    "average_percentile": 100.0,
+                    "quizzes_ranked": 1,
+                },
+            },
+        )
         export = self.client.get(
             f"/api/sessions/{selected_session.session_id}/export.xlsx"
         )
@@ -906,6 +921,16 @@ class DashboardWebTests(unittest.TestCase):
             (
                 "/static/admin-dashboard.js",
                 "javascript",
+                "Leaderboard ranking",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
+                "leaderboard-podium-name",
+            ),
+            (
+                "/static/admin-dashboard.js",
+                "javascript",
                 "sessionHeading.hidden=true",
             ),
             (
@@ -1106,11 +1131,12 @@ class DashboardWebTests(unittest.TestCase):
         dashboard_script = self.client.get("/static/admin-dashboard.js")
         self.assertEqual(dashboard_script.status_code, 200)
         self.assertIn('fetch("/api/top-leaderboard"', dashboard_script.text)
-        self.assertIn("average normalized standing", dashboard_script.text)
+        self.assertIn("normalized standing", dashboard_script.text)
         self.assertNotIn("Coming soon", dashboard_script.text)
         self.assertIn("function renderTopLeaderboard()", dashboard_script.text)
-        self.assertIn("Weekly best performer", dashboard_script.text)
-        self.assertIn("Lifelong best performer", dashboard_script.text)
+        self.assertIn("leaderboard-period-tabs", dashboard_script.text)
+        self.assertIn("leaderboard-podium", dashboard_script.text)
+        self.assertIn("leaderboard-row-score", dashboard_script.text)
         dashboard_styles = self.client.get("/static/admin-dashboard.css")
         self.assertEqual(dashboard_styles.status_code, 200)
         self.assertIn(".skeleton::after", dashboard_styles.text)
