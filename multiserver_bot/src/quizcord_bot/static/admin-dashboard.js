@@ -9,6 +9,9 @@ const select = document.getElementById("session-select");
     const facultyStudentPath = location.pathname.startsWith("/faculty/students/");
     const studentPath = facultyStudentPath ? location.pathname.slice("/faculty/students/".length) : location.pathname.startsWith("/students/") ? location.pathname.slice("/students/".length) : null;
     const studentUSN = studentPath ? decodeURIComponent(studentPath) : null;
+    const dashboardViewStateKey = "quizcordDashboardView";
+    const dashboardViews = new Set(["sessions","users","top-leaderboard"]);
+    const savedView = history.state?.[dashboardViewStateKey];
     const guildSelect = document.getElementById("guild-select");
     const safe = value => String(value ?? "");
     const el = (tag, className, text) => { const node=document.createElement(tag); if(className)node.className=className; if(text!==undefined)node.textContent=text; return node; };
@@ -39,7 +42,7 @@ const select = document.getElementById("session-select");
     }
     let activeSession = initialSession;
     let sessionOffset = 0;
-    let activeView = "sessions";
+    let activeView = dashboardViews.has(savedView) ? savedView : "sessions";
     let pollBusy = false;
     let userSearchQuery = "";
     let pendingDirectoryUsers = null;
@@ -452,7 +455,9 @@ const select = document.getElementById("session-select");
       }catch(error){content.replaceChildren(el("div","empty error",error.message));}
       finally{pollBusy=false;}
     }
-    function switchView(view){
+    function switchView(view,recordHistory=true){
+      if(!dashboardViews.has(view))return;
+      if(recordHistory&&view!==activeView)history.pushState({[dashboardViewStateKey]:view},"",location.href);
       activeView=view;
       dashboardTabs.querySelectorAll("button").forEach(button=>button.setAttribute("aria-selected",String(button.dataset.view===view)));
       sessionHeading.hidden=view!=="sessions";
@@ -461,6 +466,11 @@ const select = document.getElementById("session-select");
       else if(view==="top-leaderboard")renderTopLeaderboard();
       else refresh();
     }
+    window.addEventListener("popstate",()=>{
+      if(studentUSN)return;
+      const view=history.state?.[dashboardViewStateKey];
+      switchView(dashboardViews.has(view)?view:"sessions",false);
+    });
     dashboardTabs.addEventListener("click",event=>{const button=event.target.closest("button[data-view]");if(button)switchView(button.dataset.view);});
     leaderboardSearch.addEventListener("input",()=>{leaderboardSearchQuery=leaderboardSearch.value;filterLeaderboard();});
     select.addEventListener("change",()=>{activeSession=select.value;refresh();});
@@ -478,5 +488,5 @@ const select = document.getElementById("session-select");
       backLink.href=facultyStudentPath?"/faculty":"/";
       async function refreshStudent(){try{const endpoint=facultyStudentPath?"/api/faculty/students/":"/api/students/";const response=await fetch(endpoint+encodeURIComponent(studentUSN),{cache:"no-store"});if(response.status===401){location.replace(facultyStudentPath?"/faculty/login":"/");return;}if(!response.ok)throw new Error("Could not load student analytics.");renderStudent(await response.json());}catch(error){content.replaceChildren(el("div","empty error",error.message));}}
       refreshStudent();setInterval(refreshStudent,10000);
-    }else{refresh();setInterval(()=>{if(activeView==="users")refreshUsers();else refresh();},3000);}
+    }else{switchView(activeView,false);setInterval(()=>{if(activeView==="users")refreshUsers();else refresh();},3000);}
     }).catch(error=>content.replaceChildren(el("div","empty error",error.message)));
