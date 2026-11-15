@@ -1860,6 +1860,53 @@ class DatabaseTests(unittest.TestCase):
                 ).fetchone()
             )
 
+    def test_startup_splits_existing_comma_separated_student_names(self) -> None:
+        session = self.database.start_quiz_session(
+            67890, 1001, 12345, "2026-10-01T10:00:00+00:00"
+        )
+        self.database.record_quiz_leaderboard(
+            session.session_id,
+            5001,
+            "revision-1",
+            [
+                (
+                    "1",
+                    r"PRIYA\_M\_C\_U23E01CS050, BHAVANAB0393, CHINMAYEEBV\_036",
+                    "17",
+                )
+            ],
+            True,
+            "quiz-grouped-names",
+        )
+
+        self.database.initialize()
+
+        summary = self.database.get_quiz_session_summary(session.session_id)
+        self.assertEqual(
+            {
+                (participant.usn, participant.rank, participant.points)
+                for participant in summary.participants
+            },
+            {
+                ("PRIYA_M_C_U23E01CS050", 1, 17),
+                ("BHAVANAB0393", 1, 17),
+                ("CHINMAYEEBV_036", 1, 17),
+            },
+        )
+        for usn in (
+            "PRIYA_M_C_U23E01CS050",
+            "BHAVANAB0393",
+            "CHINMAYEEBV_036",
+        ):
+            analytics = self.database.get_student_quiz_analytics(67890, usn)
+            self.assertEqual(analytics.total_points, 17)
+            self.assertEqual(
+                self.database.get_quiz_result(
+                    usn, "quiz-grouped-names", guild_id=67890
+                ),
+                ("17 Points", "1"),
+            )
+
     def test_matches_normalized_unicode_whitespace_alias(self) -> None:
         self.member.display_name = "Student  Nickname"
         self.database.sync_member(self.member)

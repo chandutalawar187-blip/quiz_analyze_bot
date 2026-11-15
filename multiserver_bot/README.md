@@ -525,7 +525,9 @@ continues to use its private Discord dashboard.
   account among those mentions is used to associate the result with its
   existing student record instead of creating a second student. On startup,
   existing composite-mention rows are also repaired when exactly one mentioned
-  account has a registered student mapping.
+  account has a registered student mapping. Comma-separated leaderboard names
+  are split into individual participants with the same rank and score; existing
+  grouped-name records are split on startup as well.
 - Student Discord global display names are checked against `4GM` + 2 digits + `CS` + 3
   digits or `U` + 2 digits + `E` + 2 digits + `CS` + 3 digits. A mismatch
   never blocks quiz results: the dashboard shows "Name not updated to USN".

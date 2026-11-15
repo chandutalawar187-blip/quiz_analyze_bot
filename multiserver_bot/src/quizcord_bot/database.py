@@ -54,6 +54,18 @@ def normalize_member_alias(value: str) -> str:
     return normalized.strip("*_`").removeprefix("@").strip()
 
 
+def _split_grouped_names(value: str) -> tuple[str, ...]:
+    return tuple(
+        name
+        for item in value.split(",")
+        if (
+            name := normalize_member_alias(
+                re.sub(r"\\([_*`])", r"\1", item)
+            ).upper()
+        )
+    )
+
+
 def _compatible_quiz_ids(left: str | None, right: str | None) -> bool:
     return left is None or right is None or left == right
 
@@ -539,6 +551,8 @@ class Database:
                     "ADD COLUMN eligible INTEGER NOT NULL DEFAULT 1"
                 )
             self._merge_same_day_quiz_sessions(connection)
+            self._split_grouped_quiz_analytics(connection)
+            self._split_grouped_name_participants(connection)
             self._reconcile_composite_mention_participants(connection)
             connection.execute(
                 """
@@ -1065,6 +1079,109 @@ class Database:
                     """,
                     (guild_id, old_usn, quiz_id),
                 )
+
+    @staticmethod
+    def _split_grouped_quiz_analytics(
+        connection: sqlite3.Connection,
+    ) -> None:
+        rows = connection.execute(
+            """
+            SELECT id, guild_id, usn, quiz_id, accuracy, time_taken, rank,
+                   quiz_date
+            FROM quiz_analytics
+            WHERE usn IS NOT NULL AND instr(usn, ',') > 0
+            """
+        ).fetchall()
+        for (
+            row_id,
+            guild_id,
+            grouped_usn,
+            quiz_id,
+            accuracy,
+            time_taken,
+            rank,
+            quiz_date,
+        ) in rows:
+            if USER_MENTION_IDS_PATTERN.search(str(grouped_usn)):
+                continue
+            names = _split_grouped_names(str(grouped_usn))
+            if len(names) < 2:
+                continue
+            for usn in names:
+                connection.execute(
+                    """
+                    INSERT INTO quiz_analytics (
+                        guild_id, usn, quiz_id, accuracy, time_taken, rank,
+                        quiz_date
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(guild_id, usn, quiz_id) DO UPDATE SET
+                        accuracy = excluded.accuracy,
+                        time_taken = excluded.time_taken,
+                        rank = excluded.rank,
+                        quiz_date = COALESCE(
+                            excluded.quiz_date, quiz_analytics.quiz_date
+                        )
+                    """,
+                    (
+                        guild_id,
+                        usn,
+                        quiz_id,
+                        accuracy,
+                        time_taken,
+                        rank,
+                        quiz_date,
+                    ),
+                )
+            connection.execute(
+                "DELETE FROM quiz_analytics WHERE id = ?", (row_id,)
+            )
+
+    @staticmethod
+    def _split_grouped_name_participants(
+        connection: sqlite3.Connection,
+    ) -> None:
+        rows = connection.execute(
+            """
+            SELECT session_id, usn, rank, points, eligible
+            FROM quiz_session_participants
+            WHERE instr(usn, ',') > 0
+            """
+        ).fetchall()
+        for session_id, grouped_usn, rank, points, eligible in rows:
+            if USER_MENTION_IDS_PATTERN.search(str(grouped_usn)):
+                continue
+            names = _split_grouped_names(str(grouped_usn))
+            if len(names) < 2:
+                continue
+            for usn in names:
+                connection.execute(
+                    """
+                    INSERT INTO quiz_session_participants (
+                        session_id, usn, rank, points, discord_id, eligible
+                    )
+                    VALUES (?, ?, ?, ?, NULL, ?)
+                    ON CONFLICT(session_id, usn) DO UPDATE SET
+                        rank = MIN(
+                            quiz_session_participants.rank, excluded.rank
+                        ),
+                        points = MAX(
+                            quiz_session_participants.points, excluded.points
+                        ),
+                        eligible = MAX(
+                            quiz_session_participants.eligible,
+                            excluded.eligible
+                        )
+                    """,
+                    (session_id, usn, rank, points, eligible),
+                )
+            connection.execute(
+                """
+                DELETE FROM quiz_session_participants
+                WHERE session_id = ? AND usn = ?
+                """,
+                (session_id, grouped_usn),
+            )
 
     def start_quiz_session(
         self,

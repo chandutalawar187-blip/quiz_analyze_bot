@@ -8,7 +8,6 @@ import discord
 MAX_LEADERBOARD_LENGTH = 25_000
 MAX_LEADERBOARD_ROWS = 500
 FINAL_LEADERBOARD_MARKER = "FINAL_LEADERBOARD_MARKER"
-DISCORD_MENTION_PATTERN = re.compile(r"<@!?\d+>")
 QUIZ_ROW_PATTERNS = (
     re.compile(
         r"(?<!\S)#?(?P<rank>\d+)\.\s*(?P<username>.+?)\s*"
@@ -36,8 +35,8 @@ def _split_grouped_usernames(username: str) -> list[str]:
     return [
         value
         for value in (
-            item.strip().strip("*_`")
-            for item in re.split(r",\s*(?=@|<@)", username)
+            re.sub(r"\\([_*`])", r"\1", item).strip().strip("*_`")
+            for item in username.split(",")
         )
         if value
     ]
@@ -118,10 +117,7 @@ def parse_quiz_rows(payload: str) -> list[tuple[str, str, str]]:
                 usernames = _split_grouped_usernames(
                     rank_only_match.group("username")
                 )
-                if len(usernames) > 1 and any(
-                    DISCORD_MENTION_PATTERN.fullmatch(username)
-                    for username in usernames
-                ):
+                if len(usernames) > 1:
                     rank = rank_only_match.group("rank")
                     highest_rank = max(highest_rank, int(rank))
                     pending_groups.append((rank, usernames))
@@ -131,10 +127,7 @@ def parse_quiz_rows(payload: str) -> list[tuple[str, str, str]]:
             if match is None:
                 continue
             usernames = _split_grouped_usernames(match.group("username"))
-            if len(usernames) < 2 or not any(
-                DISCORD_MENTION_PATTERN.fullmatch(username)
-                for username in usernames
-            ):
+            if len(usernames) < 2:
                 continue
             inferred_rank = (
                 pending_groups[-1][0]

@@ -204,6 +204,21 @@ class QuizcordParserTests(unittest.TestCase):
             ],
         )
 
+    def test_splits_plain_comma_separated_names_and_unescapes_markdown(self) -> None:
+        self.assertEqual(
+            parse_quiz_rows(
+                "Final leaderboard\n"
+                "#1. PRIYA\\_M\\_C\\_U23E01CS050, BHAVANAB0393, "
+                "CHINMAYEEBV\\_036 — 17\n"
+                "Total players\n3"
+            ),
+            [
+                ("1", "PRIYA_M_C_U23E01CS050", "17"),
+                ("1", "BHAVANAB0393", "17"),
+                ("1", "CHINMAYEEBV_036", "17"),
+            ],
+        )
+
     def test_splits_grouped_mentions_before_a_bare_trailing_score(self) -> None:
         self.assertEqual(
             parse_quiz_rows(
