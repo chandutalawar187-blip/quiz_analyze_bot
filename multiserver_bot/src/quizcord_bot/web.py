@@ -789,7 +789,10 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             auth_session = oauth_sessions.pop(session_key, None)
             if auth_session:
                 await _revoke_oauth_token(
-                    auth_session.access_token, client_id, client_secret
+                    auth_session.access_token,
+                    client_id,
+                    client_secret,
+                    app.state.discord_request_coordinator,
                 )
         request.session.clear()
         return RedirectResponse("/", status_code=302)

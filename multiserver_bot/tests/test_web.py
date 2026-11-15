@@ -473,6 +473,25 @@ class DashboardWebTests(unittest.TestCase):
             ).status_code,
             404,
         )
+        with (
+            patch(
+                "quizcord_bot.web.httpx.AsyncClient",
+                return_value=client_context,
+            ),
+            patch(
+                "quizcord_bot.telemetry.sentry_sdk.start_span",
+                return_value=nullcontext(),
+            ),
+        ):
+            logout = self.client.get("/auth/logout", follow_redirects=False)
+        self.assertEqual(logout.status_code, 302)
+        self.assertEqual(logout.headers["location"], "/")
+        revoke_call = discord_client.post.await_args_list[-1]
+        self.assertEqual(
+            revoke_call.args[0],
+            "https://discord.com/api/v10/oauth2/token/revoke",
+        )
+        self.assertEqual(revoke_call.kwargs["data"]["token"], "admin-access-token")
 
     def test_faculty_login_pages_are_separate_and_recovery_is_disabled(self) -> None:
         login_page = self.client.get("/faculty/login")
