@@ -95,6 +95,15 @@ class SentryTelemetryTests(unittest.TestCase):
             [{"op": "http.client", "description": "http.client"}],
         )
 
+    def test_expected_discord_rate_limits_are_not_reported_as_errors(self) -> None:
+        event = {
+            "exception": {
+                "values": [{"type": "DiscordRateLimitError"}],
+            }
+        }
+
+        self.assertIsNone(_scrub_error_event(event, {}))
+
     def test_scrubber_preserves_only_allowlisted_external_span_names(self) -> None:
         transaction = {
             "spans": [

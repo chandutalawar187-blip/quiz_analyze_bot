@@ -103,6 +103,37 @@ class DashboardWebTests(unittest.TestCase):
         self.assertIn("Faculty role", faculty_error)
         self.assertIn("HTTP 403", faculty_error)
 
+    def test_oauth_cloudflare_429_is_returned_without_exposing_response_body(self) -> None:
+        login = self.client.get("/auth/login", follow_redirects=False)
+        state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
+        rate_limited_response = httpx.Response(
+            429,
+            text="<html>Cloudflare Access denied</html>",
+            request=httpx.Request(
+                "POST", "https://discord.com/api/v10/oauth2/token"
+            ),
+        )
+        discord_client = Mock()
+        discord_client.post = AsyncMock(return_value=rate_limited_response)
+        client_context = Mock()
+        client_context.__aenter__ = AsyncMock(return_value=discord_client)
+        client_context.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "quizcord_bot.web.httpx.AsyncClient", return_value=client_context
+        ):
+            callback = self.client.get(
+                f"/auth/callback?code=single-use-code&state={state}",
+                follow_redirects=False,
+            )
+
+        self.assertEqual(callback.status_code, 429)
+        self.assertEqual(callback.headers["Retry-After"], "1")
+        self.assertNotIn("Cloudflare Access denied", callback.text)
+        self.assertNotIn("DASHBOARD_PUBLIC_URL", callback.text)
+        self.assertIn("Discord is temporarily rate-limiting", callback.text)
+        discord_client.post.assert_awaited_once()
+
     def test_dashboard_data_requires_discord_sign_in(self) -> None:
         response = self.client.get("/api/sessions")
 

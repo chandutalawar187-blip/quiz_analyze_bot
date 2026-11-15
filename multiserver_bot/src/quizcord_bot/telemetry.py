@@ -97,7 +97,15 @@ async def trace_external_request(
 
 def _scrub_error_event(
     event: dict[str, Any], _hint: dict[str, Any]
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
+    exception = event.get("exception")
+    values = exception.get("values", []) if isinstance(exception, dict) else []
+    if any(
+        isinstance(value, dict)
+        and value.get("type") == "DiscordRateLimitError"
+        for value in values
+    ):
+        return None
     event.pop("request", None)
     event.pop("breadcrumbs", None)
     event.pop("logentry", None)

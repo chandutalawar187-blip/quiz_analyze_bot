@@ -3,6 +3,7 @@
 import asyncio
 import html
 import logging
+import math
 import secrets
 import time
 from collections import OrderedDict, deque
@@ -28,6 +29,10 @@ from quizcord_bot.database import (
     StudentQuizAnalytics,
     matches_usn_format,
     normalize_usn,
+)
+from quizcord_bot.discord_http import (
+    DiscordRateLimitError,
+    DiscordRequestCoordinator,
 )
 from quizcord_bot.exports import quiz_session_workbook, student_analytics_workbook
 from quizcord_bot.telemetry import record_http_request, trace_external_request
@@ -185,6 +190,7 @@ def _sentry_origin(dsn: str | None) -> str:
 
 def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
     app = FastAPI(title="Quizcord Analytics", docs_url=None, redoc_url=None)
+    app.state.discord_request_coordinator = DiscordRequestCoordinator()
     sentry_origin = _sentry_origin(settings.sentry_dsn)
     sentry_script = (
         " https://browser.sentry-cdn.com" if settings.sentry_dsn else ""
@@ -202,6 +208,30 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
     rate_limit_windows: OrderedDict[
         tuple[str, str], deque[float]
     ] = OrderedDict()
+
+    @app.exception_handler(DiscordRateLimitError)
+    async def discord_rate_limit_handler(
+        request: Request, error: DiscordRateLimitError
+    ) -> Response:
+        detail = (
+            "Discord is temporarily rate-limiting requests. "
+            "Please wait before trying again."
+        )
+        headers = {}
+        if error.retry_after is not None:
+            retry_after = max(1, math.ceil(error.retry_after))
+            headers["Retry-After"] = str(retry_after)
+            detail = (
+                "Discord is temporarily rate-limiting requests. "
+                f"Please wait {retry_after} seconds before trying again."
+            )
+        if _wants_json_error(request):
+            return JSONResponse(
+                {"detail": detail}, status_code=429, headers=headers
+            )
+        return HTMLResponse(
+            _error_page(429, detail), status_code=429, headers=headers
+        )
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -416,7 +446,10 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             now = time.time()
             if now - auth_session.last_permission_check >= PERMISSION_CACHE_SECONDS:
                 auth_session = await _verify_current_guild_access(
-                    auth_session, settings, database
+                    auth_session,
+                    settings,
+                    database,
+                    app.state.discord_request_coordinator,
                 )
                 oauth_sessions[session_key] = auth_session
         if not auth_session.admin_guild_ids and not auth_session.faculty_guild_ids:
@@ -565,8 +598,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         oauth_stage = "authorization-code exchange"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                token_response = await trace_external_request(
+                token_response = await app.state.discord_request_coordinator.request(
                     "discord.oauth.token_exchange",
+                    trace_external_request,
                     client.post,
                     f"{DISCORD_API}/oauth2/token",
                     data={
@@ -582,8 +616,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 token = token_response.json()
                 access_token = token["access_token"]
                 oauth_stage = "Discord identity lookup"
-                user_response = await trace_external_request(
+                user_response = await app.state.discord_request_coordinator.request(
                     "discord.oauth.current_user",
+                    trace_external_request,
                     client.get,
                     f"{DISCORD_API}/users/@me",
                     headers={"Authorization": f"Bearer {access_token}"},
@@ -591,8 +626,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 user_response.raise_for_status()
                 user = user_response.json()
                 oauth_stage = "Discord server-membership lookup"
-                guilds_response = await trace_external_request(
+                guilds_response = await app.state.discord_request_coordinator.request(
                     "discord.oauth.list_guilds",
+                    trace_external_request,
                     client.get,
                     f"{DISCORD_API}/users/@me/guilds",
                     headers={"Authorization": f"Bearer {access_token}"},
@@ -614,7 +650,11 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                         continue
                     oauth_stage = "Faculty role lookup"
                     member = await _get_guild_member(
-                        client, settings, int(user["id"]), guild_id
+                        client,
+                        settings,
+                        int(user["id"]),
+                        guild_id,
+                        app.state.discord_request_coordinator,
                     )
                     if _is_guild_faculty(member, faculty_role_id):
                         faculty_guild_ids.add(guild_id)
@@ -636,7 +676,10 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
 
         if not admin_guild_ids and not faculty_guild_ids:
             await _revoke_oauth_token(
-                access_token, client_id, client_secret
+                access_token,
+                client_id,
+                client_secret,
+                app.state.discord_request_coordinator,
             )
             raise HTTPException(
                 status_code=403,
@@ -1085,7 +1128,11 @@ _read_web_template("admin_login.html").replace(
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 member = await _get_guild_member(
-                    client, settings, discord_id, guild_id
+                    client,
+                    settings,
+                    discord_id,
+                    guild_id,
+                    app.state.discord_request_coordinator,
                 )
         except httpx.HTTPError:
             LOGGER.exception("Could not verify faculty during password provisioning.")
@@ -1301,7 +1348,10 @@ _read_web_template("admin_login.html").replace(
 
 
 async def _verify_current_guild_access(
-    auth_session: _OAuthSession, settings: Settings, database: Database
+    auth_session: _OAuthSession,
+    settings: Settings,
+    database: Database,
+    discord_requests: DiscordRequestCoordinator,
 ) -> _OAuthSession:
     now = time.time()
     if auth_session.access_token_expires_at <= now:
@@ -1309,8 +1359,9 @@ async def _verify_current_guild_access(
             raise HTTPException(status_code=401, detail="Please sign in again.")
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                response = await trace_external_request(
+                response = await discord_requests.request(
                     "discord.oauth.refresh_token",
+                    trace_external_request,
                     client.post,
                     f"{DISCORD_API}/oauth2/token",
                     data={
@@ -1338,8 +1389,9 @@ async def _verify_current_guild_access(
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            response = await trace_external_request(
+            response = await discord_requests.request(
                 "discord.oauth.list_guilds",
+                trace_external_request,
                 client.get,
                 f"{DISCORD_API}/users/@me/guilds",
                 headers={"Authorization": f"Bearer {auth_session.access_token}"},
@@ -1360,7 +1412,11 @@ async def _verify_current_guild_access(
                 if faculty_role_id is None:
                     continue
                 member = await _get_guild_member(
-                    client, settings, auth_session.user_id, guild_id
+                    client,
+                    settings,
+                    auth_session.user_id,
+                    guild_id,
+                    discord_requests,
                 )
                 if _is_guild_faculty(member, faculty_role_id):
                     auth_session.faculty_guild_ids.add(guild_id)
@@ -1447,9 +1503,11 @@ async def _get_guild_member(
     settings: Settings,
     user_id: int,
     guild_id: int,
+    discord_requests: DiscordRequestCoordinator,
 ) -> dict[str, Any] | None:
-    response = await trace_external_request(
+    response = await discord_requests.request(
         "discord.guild.member_lookup",
+        trace_external_request,
         client.get,
         f"{DISCORD_API}/guilds/{guild_id}/members/{user_id}",
         headers={"Authorization": f"Bot {settings.token}"},
@@ -1505,12 +1563,16 @@ def _oauth_failure_detail(stage: str, status_code: int | None) -> str:
 
 
 async def _revoke_oauth_token(
-    access_token: str, client_id: str, client_secret: str
+    access_token: str,
+    client_id: str,
+    client_secret: str,
+    discord_requests: DiscordRequestCoordinator,
 ) -> None:
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            response = await trace_external_request(
+            response = await discord_requests.request(
                 "discord.oauth.revoke_token",
+                trace_external_request,
                 client.post,
                 f"{DISCORD_API}/oauth2/token/revoke",
                 data={
@@ -1521,6 +1583,8 @@ async def _revoke_oauth_token(
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
             response.raise_for_status()
+    except DiscordRateLimitError:
+        LOGGER.warning("Discord rate-limited a dashboard OAuth token revocation.")
     except httpx.HTTPError:
         LOGGER.warning("Could not revoke a dashboard OAuth token.")
 

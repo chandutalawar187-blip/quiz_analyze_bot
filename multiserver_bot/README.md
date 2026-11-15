@@ -325,6 +325,18 @@ platform-level protections and, if needed, edge rules or a trusted WAF/CDN for
 volumetric attacks. If deploying multiple app replicas, move rate-limit
 counters to a shared store such as Redis.
 
+Dashboard calls to Discord's REST API are serialized through a shared
+process-local coordinator. On HTTP 429 it honors Discord's `retry_after` body
+value or `Retry-After` header, retries at most twice, and holds subsequent
+Discord requests until the indicated delay expires. A 429 without a usable
+retry delay is returned as a sanitized HTTP 429 and triggers a short,
+increasing cooldown for later calls; upstream HTML error pages are not exposed
+to users or logged as exception details. Expected Discord rate limits are
+excluded from Sentry error events. discord.py separately reconnects Gateway
+sessions with exponential backoff. Persistent Cloudflare access-denied
+responses may require Discord or the hosting provider to review the service's
+network/IP; retrying more aggressively will not remove an upstream block.
+
 ### Enable the web dashboard
 
 The dashboard is served by the same process as the Discord bot. Railway is a
