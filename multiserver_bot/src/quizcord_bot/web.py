@@ -2,6 +2,7 @@
 
 import asyncio
 import html
+import json
 import logging
 import math
 import secrets
@@ -62,6 +63,41 @@ WEB_STATIC_DIR = Path(__file__).with_name("static")
 
 def _read_web_template(name: str) -> str:
     return (WEB_TEMPLATE_DIR / name).read_text(encoding="utf-8")
+
+
+def _oauth_popup_completion_page(public_url: str, return_to: str) -> str:
+    origin = json.dumps(public_url).replace("</", "<\\/")
+    destination = json.dumps(return_to).replace("</", "<\\/")
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign-in complete · Quizcord Analytics</title>
+</head>
+<body>
+  <p>Sign-in complete. You can close this window.</p>
+  <script>
+    const completion = {{
+      type: "quizcord-oauth-complete",
+      returnTo: {destination}
+    }};
+    const origin = {origin};
+    if ("BroadcastChannel" in window) {{
+      const channel = new BroadcastChannel("quizcord-oauth");
+      channel.postMessage(completion);
+      channel.close();
+    }}
+    if (window.opener && !window.opener.closed) {{
+      window.opener.postMessage(completion, origin);
+    }}
+    window.close();
+    if (!window.closed) {{
+      window.location.replace(completion.returnTo);
+    }}
+  </script>
+</body>
+</html>"""
 
 
 def _error_page(status_code: int, detail: Any) -> str:
@@ -537,6 +573,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         session: str | None = None,
         guild_id: str | None = None,
         destination: str | None = None,
+        popup: bool = False,
     ) -> RedirectResponse:
         public_url, client_id, _ = require_oauth_config()
         now = time.time()
@@ -552,7 +589,10 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         request.session.pop("login_destination", None)
         request.session.pop("return_to", None)
         request.session.pop("requested_guild_id", None)
+        request.session.pop("oauth_popup", None)
         request.session["oauth_state"] = state
+        if popup:
+            request.session["oauth_popup"] = True
         if destination == "faculty":
             request.session["login_destination"] = "faculty"
             request.session["return_to"] = "/faculty/password"
@@ -583,7 +623,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
     @app.get("/auth/callback")
     async def callback(
         request: Request, code: str | None = None, state: str | None = None
-    ) -> RedirectResponse:
+    ) -> Response:
         public_url, client_id, client_secret = require_oauth_config()
         expected_state = request.session.pop("oauth_state", None)
         if (
@@ -595,6 +635,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             request.session.clear()
             raise HTTPException(status_code=400, detail="Invalid sign-in state.")
 
+        popup_login = bool(request.session.get("oauth_popup"))
         redirect_uri = f"{public_url}/auth/callback"
         oauth_stage = "authorization-code exchange"
         try:
@@ -733,6 +774,11 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             )
         if selected_guild_id is not None:
             request.session["selected_guild_id"] = str(selected_guild_id)
+        if popup_login:
+            return HTMLResponse(
+                _oauth_popup_completion_page(public_url, return_to),
+                headers={"Cache-Control": "no-store"},
+            )
         return RedirectResponse(return_to, status_code=302)
 
     @app.get("/auth/logout")

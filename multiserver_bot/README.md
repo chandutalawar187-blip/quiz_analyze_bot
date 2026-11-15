@@ -224,6 +224,9 @@ redirect URI in the same Discord application configured by
 reports an authorization-code exchange failure, verify that URI, the dashboard
 public URL, and the application credentials match; restart sign-in after
 correcting configuration so Discord issues a fresh authorization code.
+Admin and faculty sign-in open Discord in a separate window to keep OAuth
+navigation out of the dashboard tab's browser history. If the browser blocks
+the window, allow pop-ups for the dashboard domain and try again.
 
 ### Configure the Discord app for multi-server installation
 

@@ -285,11 +285,12 @@ class DashboardWebTests(unittest.TestCase):
         )
         self.assertIn("Go to the faculty portal", response.text)
         self.assertIn(f'href="/auth/login?session={session_id}"', response.text)
+        self.assertIn('src="/static/oauth-login.js"', response.text)
 
     def test_admin_discord_sign_in_does_not_require_an_app_password(self) -> None:
         self.database.register_guild(98765, "Another server")
         login = self.client.get(
-            "/auth/login?destination=faculty", follow_redirects=False
+            "/auth/login?destination=faculty&popup=true", follow_redirects=False
         )
         oauth_query = parse_qs(urlsplit(login.headers["location"]).query)
         state = oauth_query["state"][0]
@@ -351,8 +352,10 @@ class DashboardWebTests(unittest.TestCase):
                 "discord.guild.member_lookup",
             }.issubset(span_names)
         )
-        self.assertEqual(callback.status_code, 302)
-        self.assertEqual(callback.headers["location"], "/faculty/password")
+        self.assertEqual(callback.status_code, 200)
+        self.assertEqual(callback.headers["cache-control"], "no-store")
+        self.assertIn("new BroadcastChannel", callback.text)
+        self.assertIn('returnTo: "/faculty/password"', callback.text)
         self.assertEqual(self.client.get("/faculty/password").status_code, 200)
         faculty_dashboard = self.client.get("/faculty", follow_redirects=False)
         self.assertEqual(faculty_dashboard.status_code, 302)
@@ -477,8 +480,12 @@ class DashboardWebTests(unittest.TestCase):
         self.assertIn("FACULTY PORTAL", login_page.text)
         self.assertIn("Continue with Discord", login_page.text)
         self.assertIn('href="/auth/login?destination=faculty"', login_page.text)
+        self.assertIn('src="/static/oauth-login.js"', login_page.text)
         self.assertIn('href="/login"', login_page.text)
         self.assertIn("A clearer view of every learner", login_page.text)
+        oauth_script = self.client.get("/static/oauth-login.js")
+        self.assertEqual(oauth_script.status_code, 200)
+        self.assertIn("quizcord-oauth-complete", oauth_script.text)
         self.assertIn("Quizcord never asks for or stores your Discord password", login_page.text)
         self.assertIn("Your administrator provides this app password separately", login_page.text)
         self.assertNotIn('type="password"', login_page.text)
