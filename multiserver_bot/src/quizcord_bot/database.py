@@ -8,10 +8,12 @@ import logging
 import secrets
 import unicodedata
 import uuid
+from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING
 import time
@@ -213,6 +215,38 @@ class StudentQuizAnalytics:
     total_points: int
     average_points: float | None
     history: tuple[StudentQuizRecord, ...]
+
+
+@dataclass(frozen=True)
+class TopLeaderboardEntry:
+    rank: int
+    discord_id: str | None
+    usn: str | None
+    student_name: str
+    average_percentile: float
+    quizzes_ranked: int
+
+
+@dataclass(frozen=True)
+class TopLeaderboards:
+    week_start: str
+    week_end: str
+    weekly: tuple[TopLeaderboardEntry, ...]
+    lifelong: tuple[TopLeaderboardEntry, ...]
+
+
+@dataclass(frozen=True)
+class _LeaderboardParticipant:
+    score: int
+    discord_id: str | None
+    usn: str | None
+    student_name: str
+
+
+@dataclass
+class _LeaderboardQuiz:
+    started_at: datetime
+    participants: dict[str, _LeaderboardParticipant] = field(default_factory=dict)
 
 
 class Database:
@@ -1293,6 +1327,206 @@ class Database:
                 self._get_quiz_session_summary(connection, row[0])
                 for row in session_ids
             )
+
+    def get_top_leaderboards(
+        self, guild_id: int, now: datetime | None = None
+    ) -> TopLeaderboards:
+        guild_id = self._resolve_guild_id(guild_id)
+        current_time = now or datetime.now(timezone.utc)
+        if current_time.tzinfo is None:
+            raise ValueError("Leaderboard reference time must include a timezone.")
+        current_time = current_time.astimezone(timezone.utc)
+        week_start_date = current_time.date() - timedelta(
+            days=current_time.weekday()
+        )
+        week_start = datetime.combine(week_start_date, datetime.min.time()).replace(
+            tzinfo=timezone.utc
+        )
+        week_end = week_start + timedelta(days=7)
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT s.session_id, s.quizcord_quiz_id, s.started_at,
+                       p.discord_id, p.usn, p.points,
+                       COALESCE(
+                           NULLIF(r.student_name, ''),
+                           NULLIF(e.display_name, ''),
+                           NULLIF(u.name, ''),
+                           p.usn
+                       ) AS student_name,
+                       r.usn
+                FROM quiz_sessions AS s
+                JOIN quiz_session_participants AS p
+                    ON p.session_id = s.session_id
+                LEFT JOIN student_registry AS r
+                    ON r.guild_id = s.guild_id
+                   AND r.discord_id = p.discord_id
+                LEFT JOIN guild_member_eligibility AS e
+                    ON e.guild_id = s.guild_id
+                   AND e.discord_id = p.discord_id
+                LEFT JOIN users AS u ON u.id = p.discord_id
+                WHERE s.guild_id = ?
+                  AND s.status = 'completed'
+                  AND p.eligible = 1
+                ORDER BY s.started_at DESC, s.session_id, p.usn COLLATE NOCASE
+                """,
+                (str(guild_id),),
+            ).fetchall()
+
+        quizzes: dict[str, _LeaderboardQuiz] = {}
+        for (
+            session_id,
+            quizcord_quiz_id,
+            started_at_text,
+            discord_id,
+            participant_usn,
+            score,
+            student_name,
+            registered_usn,
+        ) in rows:
+            try:
+                started_at = datetime.fromisoformat(str(started_at_text))
+            except ValueError:
+                LOGGER.warning(
+                    "Skipping completed leaderboard session %s with an invalid "
+                    "start timestamp.",
+                    session_id,
+                )
+                continue
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            started_at = started_at.astimezone(timezone.utc)
+
+            quiz_key = (
+                f"quiz:{quizcord_quiz_id}"
+                if quizcord_quiz_id is not None
+                else f"session:{session_id}"
+            )
+            quiz = quizzes.get(quiz_key)
+            if quiz is None:
+                quiz = _LeaderboardQuiz(started_at=started_at)
+                quizzes[quiz_key] = quiz
+            elif started_at < quiz.started_at:
+                quiz.started_at = started_at
+
+            discord_id_text = str(discord_id) if discord_id is not None else None
+            participant_usn_text = str(participant_usn)
+            identity_key = (
+                f"discord:{discord_id_text}"
+                if discord_id_text is not None
+                else f"name:{normalize_usn(participant_usn_text).casefold()}"
+            )
+            if identity_key == "discord:" or identity_key == "name:":
+                LOGGER.warning(
+                    "Skipping a leaderboard participant with no usable identity "
+                    "in session %s.",
+                    session_id,
+                )
+                continue
+
+            participant = _LeaderboardParticipant(
+                score=int(score),
+                discord_id=discord_id_text,
+                usn=str(registered_usn) if registered_usn is not None else None,
+                student_name=str(student_name or participant_usn_text),
+            )
+            existing = quiz.participants.get(identity_key)
+            if existing is None or participant.score > existing.score:
+                if existing is not None and participant.score != existing.score:
+                    LOGGER.warning(
+                        "Found conflicting duplicate participant scores in "
+                        "completed leaderboard session %s; retaining the higher "
+                        "recorded score.",
+                        session_id,
+                    )
+                quiz.participants[identity_key] = participant
+
+        weekly = self._build_top_leaderboard(
+            quizzes,
+            period_start=week_start,
+            period_end=week_end,
+        )
+        lifelong = self._build_top_leaderboard(quizzes)
+        return TopLeaderboards(
+            week_start=week_start.date().isoformat(),
+            week_end=week_end.date().isoformat(),
+            weekly=weekly,
+            lifelong=lifelong,
+        )
+
+    @staticmethod
+    def _build_top_leaderboard(
+        quizzes: dict[str, _LeaderboardQuiz],
+        period_start: datetime | None = None,
+        period_end: datetime | None = None,
+    ) -> tuple[TopLeaderboardEntry, ...]:
+        score_totals: dict[str, Fraction] = {}
+        quiz_counts: Counter[str] = Counter()
+        identities: dict[str, _LeaderboardParticipant] = {}
+
+        for quiz in quizzes.values():
+            if period_start is not None and quiz.started_at < period_start:
+                continue
+            if period_end is not None and quiz.started_at >= period_end:
+                continue
+            participant_count = len(quiz.participants)
+            if participant_count < 2:
+                continue
+
+            score_counts = Counter(
+                participant.score for participant in quiz.participants.values()
+            )
+            lower_score_counts: dict[int, int] = {}
+            lower_score_count = 0
+            for score in sorted(score_counts):
+                lower_score_counts[score] = lower_score_count
+                lower_score_count += score_counts[score]
+            for identity_key, participant in quiz.participants.items():
+                lower_scores = lower_score_counts[participant.score]
+                tied_opponents = score_counts[participant.score] - 1
+                percentile = Fraction(
+                    2 * lower_scores + tied_opponents,
+                    2 * (participant_count - 1),
+                )
+                score_totals[identity_key] = (
+                    score_totals.get(identity_key, Fraction(0)) + percentile
+                )
+                quiz_counts[identity_key] += 1
+                identities.setdefault(identity_key, participant)
+
+        averages = {
+            identity_key: score_totals[identity_key] / quiz_count
+            for identity_key, quiz_count in quiz_counts.items()
+        }
+        ordered = sorted(
+            averages,
+            key=lambda identity_key: (
+                -averages[identity_key],
+                identities[identity_key].student_name.casefold(),
+                identity_key,
+            ),
+        )
+        entries: list[TopLeaderboardEntry] = []
+        previous_average: Fraction | None = None
+        current_rank = 0
+        for position, identity_key in enumerate(ordered, start=1):
+            average = averages[identity_key]
+            if average != previous_average:
+                current_rank = position
+                previous_average = average
+            participant = identities[identity_key]
+            entries.append(
+                TopLeaderboardEntry(
+                    rank=current_rank,
+                    discord_id=participant.discord_id,
+                    usn=participant.usn,
+                    student_name=participant.student_name,
+                    average_percentile=float(average * 100),
+                    quizzes_ranked=quiz_counts[identity_key],
+                )
+            )
+        return tuple(entries)
 
     def get_student_quiz_analytics(
         self, guild_id: int, usn: str

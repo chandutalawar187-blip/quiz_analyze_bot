@@ -5,7 +5,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -132,6 +132,150 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(
             [(record.status, record.points) for record in analytics.history],
             [("active", 650), ("completed", 900)],
+        )
+
+    def test_top_leaderboard_normalizes_scores_per_quiz_and_uses_utc_week(self) -> None:
+        self.database.save_quiz_results(
+            "legacy-only",
+            [("1", "Student Nickname", "5000")],
+            quiz_date="2026-11-18",
+        )
+
+        def record_quiz(
+            quiz_id: str,
+            started_at: str,
+            rows: list[tuple[str, str, str]],
+            final: bool = True,
+        ) -> None:
+            session = self.database.start_quiz_session(
+                67890,
+                2000 + len(quiz_id),
+                12345,
+                started_at,
+            )
+            self.database.record_quiz_leaderboard(
+                session.session_id,
+                3000 + len(quiz_id),
+                "revision-1",
+                rows,
+                final,
+                quiz_id,
+            )
+
+        record_quiz(
+            "points-quiz",
+            "2026-11-16T10:00:00+00:00",
+            [
+                ("1", "ALPHA", "1000"),
+                ("2", "BETA", "500"),
+                ("3", "GAMMA", "0"),
+            ],
+        )
+        record_quiz(
+            "answers-quiz",
+            "2026-11-17T10:00:00+00:00",
+            [
+                ("1", "ALPHA", "5"),
+                ("2", "BETA", "4"),
+                ("3", "GAMMA", "2"),
+                ("4", "DELTA", "0"),
+            ],
+        )
+        record_quiz(
+            "previous-week",
+            "2026-11-09T10:00:00+00:00",
+            [("1", "DELTA", "30"), ("2", "ALPHA", "10")],
+        )
+        record_quiz(
+            "unfinished",
+            "2026-11-18T10:00:00+00:00",
+            [("1", "DELTA", "9999"), ("2", "ALPHA", "0")],
+            final=False,
+        )
+        record_quiz(
+            "single-player",
+            "2026-11-18T11:00:00+00:00",
+            [("1", "SOLO", "9999")],
+        )
+
+        leaderboards = self.database.get_top_leaderboards(
+            67890, datetime(2026, 11, 18, 12, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(leaderboards.week_start, "2026-11-16")
+        self.assertEqual(leaderboards.week_end, "2026-11-23")
+        self.assertEqual(
+            [
+                (entry.student_name, entry.rank)
+                for entry in leaderboards.weekly
+            ],
+            [("ALPHA", 1), ("BETA", 2), ("GAMMA", 3), ("DELTA", 4)],
+        )
+        self.assertAlmostEqual(
+            leaderboards.weekly[0].average_percentile, 100.0
+        )
+        self.assertAlmostEqual(
+            leaderboards.weekly[1].average_percentile, 58.33333333333333
+        )
+        self.assertAlmostEqual(
+            leaderboards.weekly[2].average_percentile, 16.666666666666664
+        )
+        self.assertAlmostEqual(
+            leaderboards.weekly[3].average_percentile, 0.0
+        )
+        self.assertEqual(
+            {entry.student_name for entry in leaderboards.lifelong},
+            {"ALPHA", "BETA", "GAMMA", "DELTA"},
+        )
+        self.assertAlmostEqual(
+            next(
+                entry.average_percentile
+                for entry in leaderboards.lifelong
+                if entry.student_name == "ALPHA"
+            ),
+            66.66666666666666,
+        )
+        self.assertNotIn(
+            "SOLO", {entry.student_name for entry in leaderboards.lifelong}
+        )
+        self.assertNotIn(
+            "Student One",
+            {entry.student_name for entry in leaderboards.lifelong},
+        )
+
+    def test_top_leaderboard_awards_half_credit_for_tied_scores(self) -> None:
+        session = self.database.start_quiz_session(
+            67890,
+            2001,
+            12345,
+            "2026-11-16T10:00:00+00:00",
+        )
+        self.database.record_quiz_leaderboard(
+            session.session_id,
+            3001,
+            "revision-1",
+            [
+                ("1", "ALPHA", "10"),
+                ("1", "BETA", "10"),
+                ("3", "GAMMA", "0"),
+            ],
+            True,
+            "tie-quiz",
+        )
+
+        leaderboards = self.database.get_top_leaderboards(
+            67890, datetime(2026, 11, 18, 12, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(
+            [(entry.student_name, entry.rank) for entry in leaderboards.weekly],
+            [("ALPHA", 1), ("BETA", 1), ("GAMMA", 3)],
+        )
+        self.assertAlmostEqual(
+            leaderboards.weekly[0].average_percentile, 75.0
+        )
+        self.assertAlmostEqual(
+            leaderboards.weekly[1].average_percentile, 75.0
         )
 
     def test_student_mappings_and_analytics_are_scoped_to_each_server(self) -> None:

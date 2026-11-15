@@ -44,6 +44,7 @@ const select = document.getElementById("session-select");
     let userSearchQuery = "";
     let pendingDirectoryUsers = null;
     let leaderboardSearchQuery = "";
+    let leaderboardRequestId = 0;
     let attendanceView = "attended";
     function filterLeaderboard(){
       const query=leaderboardSearchQuery.trim().toLocaleLowerCase();
@@ -68,29 +69,30 @@ const select = document.getElementById("session-select");
       const labelNode=el("div","metric-label");labelNode.append(icon(iconName),document.createTextNode(label));
       const card=el("div","card");card.append(labelNode,el("div","metric",value));return card;
     }
-    function renderTopLeaderboard(){
+    async function renderTopLeaderboard(){
+      const requestId=++leaderboardRequestId;
       const heading=el("section","heading");
       const title=el("div");
       title.append(
         el("div","eyebrow","Server standings"),
         el("h1","","Top leaderboard"),
-        el("p","top-leaderboard-description","Recognizing the best performers across weekly quizzes and all-time results.")
+        el("p","top-leaderboard-description","Best performers by average normalized standing across completed quizzes.")
       );
       heading.append(title);
 
       const notice=el("section","top-leaderboard-notice");
-      notice.setAttribute("role","status");
+      notice.setAttribute("role","note");
       notice.append(
         el("span","top-leaderboard-notice-dot"),
-        el("div","", "Coming soon"),
-        el("p","","Weekly and lifelong best performer rankings are on the way.")
+        el("div","", "How the rankings work"),
+        el("p","","Each quiz is normalized separately: (opponents scored below + half of tied opponents) ÷ all other eligible players. Percentiles are averaged equally across completed quizzes; points and correct-answer counts are never added together. Bots, incomplete quizzes, single-player quizzes, and imports without a complete participant leaderboard are excluded. Weekly rankings use Monday–Sunday UTC.")
       );
 
       const cards=el("section","top-leaderboard-cards");
       cards.setAttribute("aria-label","Leaderboard summary loading");
       cards.setAttribute("aria-busy","true");
       [
-        ["Weekly best performer","This week's top student"],
+        ["Weekly best performer","Top student this UTC week"],
         ["Lifelong best performer","Top student across all quizzes"]
       ].forEach(([titleText,subtitle])=>{
         const card=el("article","card top-leaderboard-card");
@@ -100,15 +102,13 @@ const select = document.getElementById("session-select");
           el("span","top-leaderboard-period",titleText.startsWith("Weekly")?"This week":"Lifelong")
         );
         const performer=el("div","top-leaderboard-performer");
-        const avatar=el("span","skeleton skeleton-avatar");
-        avatar.setAttribute("aria-hidden","true");
         const details=el("div","top-leaderboard-performer-details");
         const name=el("span","skeleton skeleton-name");
         const caption=el("span","skeleton skeleton-caption");
         name.setAttribute("aria-hidden","true");
         caption.setAttribute("aria-hidden","true");
         details.append(name,caption);
-        performer.append(avatar,details);
+        performer.append(details);
         const points=el("div","top-leaderboard-points");
         const score=el("span","skeleton skeleton-score");
         score.setAttribute("aria-hidden","true");
@@ -121,7 +121,7 @@ const select = document.getElementById("session-select");
       layouts.setAttribute("aria-label","Leaderboard tables loading");
       layouts.setAttribute("aria-busy","true");
       [
-        ["Weekly leaderboard","Current week's top performers"],
+        ["Weekly leaderboard","This week's normalized standings"],
         ["Lifelong leaderboard","Top performers across all quizzes"]
       ].forEach(([titleText,subtitle])=>{
         const panel=el("article","panel top-leaderboard-panel");
@@ -135,17 +135,123 @@ const select = document.getElementById("session-select");
         for(let index=0;index<5;index++){
           const row=el("div","top-leaderboard-skeleton-row");
           const rank=el("span","skeleton skeleton-rank");
-          const avatar=el("span","skeleton skeleton-row-avatar");
           const name=el("span","skeleton skeleton-row-name");
           const points=el("span","skeleton skeleton-row-points");
-          [rank,avatar,name,points].forEach(part=>part.setAttribute("aria-hidden","true"));
-          row.append(rank,avatar,name,points);
+          [rank,name,points].forEach(part=>part.setAttribute("aria-hidden","true"));
+          row.append(rank,name,points);
           rows.append(row);
         }
         panel.append(rows);
         layouts.append(panel);
       });
       content.replaceChildren(heading,notice,cards,layouts);
+      try{
+        const response=await fetch("/api/top-leaderboard",{cache:"no-store"});
+        if(response.status===401){location.replace("/");return;}
+        if(!response.ok){
+          const error=await response.json().catch(()=>({}));
+          throw new Error(error.detail||"Could not load the top leaderboard.");
+        }
+        const data=await response.json();
+        if(requestId!==leaderboardRequestId||activeView!=="top-leaderboard")return;
+        const summaryCards=el("section","top-leaderboard-cards");
+        summaryCards.setAttribute("aria-label","Leaderboard leaders");
+        const boards=el("section","top-leaderboard-layouts");
+        const periods=[
+          {
+            key:"weekly",
+            title:"Weekly best performer",
+            period:"Week of "+data.week_start+" UTC",
+            subtitle:"Top student this UTC week",
+            entries:data.weekly
+          },
+          {
+            key:"lifelong",
+            title:"Lifelong best performer",
+            period:"All time",
+            subtitle:"Top student across all completed quizzes",
+            entries:data.lifelong
+          }
+        ];
+        periods.forEach(board=>{
+          const entries=Array.isArray(board.entries)?board.entries:[];
+          const leader=entries[0];
+          const card=el("article","card top-leaderboard-card");
+          const cardHeader=el("div","top-leaderboard-card-heading");
+          cardHeader.append(
+            el("div","top-leaderboard-card-title",board.title),
+            el("span","top-leaderboard-period",board.period)
+          );
+          card.append(cardHeader,el("div","top-leaderboard-card-subtitle",board.subtitle));
+          if(leader){
+            const performer=el("div","top-leaderboard-performer");
+            const details=el("div","top-leaderboard-performer-details");
+            details.append(
+              el("strong","top-leaderboard-leader-name",leader.student_name),
+              el("span","panel-sub",leader.quizzes_ranked+" ranked quizzes")
+            );
+            performer.append(details);
+            card.append(
+              performer,
+              el("div","top-leaderboard-points",Number(leader.average_percentile).toFixed(2)+"% average percentile")
+            );
+          }else{
+            card.append(el("div","empty top-leaderboard-empty","No ranked results yet."));
+          }
+          summaryCards.append(card);
+
+          const panel=el("article","panel top-leaderboard-panel");
+          const panelHeading=el("div","panel-head");
+          panelHeading.append(
+            el("h2","",board.key==="weekly"?"Weekly leaderboard":"Lifelong leaderboard"),
+            el("span","top-leaderboard-period",board.period)
+          );
+          panel.append(
+            panelHeading,
+            el("div","panel-sub top-leaderboard-panel-subtitle","Average normalized standing · "+entries.length+" students")
+          );
+          if(!entries.length){
+            panel.append(el("div","empty","No completed multi-player quizzes are available for this period."));
+          }else{
+            const tableWrap=el("div","table-wrap top-leaderboard-table-wrap");
+            const table=el("table","top-leaderboard-table");
+            const thead=el("thead");
+            const headRow=el("tr");
+            ["Rank","Student","Average percentile","Quizzes ranked"].forEach(label=>headRow.append(el("th","",label)));
+            thead.append(headRow);
+            table.append(thead);
+            const tbody=el("tbody");
+            entries.forEach(entry=>{
+              const row=el("tr");
+              row.append(el("td","rank","#"+entry.rank));
+              const nameCell=el("td","");
+              if(entry.usn){
+                const link=document.createElement("a");
+                link.className="student-link";
+                link.href="/students/"+encodeURIComponent(entry.usn);
+                link.textContent=entry.student_name;
+                nameCell.append(link);
+              }else{
+                nameCell.textContent=entry.student_name;
+              }
+              row.append(
+                nameCell,
+                el("td","points",Number(entry.average_percentile).toFixed(2)+"%"),
+                el("td","",String(entry.quizzes_ranked))
+              );
+              tbody.append(row);
+            });
+            table.append(tbody);
+            tableWrap.append(table);
+            panel.append(tableWrap);
+          }
+          boards.append(panel);
+        });
+        content.replaceChildren(heading,notice,summaryCards,boards);
+      }catch(error){
+        if(requestId!==leaderboardRequestId||activeView!=="top-leaderboard")return;
+        content.replaceChildren(heading,el("div","empty error",error.message));
+      }
     }
     function statusLabel(status){return status==="completed"?"Complete":status==="interrupted"?"Interrupted":"Live";}
     function dateLabel(value,withTime=false){if(!value)return"Date unavailable";if(/^\d{4}-\d{2}-\d{2}$/.test(value)){const [year,month,day]=value.split("-").map(Number);return new Date(year,month-1,day).toLocaleDateString();}return new Date(value).toLocaleString(undefined,withTime?{}:{dateStyle:"short"});}

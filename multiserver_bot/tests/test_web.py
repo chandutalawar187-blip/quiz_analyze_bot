@@ -139,6 +139,11 @@ class DashboardWebTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["detail"], "Please sign in again.")
+        leaderboard = self.client.get("/api/top-leaderboard")
+        self.assertEqual(leaderboard.status_code, 401)
+        self.assertEqual(
+            leaderboard.json()["detail"], "Please sign in again."
+        )
 
     def test_oauth_login_is_rate_limited(self) -> None:
         responses = [
@@ -366,10 +371,25 @@ class DashboardWebTests(unittest.TestCase):
             selected_session.session_id,
             5001,
             "revision-1",
-            [("1", "U26E01CS001", "900")],
+            [
+                ("1", "U26E01CS001", "900"),
+                ("2", "OTHER_STUDENT", "400"),
+            ],
             True,
             "quiz-selected",
             "2026-10-17T15:30:00+00:00",
+        )
+        top_leaderboard = self.client.get("/api/top-leaderboard")
+        self.assertEqual(top_leaderboard.status_code, 200)
+        top_data = top_leaderboard.json()
+        self.assertEqual(top_data["weekly"], [])
+        self.assertRegex(top_data["week_start"], r"^\d{4}-\d{2}-\d{2}$")
+        self.assertEqual(
+            [
+                (entry["rank"], entry["student_name"], entry["average_percentile"])
+                for entry in top_data["lifelong"]
+            ],
+            [(1, "U26E01CS001", 100.0), (2, "OTHER_STUDENT", 0.0)],
         )
         export = self.client.get(
             f"/api/sessions/{selected_session.session_id}/export.xlsx"
@@ -1085,6 +1105,9 @@ class DashboardWebTests(unittest.TestCase):
         self.assertIn('data-view="top-leaderboard"', enabled)
         dashboard_script = self.client.get("/static/admin-dashboard.js")
         self.assertEqual(dashboard_script.status_code, 200)
+        self.assertIn('fetch("/api/top-leaderboard"', dashboard_script.text)
+        self.assertIn("average normalized standing", dashboard_script.text)
+        self.assertNotIn("Coming soon", dashboard_script.text)
         self.assertIn("function renderTopLeaderboard()", dashboard_script.text)
         self.assertIn("Weekly best performer", dashboard_script.text)
         self.assertIn("Lifelong best performer", dashboard_script.text)

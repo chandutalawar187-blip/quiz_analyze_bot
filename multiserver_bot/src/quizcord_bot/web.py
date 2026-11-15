@@ -27,6 +27,7 @@ from quizcord_bot.database import (
     QuizSessionAbsentStudent,
     QuizSessionSummary,
     StudentQuizAnalytics,
+    TopLeaderboardEntry,
     matches_usn_format,
     normalize_usn,
 )
@@ -973,6 +974,30 @@ _read_web_template("admin_login.html").replace(
                 request.state.guild_id, limit=50, offset=offset
             )
         ]
+
+    @app.get("/api/top-leaderboard")
+    async def top_leaderboard(request: Request) -> dict[str, Any]:
+        await current_admin(request)
+        leaderboards = database.get_top_leaderboards(request.state.guild_id)
+
+        def serialize_entry(entry: TopLeaderboardEntry) -> dict[str, Any]:
+            return {
+                "rank": entry.rank,
+                "discord_id": entry.discord_id,
+                "usn": entry.usn,
+                "student_name": entry.student_name,
+                "average_percentile": round(entry.average_percentile, 2),
+                "quizzes_ranked": entry.quizzes_ranked,
+            }
+
+        return {
+            "week_start": leaderboards.week_start,
+            "week_end": leaderboards.week_end,
+            "weekly": [serialize_entry(entry) for entry in leaderboards.weekly],
+            "lifelong": [
+                serialize_entry(entry) for entry in leaderboards.lifelong
+            ],
+        }
 
     @app.get("/api/users")
     async def users(request: Request) -> list[dict[str, Any]]:

@@ -231,6 +231,7 @@ button, a, input, select { font: inherit; }
   margin: 2px 0 0;
   color: var(--text-soft);
   font-size: 13px;
+  line-height: 1.6;
 }
 .top-leaderboard-notice-dot {
   width: 10px;
@@ -282,11 +283,20 @@ button, a, input, select { font: inherit; }
   flex: 1;
   gap: 8px;
 }
+.top-leaderboard-leader-name {
+  color: var(--text);
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
 .top-leaderboard-points {
   display: flex;
   justify-content: flex-end;
   margin-top: 13px;
+  color: var(--accent-strong);
+  font-size: 14px;
+  font-weight: 800;
 }
+.top-leaderboard-empty { margin-top: 18px; padding: 12px 0; }
 .skeleton {
   display: block;
   overflow: hidden;
@@ -324,7 +334,7 @@ button, a, input, select { font: inherit; }
 .top-leaderboard-skeleton-rows { padding: 0 20px 10px; }
 .top-leaderboard-skeleton-row {
   display: grid;
-  grid-template-columns: 28px 34px minmax(50px, 1fr) 58px;
+  grid-template-columns: 28px minmax(50px, 1fr) 58px;
   align-items: center;
   gap: 12px;
   min-height: 58px;
@@ -334,6 +344,12 @@ button, a, input, select { font: inherit; }
 .skeleton-row-avatar { width: 32px; height: 32px; border-radius: 50%; }
 .skeleton-row-name { width: min(180px, 90%); height: 12px; }
 .skeleton-row-points { width: 52px; height: 12px; justify-self: end; }
+.top-leaderboard-table { width: 100%; min-width: 520px; }
+.top-leaderboard-table th:first-child,
+.top-leaderboard-table td:first-child { width: 72px; }
+.top-leaderboard-table td:nth-child(3),
+.top-leaderboard-table td:nth-child(4) { white-space: nowrap; }
+.top-leaderboard-table td:nth-child(3) { font-weight: 750; }
 @media (prefers-reduced-motion: reduce) {
   .skeleton::after { animation: none; transform: none; }
 }

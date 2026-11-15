@@ -499,8 +499,15 @@ continues to use its private Discord dashboard.
   global display name exactly matches an accepted USN format, the directory
   shows that value as their USN; this inferred value does not create a student
   mapping or populate a student name.
-  The **Top leaderboard** tab previews weekly and lifelong best performers;
-  its rankings are marked as coming soon.
+  The **Top leaderboard** tab shows weekly and lifelong best performers.
+  Quiz scores are normalized separately within each completed quiz as
+  `(players scored below + half of tied players) / other eligible players`,
+  then averaged equally per student. This makes point-based and
+  correct-answer-based quizzes comparable without summing unlike score units.
+  Weekly rankings cover Monday through Sunday in UTC. The leaderboard uses
+  complete tracked session rosters only; bots, incomplete sessions, sessions
+  with fewer than two eligible participants, and historical imports without a
+  full participant roster are excluded. Equal average percentiles share a rank.
   The Discord fallback buttons remain usable after a bot restart.
 - Quiz attendance summaries show attendees over the human guild-member count
   and an attendance percentage. The dashboard labels this count
