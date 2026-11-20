@@ -39,10 +39,13 @@
 │       ├── static/
 │       │   ├── admin-dashboard.css
 │       │   ├── admin-dashboard.js
+│       │   ├── animate.min.css
+│       │   ├── animate-css-LICENSE.txt
 │       │   ├── dashboard-theme.css
 │       │   ├── dashboard-theme.js
 │       │   ├── faculty-dashboard.css
 │       │   ├── faculty-dashboard.js
+│       │   ├── maintenance.css
 │       │   └── icons/
 │       │       ├── *.svg (selected Tabler Icons)
 │       │       └── LICENSE
@@ -53,6 +56,7 @@
 │       │   ├── faculty_login.html
 │       │   ├── faculty_password.html
 │       │   ├── faculty_password_admin.html
+│       │   ├── maintenance.html
 │       │   ├── privacy_policy.html
 │       │   └── terms_of_service.html
 │       ├── telemetry.py
@@ -153,6 +157,8 @@ Developer Portal.
 | `DISCORD_OAUTH_CLIENT_ID` | With dashboard | Discord application's OAuth2 client ID. |
 | `DISCORD_OAUTH_CLIENT_SECRET` | With dashboard | Discord application's OAuth2 client secret. |
 | `DASHBOARD_SESSION_SECRET` | With dashboard | Unique session-signing secret, at least 32 characters. |
+| `BUILD_MODE` | No | Set to `true` while building to show visitors the maintenance page. Defaults to `false`. Requires dashboard OAuth and `DASHBOARD_DEVELOPER_IDS`. |
+| `DASHBOARD_DEVELOPER_IDS` | With build mode | Comma-separated Discord user IDs allowed to bypass the maintenance gate. Developers still need the existing server admin or faculty authorization to view protected dashboards and data. |
 | `FACULTY_ROLE_ID` | No | Optional legacy role ID migrated to the `BOT_GUILD_ID` server. Configure faculty roles per server with `/set_faculty_role`. |
 | `DASHBOARD_HOST` | No | Bind address; defaults to `127.0.0.1` behind a local reverse proxy. |
 | `DASHBOARD_PORT` | No | Web server port; defaults to `8765`. |
@@ -160,6 +166,15 @@ Developer Portal.
 | `SENTRY_TRACES_SAMPLE_RATE` | No | Fraction of dashboard transactions traced, from `0` to `1`; defaults to `0.1` (10%). |
 | `SENTRY_PROFILE_SAMPLE_RATE` | No | Fraction of service profiles sampled while traces are active, from `0` to `1`; defaults to `0.01` (1%). |
 | `SENTRY_ENVIRONMENT` | No | Sentry environment name; the SDK reads this directly. Use `production` in Railway. |
+
+When `BUILD_MODE=true`, public pages and APIs show maintenance responses except
+the health check and the minimal assets needed to render the maintenance page.
+Allowlisted developers can start Discord sign-in directly at `/auth/login`;
+the public maintenance page has no developer sign-in link. The server checks
+their IDs against `DASHBOARD_DEVELOPER_IDS`, and their dashboard keeps the
+existing server-role authorization. A developer-only **Debug mode** control
+opens a preview of the public maintenance page. Set `BUILD_MODE=false` after
+the work is complete.
 
 ### Optional Sentry monitoring
 

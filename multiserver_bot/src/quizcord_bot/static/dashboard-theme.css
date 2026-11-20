@@ -235,3 +235,30 @@ td, th { border-color: var(--line); }
 @keyframes theme-fade-in {
   from { opacity: 0; }
 }
+:root {
+  --debug-mode-border: #d5a755;
+  --debug-mode-bg: #fff7e6;
+  --debug-mode-text: #7d5411;
+}
+.debug-mode-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 1px solid var(--debug-mode-border);
+  border-radius: 999px;
+  background: var(--debug-mode-bg);
+  color: var(--debug-mode-text);
+  font-size: 11px;
+  font-weight: 750;
+  text-decoration: none;
+}
+.debug-mode-link::before {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d9972f;
+  box-shadow: 0 0 9px #d9972f77;
+  content: "";
+}
+.debug-mode-link:hover { filter: brightness(.97); }

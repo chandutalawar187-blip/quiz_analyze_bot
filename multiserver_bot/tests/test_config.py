@@ -41,6 +41,60 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.database_path.name, "test-results.db")
         self.assertEqual(settings.faculty_role_id, 54321)
 
+    def test_build_mode_requires_developer_ids_and_complete_dashboard_config(self) -> None:
+        with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+            os.environ,
+            {"DISCORD_BOT_TOKEN": "test-token", "BUILD_MODE": "true"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "complete dashboard OAuth"):
+                Settings.from_environment()
+
+        with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+            os.environ,
+            {
+                "DISCORD_BOT_TOKEN": "test-token",
+                "DASHBOARD_PUBLIC_URL": "https://analytics.example.com",
+                "DISCORD_OAUTH_CLIENT_ID": "12345",
+                "DISCORD_OAUTH_CLIENT_SECRET": "oauth-secret",
+                "DASHBOARD_SESSION_SECRET": "s" * 40,
+                "BUILD_MODE": "true",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "DASHBOARD_DEVELOPER_IDS"):
+                Settings.from_environment()
+
+        with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+            os.environ,
+            {
+                "DISCORD_BOT_TOKEN": "test-token",
+                "DASHBOARD_PUBLIC_URL": "https://analytics.example.com",
+                "DISCORD_OAUTH_CLIENT_ID": "12345",
+                "DISCORD_OAUTH_CLIENT_SECRET": "oauth-secret",
+                "DASHBOARD_SESSION_SECRET": "s" * 40,
+                "BUILD_MODE": "on",
+                "DASHBOARD_DEVELOPER_IDS": "123456789, 987654321,123456789",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_environment()
+
+        self.assertTrue(settings.build_mode)
+        self.assertEqual(
+            settings.dashboard_developer_ids,
+            frozenset({123456789, 987654321}),
+        )
+
+    def test_build_mode_boolean_must_be_explicitly_valid(self) -> None:
+        with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+            os.environ,
+            {"DISCORD_BOT_TOKEN": "test-token", "BUILD_MODE": "sometimes"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "BUILD_MODE"):
+                Settings.from_environment()
+
     def test_quizcord_bot_id_can_be_omitted_for_automatic_detection(self) -> None:
         with patch("quizcord_bot.config.load_dotenv"), patch.dict(
             os.environ,

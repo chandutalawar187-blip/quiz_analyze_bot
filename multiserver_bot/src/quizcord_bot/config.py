@@ -23,6 +23,8 @@ class Settings:
     discord_oauth_client_secret: str | None
     faculty_role_id: int | None
     dashboard_session_secret: str | None
+    dashboard_developer_ids: frozenset[int]
+    build_mode: bool
     turnstile_site_key: str | None
     turnstile_secret_key: str | None
     dashboard_host: str
@@ -52,6 +54,13 @@ class Settings:
         oauth_client_secret = os.getenv("DISCORD_OAUTH_CLIENT_SECRET", "").strip()
         faculty_role_id = _optional_discord_id("FACULTY_ROLE_ID")
         session_secret = os.getenv("DASHBOARD_SESSION_SECRET", "").strip()
+        developer_ids = _parse_discord_ids(
+            "DASHBOARD_DEVELOPER_IDS",
+            os.getenv("DASHBOARD_DEVELOPER_IDS", "").strip(),
+        )
+        build_mode = _parse_bool(
+            "BUILD_MODE", os.getenv("BUILD_MODE", "false").strip()
+        )
         turnstile_site_key = os.getenv("TURNSTILE_SITE_KEY", "").strip()
         turnstile_secret_key = os.getenv("TURNSTILE_SECRET_KEY", "").strip()
         if bool(turnstile_site_key) != bool(turnstile_secret_key):
@@ -68,6 +77,14 @@ class Settings:
             raise ValueError(
                 "Set DASHBOARD_PUBLIC_URL, DISCORD_OAUTH_CLIENT_ID, "
                 "DISCORD_OAUTH_CLIENT_SECRET, and DASHBOARD_SESSION_SECRET together."
+            )
+        if build_mode and not all(dashboard_settings):
+            raise ValueError(
+                "BUILD_MODE requires the complete dashboard OAuth configuration."
+            )
+        if build_mode and not developer_ids:
+            raise ValueError(
+                "Set DASHBOARD_DEVELOPER_IDS when BUILD_MODE is enabled."
             )
         if dashboard_public_url:
             parsed_url = urlsplit(dashboard_public_url)
@@ -112,6 +129,8 @@ class Settings:
             discord_oauth_client_secret=oauth_client_secret or None,
             faculty_role_id=faculty_role_id,
             dashboard_session_secret=session_secret or None,
+            dashboard_developer_ids=developer_ids,
+            build_mode=build_mode,
             turnstile_site_key=turnstile_site_key or None,
             turnstile_secret_key=turnstile_secret_key or None,
             dashboard_host=dashboard_host,
@@ -142,6 +161,24 @@ def _parse_discord_id(name: str, value: str) -> int:
     if parsed <= 0:
         raise ValueError(f"{name} must be a positive numeric Discord ID.")
     return parsed
+
+
+def _parse_discord_ids(name: str, value: str) -> frozenset[int]:
+    if not value:
+        return frozenset()
+    return frozenset(
+        _parse_discord_id(name, item.strip())
+        for item in value.split(",")
+    )
+
+
+def _parse_bool(name: str, value: str) -> bool:
+    normalized = value.casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    raise ValueError(f"{name} must be a boolean value.")
 
 
 def _parse_port(value: str) -> int:

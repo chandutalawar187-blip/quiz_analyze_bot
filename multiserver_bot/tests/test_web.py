@@ -145,6 +145,159 @@ class DashboardWebTests(unittest.TestCase):
             leaderboard.json()["detail"], "Please sign in again."
         )
 
+    def test_build_mode_gates_pages_and_apis_but_keeps_health_and_assets(self) -> None:
+        settings = replace(
+            self.settings,
+            build_mode=True,
+            dashboard_developer_ids=frozenset({123456}),
+        )
+        client = TestClient(
+            create_dashboard_app(settings, self.database),
+            base_url="https://testserver",
+        )
+        try:
+            page = client.get("/")
+            api = client.get("/api/sessions")
+
+            self.assertEqual(page.status_code, 503)
+            self.assertIn("We’re making things", page.text)
+            self.assertNotIn("Developer sign in", page.text)
+            self.assertEqual(api.status_code, 503)
+            self.assertEqual(
+                api.json()["detail"],
+                "The dashboard is temporarily under maintenance.",
+            )
+            self.assertEqual(client.get("/health").status_code, 200)
+            self.assertEqual(client.get("/maintenance").status_code, 200)
+            self.assertEqual(client.get("/static/maintenance.css").status_code, 200)
+            self.assertEqual(
+                client.get("/static/admin-dashboard.js").status_code, 503
+            )
+        finally:
+            client.close()
+
+    def test_build_mode_rejects_non_developer_oauth_callback(self) -> None:
+        settings = replace(
+            self.settings,
+            build_mode=True,
+            dashboard_developer_ids=frozenset({123456}),
+        )
+        client = TestClient(
+            create_dashboard_app(settings, self.database),
+            base_url="https://testserver",
+        )
+        try:
+            login = client.get("/auth/login", follow_redirects=False)
+            state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
+            token_response = Mock()
+            token_response.json.return_value = {
+                "access_token": "non-developer-token",
+                "refresh_token": "refresh-token",
+                "expires_in": 3600,
+            }
+            user_response = Mock()
+            user_response.json.return_value = {
+                "id": "987654",
+                "username": "Not a developer",
+            }
+            discord_client = Mock()
+            discord_client.post = AsyncMock(return_value=token_response)
+            discord_client.get = AsyncMock(return_value=user_response)
+            client_context = Mock()
+            client_context.__aenter__ = AsyncMock(return_value=discord_client)
+            client_context.__aexit__ = AsyncMock(return_value=False)
+
+            with (
+                patch(
+                    "quizcord_bot.web.httpx.AsyncClient",
+                    return_value=client_context,
+                ),
+                patch(
+                    "quizcord_bot.web._revoke_oauth_token",
+                    new_callable=AsyncMock,
+                ) as revoke_token,
+            ):
+                callback = client.get(
+                    f"/auth/callback?code=login&state={state}",
+                    follow_redirects=False,
+                )
+
+            self.assertEqual(callback.status_code, 302)
+            self.assertEqual(callback.headers["location"], "/maintenance")
+            revoke_token.assert_awaited_once()
+            discord_client.get.assert_awaited_once()
+        finally:
+            client.close()
+
+    def test_allowlisted_developer_can_preview_maintenance_with_safe_return_path(
+        self,
+    ) -> None:
+        settings = replace(
+            self.settings,
+            build_mode=True,
+            dashboard_developer_ids=frozenset({987654}),
+        )
+        client = TestClient(
+            create_dashboard_app(settings, self.database),
+            base_url="https://testserver",
+        )
+        try:
+            login = client.get("/auth/login", follow_redirects=False)
+            state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
+            token_response = Mock()
+            token_response.json.return_value = {
+                "access_token": "developer-token",
+                "refresh_token": "refresh-token",
+                "expires_in": 3600,
+            }
+            user_response = Mock()
+            user_response.json.return_value = {
+                "id": "987654",
+                "global_name": "Developer",
+            }
+            guilds_response = Mock()
+            guilds_response.json.return_value = [
+                {"id": "67890", "permissions": str(1 << 5)}
+            ]
+            faculty_member_response = Mock()
+            faculty_member_response.json.return_value = {"roles": ["33333"]}
+            discord_client = Mock()
+            discord_client.post = AsyncMock(return_value=token_response)
+            discord_client.get = AsyncMock(
+                side_effect=[
+                    user_response,
+                    guilds_response,
+                    faculty_member_response,
+                ]
+            )
+            client_context = Mock()
+            client_context.__aenter__ = AsyncMock(return_value=discord_client)
+            client_context.__aexit__ = AsyncMock(return_value=False)
+
+            with patch(
+                "quizcord_bot.web.httpx.AsyncClient",
+                return_value=client_context,
+            ):
+                callback = client.get(
+                    f"/auth/callback?code=developer-login&state={state}",
+                    follow_redirects=False,
+                )
+
+            dashboard = client.get("/")
+            preview = client.get(
+                "/_debug/maintenance-preview?return_to=https%3A%2F%2Fevil.example"
+            )
+            self.assertEqual(callback.status_code, 302)
+            self.assertEqual(dashboard.status_code, 200)
+            self.assertIn("Debug mode", dashboard.text)
+            self.assertEqual(preview.status_code, 200)
+            self.assertIn("visitors still see the maintenance page", preview.text)
+            self.assertNotIn("Developer sign in", preview.text)
+            self.assertIn('href="/">Return to debug mode</a>', preview.text)
+            self.assertNotIn("evil.example", preview.text)
+        finally:
+            client.close()
+
     def test_oauth_login_is_rate_limited(self) -> None:
         responses = [
             self.client.get(

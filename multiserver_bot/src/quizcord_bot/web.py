@@ -184,12 +184,15 @@ FACULTY_PASSWORD_PAGE = _read_web_template("faculty_password.html")
 FACULTY_ADMIN_PAGE = _read_web_template("faculty_password_admin.html")
 FACULTY_PAGE = _read_web_template("faculty_dashboard.html")
 FACULTY_STUDENT_PAGE = _read_web_template("faculty_student.html")
+MAINTENANCE_PAGE = _read_web_template("maintenance.html")
 PRIVACY_POLICY_PAGE = _read_web_template("privacy_policy.html")
 TERMS_OF_SERVICE_PAGE = _read_web_template("terms_of_service.html")
 
 
 def _render_admin_dashboard(
-    sentry_dsn: str | None, enable_session_replay: bool
+    sentry_dsn: str | None,
+    enable_session_replay: bool,
+    debug_mode: bool = False,
 ) -> str:
     replay_enabled = enable_session_replay and sentry_dsn is not None
     return (
@@ -201,7 +204,38 @@ def _render_admin_dashboard(
             "__SESSION_REPLAY_ENABLED__",
             "true" if replay_enabled else "false",
         )
+        .replace(
+            "__DEBUG_MODE_CONTROL__",
+            _debug_mode_control(debug_mode, "/"),
+        )
     )
+
+
+def _debug_mode_control(enabled: bool, return_to: str) -> str:
+    if not enabled:
+        return ""
+    query = urlencode({"return_to": return_to})
+    return (
+        '<a class="debug-mode-link" '
+        f'href="/_debug/maintenance-preview?{query}" '
+        'aria-label="Debug mode: preview the public maintenance page">'
+        "Debug mode</a>"
+    )
+
+
+def _render_maintenance_page(
+    *, preview: bool = False, return_to: str = "/"
+) -> str:
+    banner = ""
+    if preview:
+        destination = return_to if return_to in {"/", "/faculty"} else "/"
+        banner = (
+            '<aside class="debug-preview-banner">'
+            "<span>Developer preview · visitors still see the maintenance page.</span>"
+            f'<a href="{html.escape(destination, quote=True)}">Return to debug mode</a>'
+            "</aside>"
+        )
+    return MAINTENANCE_PAGE.replace("__PREVIEW_BANNER__", banner)
 
 
 def _dashboard_user(user: DashboardUser) -> dict[str, Any]:
@@ -232,19 +266,23 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
     sentry_script = (
         " https://browser.sentry-cdn.com" if settings.sentry_dsn else ""
     )
-    if settings.dashboard_session_secret:
-        app.add_middleware(
-            SessionMiddleware,
-            secret_key=settings.dashboard_session_secret,
-            session_cookie="quizcord_dashboard",
-            max_age=OAUTH_SESSION_TTL_SECONDS,
-            same_site="lax",
-            https_only=True,
-        )
     oauth_sessions: dict[str, _OAuthSession] = {}
     rate_limit_windows: OrderedDict[
         tuple[str, str], deque[float]
     ] = OrderedDict()
+
+    def is_build_mode_developer(request: Request) -> bool:
+        if not settings.build_mode:
+            return False
+        session_key = request.session.get("dashboard_session")
+        if not isinstance(session_key, str):
+            return False
+        auth_session = oauth_sessions.get(session_key)
+        return (
+            auth_session is not None
+            and auth_session.expires_at > time.time()
+            and auth_session.user_id in settings.dashboard_developer_ids
+        )
 
     @app.exception_handler(DiscordRateLimitError)
     async def discord_rate_limit_handler(
@@ -273,6 +311,23 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
         path = request.url.path
+        is_developer = is_build_mode_developer(request)
+        build_mode_exempt = (
+            path in {
+                "/health",
+                "/maintenance",
+                "/auth/login",
+                "/auth/callback",
+                "/auth/logout",
+                "/static/animate.min.css",
+                "/static/maintenance.css",
+                "/static/oauth-login.js",
+            }
+            or (path == "/_debug/maintenance-preview" and is_developer)
+        )
+        blocked_by_build_mode = (
+            settings.build_mode and not is_developer and not build_mode_exempt
+        )
         rules: list[tuple[str, int, int]] = []
         if path != "/health":
             rules.append(("all-requests", *DEFAULT_REQUEST_RATE_LIMIT))
@@ -291,7 +346,17 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             )
             rules.append((bucket_name, *specific_limit))
 
-        if rules:
+        if blocked_by_build_mode:
+            if path.startswith("/api/"):
+                response = JSONResponse(
+                    {"detail": "The dashboard is temporarily under maintenance."},
+                    status_code=503,
+                )
+            else:
+                response = HTMLResponse(
+                    _render_maintenance_page(), status_code=503
+                )
+        elif rules:
             client_ip = request.headers.get("x-real-ip", "").strip()
             if not client_ip:
                 client_ip = (
@@ -416,6 +481,16 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 time.perf_counter() - started_at,
             )
 
+    if settings.dashboard_session_secret:
+        app.add_middleware(
+            SessionMiddleware,
+            secret_key=settings.dashboard_session_secret,
+            session_cookie="quizcord_dashboard",
+            max_age=OAUTH_SESSION_TTL_SECONDS,
+            same_site="lax",
+            https_only=True,
+        )
+
     @app.exception_handler(StarletteHTTPException)
     async def http_error_handler(
         request: Request, error: StarletteHTTPException
@@ -446,6 +521,23 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
     @app.head("/health", include_in_schema=False)
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/maintenance", response_class=HTMLResponse)
+    async def maintenance_page() -> HTMLResponse:
+        return HTMLResponse(_render_maintenance_page())
+
+    @app.get("/_debug/maintenance-preview", response_class=HTMLResponse)
+    async def maintenance_preview(
+        request: Request, return_to: str = Query("/")
+    ) -> HTMLResponse:
+        if not is_build_mode_developer(request):
+            raise HTTPException(
+                status_code=403, detail="Developer access is required."
+            )
+        destination = return_to if return_to in {"/", "/faculty"} else "/"
+        return HTMLResponse(
+            _render_maintenance_page(preview=True, return_to=destination)
+        )
 
     @app.get("/privacy", response_class=HTMLResponse)
     async def privacy_policy() -> HTMLResponse:
@@ -667,6 +759,18 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 )
                 user_response.raise_for_status()
                 user = user_response.json()
+                if (
+                    settings.build_mode
+                    and int(user["id"]) not in settings.dashboard_developer_ids
+                ):
+                    await _revoke_oauth_token(
+                        access_token,
+                        client_id,
+                        client_secret,
+                        app.state.discord_request_coordinator,
+                    )
+                    request.session.clear()
+                    return RedirectResponse("/maintenance", status_code=302)
                 oauth_stage = "Discord server-membership lookup"
                 guilds_response = await app.state.discord_request_coordinator.request(
                     "discord.oauth.list_guilds",
@@ -865,7 +969,11 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 return RedirectResponse(f"/login{suffix}", status_code=302)
             raise
         return HTMLResponse(
-            _render_admin_dashboard(settings.sentry_dsn, enable_session_replay=True)
+            _render_admin_dashboard(
+                settings.sentry_dsn,
+                enable_session_replay=True,
+                debug_mode=is_build_mode_developer(request),
+            )
         )
 
     @app.get("/faculty", response_class=HTMLResponse, response_model=None)
@@ -879,7 +987,11 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             if error.status_code == 428:
                 return RedirectResponse("/faculty/password", status_code=302)
             raise
-        return HTMLResponse(FACULTY_PAGE)
+        page = FACULTY_PAGE.replace(
+            "__DEBUG_MODE_CONTROL__",
+            _debug_mode_control(is_build_mode_developer(request), "/faculty"),
+        )
+        return HTMLResponse(page)
 
     @app.get("/faculty/login", response_class=HTMLResponse)
     async def faculty_login_page() -> HTMLResponse:
@@ -912,6 +1024,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         page = FACULTY_PASSWORD_PAGE.replace(
             "__TURNSTILE_SITE_KEY__",
             html.escape(settings.turnstile_site_key or "", quote=True),
+        ).replace(
+            "__DEBUG_MODE_CONTROL__",
+            _debug_mode_control(is_build_mode_developer(request), "/faculty"),
         )
         return HTMLResponse(page)
 
@@ -929,7 +1044,13 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             if error.status_code == 401:
                 return RedirectResponse("/login", status_code=302)
             raise
-        return HTMLResponse(FACULTY_ADMIN_PAGE)
+        page = FACULTY_ADMIN_PAGE.replace(
+            "__DEBUG_MODE_CONTROL__",
+            _debug_mode_control(
+                is_build_mode_developer(request), "/admin/faculty-passwords"
+            ),
+        )
+        return HTMLResponse(page)
 
     @app.get(
         "/students/{usn}",
@@ -948,7 +1069,11 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         if not usn.strip() or len(usn) > 100:
             raise HTTPException(status_code=404, detail="Student not found.")
         return HTMLResponse(
-            _render_admin_dashboard(settings.sentry_dsn, enable_session_replay=False)
+            _render_admin_dashboard(
+                settings.sentry_dsn,
+                enable_session_replay=False,
+                debug_mode=is_build_mode_developer(request),
+            )
         )
 
     @app.get(
@@ -976,7 +1101,11 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             )
         }:
             raise HTTPException(status_code=404, detail="Student not found.")
-        return HTMLResponse(FACULTY_STUDENT_PAGE)
+        page = FACULTY_STUDENT_PAGE.replace(
+            "__DEBUG_MODE_CONTROL__",
+            _debug_mode_control(is_build_mode_developer(request), "/faculty"),
+        )
+        return HTMLResponse(page)
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(
