@@ -1467,6 +1467,10 @@ class DashboardWebTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(content_type, response.headers["content-type"])
                 self.assertIn(expected, response.text)
+        icon = self.client.get("/static/quizcord-analytics-icon.png")
+        self.assertEqual(icon.status_code, 200)
+        self.assertIn("image/png", icon.headers["content-type"])
+        self.assertTrue(icon.content.startswith(b"\x89PNG\r\n\x1a\n"))
 
     def test_health_endpoint_does_not_require_sign_in(self) -> None:
         response = self.client.get("/health")
