@@ -806,6 +806,70 @@ class DashboardWebTests(unittest.TestCase):
         )
         self.assertEqual(revoke_call.kwargs["data"]["token"], "admin-access-token")
 
+    def test_billing_page_explains_that_checkout_is_not_available(self) -> None:
+        settings = replace(
+            self.settings,
+            razorpay_key_id=None,
+            razorpay_key_secret=None,
+            razorpay_webhook_secret=None,
+        )
+        client = TestClient(
+            create_dashboard_app(settings, self.database),
+            base_url="https://testserver",
+        )
+        try:
+            login = client.get("/auth/login", follow_redirects=False)
+            state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
+            token_response = Mock()
+            token_response.json.return_value = {
+                "access_token": "admin-access-token",
+                "refresh_token": "admin-refresh-token",
+                "expires_in": 3600,
+            }
+            user_response = Mock()
+            user_response.json.return_value = {
+                "id": "987654",
+                "global_name": "Server Admin",
+            }
+            guilds_response = Mock()
+            guilds_response.json.return_value = [
+                {"id": "67890", "permissions": str(1 << 5)}
+            ]
+            faculty_member_response = Mock()
+            faculty_member_response.json.return_value = {"roles": ["33333"]}
+            discord_client = Mock()
+            discord_client.post = AsyncMock(return_value=token_response)
+            discord_client.get = AsyncMock(
+                side_effect=[
+                    user_response,
+                    guilds_response,
+                    faculty_member_response,
+                ]
+            )
+            client_context = Mock()
+            client_context.__aenter__ = AsyncMock(return_value=discord_client)
+            client_context.__aexit__ = AsyncMock(return_value=False)
+            with patch(
+                "quizcord_bot.web.httpx.AsyncClient",
+                return_value=client_context,
+            ):
+                callback = client.get(
+                    f"/auth/callback?code=admin-login&state={state}",
+                    follow_redirects=False,
+                )
+            self.assertEqual(callback.status_code, 302)
+
+            unavailable_page = client.get("/billing")
+            self.assertEqual(unavailable_page.status_code, 200)
+            self.assertIn("Subscriptions are not available yet.", unavailable_page.text)
+            self.assertIn("no payment will be attempted.", unavailable_page.text)
+            self.assertIn("Dashboard access is unaffected", unavailable_page.text)
+            self.assertIn("continues collecting quiz data", unavailable_page.text)
+            self.assertNotIn("₹663", unavailable_page.text)
+            self.assertNotIn("Start subscription", unavailable_page.text)
+        finally:
+            client.close()
+
     def test_faculty_login_pages_are_separate_and_recovery_is_disabled(self) -> None:
         login_page = self.client.get("/faculty/login")
         self.assertEqual(login_page.status_code, 200)

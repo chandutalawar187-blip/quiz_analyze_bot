@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Billing setup in progress · Quizcord Analytics</title>
+  <link rel="stylesheet" href="/static/billing.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">Quizcord <span>Analytics</span></a>
+    <nav class="topbar-actions" aria-label="Account">
+      <a href="/">Dashboard</a>
+      <a href="/auth/logout">Sign out</a>
+    </nav>
+  </header>
+  <main class="availability-main">
+    <article class="card availability-card">
+      <div class="availability-mark" aria-hidden="true">Q</div>
+      <p class="eyebrow">Billing setup in progress</p>
+      <h1>Subscriptions are not available yet.</h1>
+      <p class="availability-intro">We’re preparing the server subscription experience. Payment options will appear here once billing is ready.</p>
+      <div class="availability-notice" role="status">
+        <strong>No payment is due right now.</strong>
+        <span>Online billing is not enabled, so no payment will be attempted.</span>
+      </div>
+      <section class="availability-details" aria-labelledby="availability-details-title">
+        <h2 id="availability-details-title">Your server keeps working as usual</h2>
+        <ul>
+          <li>Dashboard access is unaffected while billing is unavailable.</li>
+          <li>The bot continues collecting quiz data.</li>
+        </ul>
+      </section>
+      <a class="button primary availability-link" href="/">Return to dashboard</a>
+    </article>
+  </main>
+</body>
+</html>

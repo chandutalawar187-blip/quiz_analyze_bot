@@ -1165,6 +1165,10 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             if error.status_code == 401:
                 return RedirectResponse("/login", status_code=302)
             raise
+        if not billing_enabled:
+            return HTMLResponse(
+                _read_web_template("billing_unavailable.html")
+            )
         return HTMLResponse(_read_web_template("billing.html"))
 
     @app.get("/api/billing")
