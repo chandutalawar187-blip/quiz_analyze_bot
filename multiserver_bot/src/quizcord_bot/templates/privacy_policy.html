@@ -25,6 +25,7 @@
     <li><strong>Quiz analytics:</strong> Quizcord quiz IDs, start/completion times, leaderboard participant identifiers, ranks and points, and attendance-related records. Points are Quizcord leaderboard points, not a verified count of correct answers.</li>
     <li><strong>Faculty access data:</strong> faculty Discord IDs, server role settings, student assignments, and salted password hashes with security counters. App passwords are not stored in plaintext.</li>
     <li><strong>Dashboard sign-in data:</strong> Discord identity and server information requested through OAuth to authenticate users and check their access. The Service does not request Discord account passwords.</li>
+    <li><strong>Billing records:</strong> when subscriptions are enabled, Razorpay subscription and payment identifiers, subscription status and billing-period timestamps, captured amount and currency, and the developer-allocation ledger. The Service does not store card or bank credentials.</li>
     <li><strong>Security checks:</strong> faculty password sign-in uses Cloudflare Turnstile, which may process technical and device information under Cloudflare’s own privacy terms.</li>
   </ul>
 
@@ -33,6 +34,7 @@
 
   <h2>Storage, service providers, and sharing</h2>
   <p>The Service database is hosted on Railway and stores records separately by Discord server. Discord provides the bot, OAuth, and server data APIs. Cloudflare provides the Turnstile security challenge. If Sentry monitoring is enabled by the Service operator, Sentry receives error reports, sampled performance traces and profiles, sanitized warning-and-higher logs, and dashboard request-count and duration metrics. This may include technical runtime information, exception messages and stack traces, endpoint operation names, and timing data. The Service removes HTTP request details, request bodies, and breadcrumbs from server-side error events; log messages are replaced with generic severity labels, and log attributes are limited to safe code/logger metadata. Metrics use route templates rather than concrete URLs. Exception messages or stack traces may still contain information produced by the application.</p>
+  <p>When server subscriptions are enabled, Razorpay processes checkout and recurring payments under its own terms and privacy policy. The Service stores billing metadata and allocation totals for reconciliation, but payment credentials and card or bank details are handled by Razorpay and are not stored in the Service database.</p>
 
   <h2>Cookies and optional analytics</h2>
   <p>The dashboard uses a required, secure, signed <code>quizcord_dashboard</code> cookie to maintain sign-in and protect access. This cookie is necessary for the Service to work. On the admin quiz-session dashboard, administrators can use <strong>Cookie settings</strong> to allow or reject optional analytics and performance measurement. The choice is stored in a first-party <code>quizcord_analytics_consent</code> cookie for up to 180 days; it records only the preference. Optional analytics is off unless accepted and is not used on sign-in, faculty, or individual student analytics pages.</p>

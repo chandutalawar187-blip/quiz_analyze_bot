@@ -1,6 +1,8 @@
 """Authentication and authorization tests for the web dashboard."""
 
 import base64
+import hashlib
+import hmac
 import json
 import os
 import tempfile
@@ -60,6 +62,9 @@ class DashboardWebTests(unittest.TestCase):
                 "FACULTY_ROLE_ID": "33333",
                 "TURNSTILE_SITE_KEY": "turnstile-site-key",
                 "TURNSTILE_SECRET_KEY": "turnstile-secret-key",
+                "RAZORPAY_KEY_ID": "rzp_test_id",
+                "RAZORPAY_KEY_SECRET": "test-secret",
+                "RAZORPAY_WEBHOOK_SECRET": "webhook-secret",
             },
             clear=True,
         ):
@@ -398,6 +403,82 @@ class DashboardWebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json(), {"detail": "Not Found"})
 
+    def test_razorpay_webhook_records_verified_charge_once(self) -> None:
+        settings = replace(
+            self.settings,
+            razorpay_key_id="rzp_test_id",
+            razorpay_key_secret="test-secret",
+            razorpay_webhook_secret="webhook-secret",
+        )
+        self.database.create_guild_subscription(
+            67890,
+            "sub_webhook",
+            "plan_test",
+            "https://rzp.io/rzp/checkout",
+        )
+        app = create_dashboard_app(settings, self.database)
+        payload = {
+            "event": "subscription.charged",
+            "payload": {
+                "subscription": {"entity": {"id": "sub_webhook"}},
+                "payment": {
+                    "entity": {
+                        "id": "pay_webhook",
+                        "amount": 66300,
+                        "currency": "INR",
+                        "captured": "1",
+                        "created_at": 1767225600,
+                    }
+                },
+            },
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        signature = hmac.new(
+            b"webhook-secret", body, hashlib.sha256
+        ).hexdigest()
+        client = Mock()
+        client.fetch_subscription = AsyncMock(
+            return_value={
+                "id": "sub_webhook",
+                "status": "active",
+                "current_start": 1767225600,
+                "current_end": 1769904000,
+                "cancel_at_cycle_end": False,
+            }
+        )
+        with (
+            TestClient(app, base_url="https://testserver") as webhook_client,
+            patch("quizcord_bot.web.RazorpayClient", return_value=client),
+        ):
+            headers = {
+                "x-razorpay-signature": signature,
+                "x-razorpay-event-id": "evt_webhook",
+                "content-type": "application/json",
+            }
+            invalid_signature = webhook_client.post(
+                "/api/webhooks/razorpay",
+                content=body,
+                headers={
+                    **headers,
+                    "x-razorpay-signature": "invalid",
+                    "x-razorpay-event-id": "evt_invalid",
+                },
+            )
+            response = webhook_client.post(
+                "/api/webhooks/razorpay", content=body, headers=headers
+            )
+            duplicate = webhook_client.post(
+                "/api/webhooks/razorpay", content=body, headers=headers
+            )
+
+        self.assertEqual(invalid_signature.status_code, 400)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "accepted"})
+        self.assertEqual(duplicate.json(), {"status": "duplicate"})
+        self.assertEqual(
+            self.database.get_developer_allocation_total(67890), 10000
+        )
+
     def test_user_directory_requires_discord_sign_in(self) -> None:
         response = self.client.get("/api/users")
 
@@ -626,6 +707,75 @@ class DashboardWebTests(unittest.TestCase):
             ).status_code,
             404,
         )
+        billing_page = self.client.get("/billing")
+        self.assertEqual(billing_page.status_code, 200)
+        self.assertIn("Where does your money go?", billing_page.text)
+        billing_status = self.client.get("/api/billing")
+        self.assertEqual(billing_status.status_code, 200)
+        self.assertTrue(billing_status.json()["billing_configured"])
+        self.assertEqual(billing_status.json()["amount_paise"], 66300)
+        razorpay = Mock()
+        razorpay.create_plan = AsyncMock(
+            return_value={
+                "id": "plan_test",
+                "item": {"amount": 66300, "currency": "INR"},
+            }
+        )
+        razorpay.create_subscription = AsyncMock(
+            return_value={
+                "id": "sub_test",
+                "plan_id": "plan_test",
+                "short_url": "https://rzp.io/rzp/test",
+            }
+        )
+        with patch(
+            "quizcord_bot.web.RazorpayClient", return_value=razorpay
+        ):
+            checkout = self.client.post("/api/billing/checkout")
+        self.assertEqual(checkout.status_code, 200)
+        self.assertEqual(
+            checkout.json()["checkout_url"], "https://rzp.io/rzp/test"
+        )
+        self.database.update_guild_subscription(
+            "sub_test",
+            status="active",
+            current_start=1_900_000_000,
+            current_end=2_000_000_000,
+        )
+        razorpay.cancel_subscription = AsyncMock(
+            return_value={
+                "id": "sub_test",
+                "status": "active",
+                "current_start": 1_900_000_000,
+                "current_end": 2_000_000_000,
+            }
+        )
+        with patch(
+            "quizcord_bot.web.RazorpayClient", return_value=razorpay
+        ):
+            cancellation = self.client.post("/api/billing/cancel")
+        self.assertEqual(cancellation.status_code, 200)
+        self.assertTrue(
+            cancellation.json()["subscription"]["cancel_at_cycle_end"]
+        )
+        self.database.update_guild_subscription(
+            "sub_test",
+            status="expired",
+            current_end=0,
+            cancel_at_cycle_end=False,
+        )
+        with self.database._connect() as connection:
+            connection.execute(
+                "UPDATE guild_subscription_grace SET expires_at = 0"
+            )
+        gated_dashboard = self.client.get("/", follow_redirects=False)
+        self.assertEqual(gated_dashboard.status_code, 302)
+        self.assertEqual(
+            gated_dashboard.headers["location"], "/billing?guild_id=98765"
+        )
+        gated_api = self.client.get("/api/sessions")
+        self.assertEqual(gated_api.status_code, 402)
+        self.assertIn("subscription", gated_api.json()["detail"].casefold())
         with (
             patch(
                 "quizcord_bot.web.httpx.AsyncClient",
@@ -1022,6 +1172,16 @@ class DashboardWebTests(unittest.TestCase):
 
     def test_dashboard_static_assets_are_served(self) -> None:
         for path, content_type, expected in (
+            (
+                "/static/billing.css",
+                "text/css",
+                ".price-card",
+            ),
+            (
+                "/static/billing.js",
+                "javascript",
+                "/api/billing/checkout",
+            ),
             (
                 "/static/dashboard-theme.css",
                 "text/css",

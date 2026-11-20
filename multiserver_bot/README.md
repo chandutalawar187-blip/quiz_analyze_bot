@@ -36,11 +36,14 @@
 │       ├── bot.py
 │       ├── config.py
 │       ├── database.py
+│       ├── payments.py
 │       ├── static/
 │       │   ├── admin-dashboard.css
 │       │   ├── admin-dashboard.js
 │       │   ├── animate.min.css
 │       │   ├── animate-css-LICENSE.txt
+│       │   ├── billing.css
+│       │   ├── billing.js
 │       │   ├── dashboard-theme.css
 │       │   ├── dashboard-theme.js
 │       │   ├── faculty-dashboard.css
@@ -52,6 +55,7 @@
 │       ├── templates/
 │       │   ├── admin_dashboard.html
 │       │   ├── admin_login.html
+│       │   ├── billing.html
 │       │   ├── faculty_dashboard.html
 │       │   ├── faculty_login.html
 │       │   ├── faculty_password.html
@@ -104,8 +108,11 @@ you want.
 If the publisher has enabled the web dashboard, server administrators sign in
 with Discord and **Manage Server** permission. Faculty can sign in after their
 role is configured and an administrator provisions their faculty app password.
-The publisher operates the dashboard; server owners do not configure OAuth,
-Turnstile, Railway, or bot credentials.
+If online billing is enabled, server administrators can manage the server's
+monthly dashboard subscription from **Billing**. The subscription controls
+dashboard access only; the bot continues collecting quiz data. The publisher
+operates the dashboard; server owners do not configure OAuth, Turnstile,
+Railway, or bot credentials.
 
 This is a shared hosted app, not a separate bot copy that each server owner
 runs. The publisher provides the install link and keeps the service running.
@@ -166,6 +173,9 @@ Developer Portal.
 | `SENTRY_TRACES_SAMPLE_RATE` | No | Fraction of dashboard transactions traced, from `0` to `1`; defaults to `0.1` (10%). |
 | `SENTRY_PROFILE_SAMPLE_RATE` | No | Fraction of service profiles sampled while traces are active, from `0` to `1`; defaults to `0.01` (1%). |
 | `SENTRY_ENVIRONMENT` | No | Sentry environment name; the SDK reads this directly. Use `production` in Railway. |
+| `RAZORPAY_KEY_ID` | With billing | Razorpay test or live API key ID. |
+| `RAZORPAY_KEY_SECRET` | With billing | Matching Razorpay API key secret. |
+| `RAZORPAY_WEBHOOK_SECRET` | With billing | Secret configured for the Razorpay webhook endpoint. Configure all three billing variables together. |
 
 When `BUILD_MODE=true`, public pages and APIs show maintenance responses except
 the health check and the minimal assets needed to render the maintenance page.
@@ -242,6 +252,56 @@ correcting configuration so Discord issues a fresh authorization code.
 Admin and faculty sign-in open Discord in a separate window to keep OAuth
 navigation out of the dashboard tab's browser history. If the browser blocks
 the window, allow pop-ups for the dashboard domain and try again.
+
+### Server subscription billing
+
+When Razorpay is configured, each server administrator can open **Billing** to
+start or manage that server's dashboard subscription. The monthly price is
+₹663: ₹563 for the service and ₹100 tracked as the developer allocation. The
+subscription renews automatically each month. Razorpay processing fees and
+taxes on those fees are variable and deducted from proceeds; the developer
+allocation is recorded in the payment ledger for manual payout. This
+integration does not store card or bank details.
+
+Subscription access gates the web dashboards and their data APIs, not Discord
+bot collection or quiz processing. Servers already installed when billing is
+first enabled receive a one-time 30-day transition grace period; newly
+registered servers receive the same grace period. Reinitializing the database
+or reinstalling the bot does not extend an existing grace period. Administrators
+can cancel renewal from **Billing**; cancellation takes effect at the end of
+the current period, and access remains until that period ends.
+
+To enable payments, configure `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and
+`RAZORPAY_WEBHOOK_SECRET` together in the host's protected service variables.
+Until all three values are configured, billing is disabled and dashboard access
+is not gated; the 30-day transition grace period starts when billing is
+activated.
+Use Razorpay test credentials first. In the Razorpay dashboard, register the
+public HTTPS endpoint
+`https://<your-dashboard-domain>/api/webhooks/razorpay`, select these
+subscription events, and copy that webhook's secret into
+`RAZORPAY_WEBHOOK_SECRET`:
+
+```text
+subscription.authenticated
+subscription.activated
+subscription.charged
+subscription.pending
+subscription.halted
+subscription.cancelled
+subscription.completed
+subscription.paused
+subscription.resumed
+```
+
+The endpoint verifies Razorpay's signature against the exact raw request body.
+The ledger uses Razorpay event and payment IDs for idempotency, and records
+captured ₹663 payments and their ₹100 developer allocation. Keep the bot on a
+persistent SQLite volume and a single replica. Razorpay subscriptions are
+created for 120 monthly cycles (10 years); the operator must plan a migration
+before a subscription reaches that finite limit. Live billing requires the
+operator to complete Razorpay account activation and replace test credentials
+with live credentials. Refund handling is not automated by this integration.
 
 ### Configure the Discord app for multi-server installation
 

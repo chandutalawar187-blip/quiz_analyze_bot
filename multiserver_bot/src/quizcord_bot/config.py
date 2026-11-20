@@ -32,6 +32,9 @@ class Settings:
     sentry_dsn: str | None
     sentry_traces_sample_rate: float
     sentry_profile_sample_rate: float
+    razorpay_key_id: str | None
+    razorpay_key_secret: str | None
+    razorpay_webhook_secret: str | None
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -118,6 +121,21 @@ class Settings:
             "SENTRY_PROFILE_SAMPLE_RATE",
             os.getenv("SENTRY_PROFILE_SAMPLE_RATE", "0.01").strip(),
         )
+        razorpay_key_id = os.getenv("RAZORPAY_KEY_ID", "").strip()
+        razorpay_key_secret = os.getenv("RAZORPAY_KEY_SECRET", "").strip()
+        razorpay_webhook_secret = os.getenv(
+            "RAZORPAY_WEBHOOK_SECRET", ""
+        ).strip()
+        razorpay_settings = (
+            razorpay_key_id,
+            razorpay_key_secret,
+            razorpay_webhook_secret,
+        )
+        if any(razorpay_settings) and not all(razorpay_settings):
+            raise ValueError(
+                "Set RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, and "
+                "RAZORPAY_WEBHOOK_SECRET together."
+            )
 
         return cls(
             token=token,
@@ -138,6 +156,9 @@ class Settings:
             sentry_dsn=sentry_dsn or None,
             sentry_traces_sample_rate=sentry_traces_sample_rate,
             sentry_profile_sample_rate=sentry_profile_sample_rate,
+            razorpay_key_id=razorpay_key_id or None,
+            razorpay_key_secret=razorpay_key_secret or None,
+            razorpay_webhook_secret=razorpay_webhook_secret or None,
         )
 
 

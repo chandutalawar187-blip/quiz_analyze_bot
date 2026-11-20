@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Server billing · Quizcord Analytics</title>
+  <link rel="stylesheet" href="/static/billing.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">Quizcord <span>Analytics</span></a>
+    <div class="topbar-actions">
+      <label class="server-label" for="guild-select">Server</label>
+      <select id="guild-select" aria-label="Select server"></select>
+      <a href="/">Dashboard</a>
+      <a href="/auth/logout">Sign out</a>
+    </div>
+  </header>
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Simple, transparent server billing</p>
+        <h1>Keep your server’s insights running.</h1>
+        <p class="intro">One subscription keeps the Quizcord Analytics dashboard available to your server’s administrators and faculty.</p>
+      </div>
+      <div class="price-card">
+        <span class="price-label">Per server</span>
+        <strong class="price">₹663<span>/ month</span></strong>
+        <span class="price-note">Automatically renews monthly</span>
+      </div>
+    </section>
+
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+    <section class="layout">
+      <article class="card subscription-card">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">Subscription</p>
+            <h2 id="server-name">Loading server…</h2>
+          </div>
+          <span id="status-pill" class="status-pill">Checking</span>
+        </div>
+        <p id="access-copy" class="muted">Checking subscription access…</p>
+        <div class="subscription-details">
+          <div><span>Current period</span><strong id="period-value">—</strong></div>
+          <div><span>Developer allocations recorded</span><strong id="allocation-value">₹0</strong></div>
+        </div>
+        <div class="actions">
+          <button id="subscribe-button" class="button primary" type="button">Start subscription</button>
+          <button id="refresh-button" class="button secondary" type="button">Refresh status</button>
+          <button id="cancel-button" class="button quiet" type="button" hidden>Cancel at period end</button>
+        </div>
+      </article>
+
+      <article class="card money-card">
+        <p class="eyebrow">Where does your money go?</p>
+        <h2>A clear breakdown of every month.</h2>
+        <div class="allocation-row">
+          <span class="allocation-icon service" aria-hidden="true">Q</span>
+          <div class="allocation-copy"><strong>Quizcord Analytics service</strong><span>Hosting, operation, and dashboard maintenance</span></div>
+          <strong class="allocation-amount">₹563</strong>
+        </div>
+        <div class="allocation-row">
+          <span class="allocation-icon developer" aria-hidden="true">D</span>
+          <div class="allocation-copy"><strong>Developer allocation</strong><span>Tracked for manual developer payout</span></div>
+          <strong class="allocation-amount">₹100</strong>
+        </div>
+        <div class="total-row"><span>Total charged per month</span><strong>₹663</strong></div>
+        <p class="fine-print">Razorpay processing fees and taxes on those fees are variable and deducted from proceeds; they are not added to this displayed price. The developer allocation is tracked in the billing ledger and paid manually.</p>
+      </article>
+    </section>
+
+    <section class="footnote">
+      <p>Existing servers receive a one-time 30-day transition grace period. Cancelling stops renewal at the end of the current paid period; dashboard access remains until then. After checkout, return here and use <strong>Refresh status</strong> if the subscription has not updated yet. Quiz collection by the bot is not affected by dashboard billing.</p>
+      <p>Subscriptions are configured for up to 120 monthly billing cycles. Before that limit is reached, the operator must renew the plan with affected server admins.</p>
+    </section>
+  </main>
+  <script src="/static/billing.js" defer></script>
+</body>
+</html>

@@ -2277,6 +2277,97 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(registry, ("67890", "ABC123"))
         self.assertEqual(analytics, ("67890", "ABC123", "legacy-quiz"))
 
+    def test_subscription_grace_is_created_once_and_not_extended(self) -> None:
+        self.assertIsNone(
+            self.database.get_subscription_grace_expires_at(67890)
+        )
+        self.database.enable_subscription_billing(now=1000)
+        original_expiry = self.database.get_subscription_grace_expires_at(67890)
+        self.assertEqual(original_expiry, 1000 + 30 * 24 * 60 * 60)
+
+        self.database.initialize()
+        self.database.register_guild(67890, "Updated server")
+
+        self.assertEqual(
+            self.database.get_subscription_grace_expires_at(67890),
+            original_expiry,
+        )
+
+    def test_dashboard_access_uses_grace_and_paid_period_boundaries(self) -> None:
+        self.database.enable_subscription_billing()
+        grace_expiry = self.database.get_subscription_grace_expires_at(67890)
+        self.assertIsNotNone(grace_expiry)
+        assert grace_expiry is not None
+        self.assertTrue(
+            self.database.has_dashboard_subscription_access(
+                67890, now=grace_expiry - 1
+            )
+        )
+        self.assertFalse(
+            self.database.has_dashboard_subscription_access(
+                67890, now=grace_expiry
+            )
+        )
+
+        self.database.create_guild_subscription(
+            67890, "sub_paid", "plan_paid", "https://rzp.io/rzp/checkout"
+        )
+        self.database.update_guild_subscription(
+            "sub_paid",
+            status="active",
+            current_start=grace_expiry,
+            current_end=grace_expiry + 100,
+        )
+        self.assertTrue(
+            self.database.has_dashboard_subscription_access(
+                67890, now=grace_expiry + 1
+            )
+        )
+        self.database.update_guild_subscription(
+            "sub_paid",
+            status="cancelled",
+            cancel_at_cycle_end=True,
+        )
+        self.assertTrue(
+            self.database.has_dashboard_subscription_access(
+                67890, now=grace_expiry + 99
+            )
+        )
+        self.assertFalse(
+            self.database.has_dashboard_subscription_access(
+                67890, now=grace_expiry + 100
+            )
+        )
+
+    def test_razorpay_webhook_and_developer_ledger_are_idempotent(self) -> None:
+        self.database.create_guild_subscription(
+            67890, "sub_webhook", "plan_webhook", "https://rzp.io/rzp/checkout"
+        )
+        payload = {
+            "event_id": "evt_charge_1",
+            "event_type": "subscription.charged",
+            "subscription_id": "sub_webhook",
+            "status": "active",
+            "current_start": 1000,
+            "current_end": 2000,
+            "cancel_at_cycle_end": False,
+            "payment_id": "pay_1",
+            "amount_paise": 66300,
+            "developer_amount_paise": 10000,
+            "currency": "INR",
+            "captured_at": "2026-01-01T00:00:00+00:00",
+        }
+
+        self.assertEqual(
+            self.database.record_razorpay_webhook(**payload), (True, True)
+        )
+        self.assertEqual(
+            self.database.record_razorpay_webhook(**payload), (False, False)
+        )
+        self.assertEqual(
+            self.database.get_developer_allocation_total(67890), 10000
+        )
+
 
 class ClearQuizHistoryCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_requires_typed_confirmation_before_deleting(self) -> None:

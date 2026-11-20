@@ -6,9 +6,11 @@ import json
 import logging
 import math
 import secrets
+import sqlite3
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlsplit
@@ -25,6 +27,7 @@ from quizcord_bot.config import Settings
 from quizcord_bot.database import (
     Database,
     DashboardUser,
+    GuildSubscription,
     QuizSessionAbsentStudent,
     QuizSessionSummary,
     StudentQuizAnalytics,
@@ -37,6 +40,16 @@ from quizcord_bot.discord_http import (
     DiscordRequestCoordinator,
 )
 from quizcord_bot.exports import quiz_session_workbook, student_analytics_workbook
+from quizcord_bot.payments import (
+    DEVELOPER_ALLOCATION_PAISE,
+    SERVER_AMOUNT_PAISE,
+    SUBSCRIPTION_AMOUNT_PAISE,
+    SUBSCRIPTION_CURRENCY,
+    SUBSCRIPTION_PLAN_KEY,
+    RazorpayAPIError,
+    RazorpayClient,
+    verify_webhook_signature,
+)
 from quizcord_bot.telemetry import record_http_request, trace_external_request
 
 
@@ -54,11 +67,26 @@ RATE_LIMIT_RULES = {
     "/api/faculty/password/change": (10, 900),
     "/api/admin/faculty-passwords": (10, 60),
     "/api/faculty/candidates": (30, 60),
+    "/api/billing/checkout": (5, 60),
+    "/api/billing/cancel": (5, 60),
+    "/api/billing/refresh": (20, 60),
+    "/api/webhooks/razorpay": (120, 60),
 }
 DEFAULT_REQUEST_RATE_LIMIT = (300, 60)
 DEFAULT_API_RATE_LIMIT = (120, 60)
 WEB_TEMPLATE_DIR = Path(__file__).with_name("templates")
 WEB_STATIC_DIR = Path(__file__).with_name("static")
+RAZORPAY_WEBHOOK_EVENTS = {
+    "subscription.authenticated",
+    "subscription.activated",
+    "subscription.charged",
+    "subscription.pending",
+    "subscription.halted",
+    "subscription.cancelled",
+    "subscription.completed",
+    "subscription.paused",
+    "subscription.resumed",
+}
 
 
 def _read_web_template(name: str) -> str:
@@ -260,6 +288,15 @@ def _sentry_origin(dsn: str | None) -> str:
 
 
 def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
+    billing_enabled = all(
+        (
+            settings.razorpay_key_id,
+            settings.razorpay_key_secret,
+            settings.razorpay_webhook_secret,
+        )
+    )
+    if billing_enabled:
+        database.enable_subscription_billing()
     app = FastAPI(title="Quizcord Analytics", docs_url=None, redoc_url=None)
     app.state.discord_request_coordinator = DiscordRequestCoordinator()
     sentry_origin = _sentry_origin(settings.sentry_dsn)
@@ -319,6 +356,7 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 "/auth/login",
                 "/auth/callback",
                 "/auth/logout",
+                "/api/webhooks/razorpay",
                 "/static/animate.min.css",
                 "/static/maintenance.css",
                 "/static/oauth-login.js",
@@ -495,6 +533,14 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
     async def http_error_handler(
         request: Request, error: StarletteHTTPException
     ) -> Response:
+        if error.status_code == 402 and not _wants_json_error(request):
+            guild_id = request.session.get("selected_guild_id")
+            suffix = (
+                f"?{urlencode({'guild_id': guild_id})}"
+                if isinstance(guild_id, str) and guild_id.isdecimal()
+                else ""
+            )
+            return RedirectResponse(f"/billing{suffix}", status_code=302)
         if _wants_json_error(request):
             return JSONResponse(
                 {"detail": error.detail},
@@ -626,7 +672,9 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
         request.state.guild_id = guild_id
         return guild_id
 
-    async def current_admin(request: Request) -> _OAuthSession:
+    async def current_admin(
+        request: Request, require_subscription: bool = True
+    ) -> _OAuthSession:
         auth_session = await current_authenticated(request)
         guild_id = resolve_guild(request, auth_session)
         if guild_id not in auth_session.admin_guild_ids:
@@ -634,10 +682,21 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 status_code=403,
                 detail="Manage Server permission is required for this server.",
             )
+        if (
+            require_subscription
+            and billing_enabled
+            and not database.has_dashboard_subscription_access(guild_id)
+        ):
+            raise HTTPException(
+                status_code=402,
+                detail="A server subscription is required to use the dashboard.",
+            )
         return auth_session
 
     async def current_faculty(
-        request: Request, require_password: bool = True
+        request: Request,
+        require_password: bool = True,
+        require_subscription: bool = True,
     ) -> _OAuthSession:
         auth_session = await current_authenticated(request)
         guild_id = resolve_guild(request, auth_session)
@@ -657,7 +716,151 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
                 status_code=428,
                 detail="Complete faculty password verification before continuing.",
             )
+        if (
+            require_subscription
+            and billing_enabled
+            and not database.has_dashboard_subscription_access(guild_id)
+        ):
+            raise HTTPException(
+                status_code=402,
+                detail="A server subscription is required to use the dashboard.",
+            )
         return auth_session
+
+    billing_creation_lock = asyncio.Lock()
+
+    def razorpay_client() -> RazorpayClient:
+        if (
+            settings.razorpay_key_id is None
+            or settings.razorpay_key_secret is None
+            or settings.razorpay_webhook_secret is None
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="Online billing is not configured yet.",
+            )
+        return RazorpayClient(
+            settings.razorpay_key_id, settings.razorpay_key_secret
+        )
+
+    def subscription_response(
+        guild_id: int, subscription: GuildSubscription | None
+    ) -> dict[str, Any]:
+        installed_guilds = dict(database.get_installed_guilds())
+        grace_expires_at = database.get_subscription_grace_expires_at(guild_id)
+        return {
+            "guild_id": str(guild_id),
+            "guild_name": installed_guilds.get(guild_id, "Server"),
+            "billing_configured": billing_enabled,
+            "amount_paise": SUBSCRIPTION_AMOUNT_PAISE,
+            "service_amount_paise": SERVER_AMOUNT_PAISE,
+            "developer_amount_paise": DEVELOPER_ALLOCATION_PAISE,
+            "currency": SUBSCRIPTION_CURRENCY,
+            "grace_expires_at": grace_expires_at,
+            "has_access": (
+                not billing_enabled
+                or database.has_dashboard_subscription_access(guild_id)
+            ),
+            "subscription": (
+                {
+                    "id": subscription.subscription_id,
+                    "status": subscription.status,
+                    "checkout_url": subscription.checkout_url,
+                    "current_start": subscription.current_start,
+                    "current_end": subscription.current_end,
+                    "cancel_at_cycle_end": subscription.cancel_at_cycle_end,
+                    "created_at": subscription.created_at,
+                }
+                if subscription
+                else None
+            ),
+            "developer_allocations_paise": (
+                database.get_developer_allocation_total(guild_id)
+            ),
+        }
+
+    def provider_timestamp(value: object) -> int | None:
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    def update_subscription_from_provider(
+        subscription: GuildSubscription, data: dict[str, Any]
+    ) -> GuildSubscription:
+        provider_id = data.get("id")
+        status = data.get("status")
+        if (
+            provider_id != subscription.subscription_id
+            or not isinstance(status, str)
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail="Razorpay returned incomplete subscription details.",
+            )
+        updated = database.update_guild_subscription(
+            subscription.subscription_id,
+            status=status,
+            current_start=provider_timestamp(data.get("current_start")),
+            current_end=provider_timestamp(data.get("current_end")),
+            cancel_at_cycle_end=(
+                data["cancel_at_cycle_end"]
+                if isinstance(data.get("cancel_at_cycle_end"), bool)
+                else None
+            ),
+        )
+        if updated is None:
+            raise HTTPException(
+                status_code=404, detail="The subscription was not found."
+            )
+        return updated
+
+    async def get_or_create_billing_plan(
+        client: RazorpayClient,
+    ) -> str:
+        if settings.razorpay_key_id is None:
+            raise HTTPException(
+                status_code=503, detail="Online billing is not configured yet."
+            )
+        plan_id = database.get_billing_plan_id(
+            SUBSCRIPTION_PLAN_KEY,
+            settings.razorpay_key_id,
+            SUBSCRIPTION_AMOUNT_PAISE,
+        )
+        if plan_id:
+            return plan_id
+        plan = await client.create_plan()
+        plan_id = plan.get("id")
+        if not isinstance(plan_id, str) or not plan_id:
+            raise HTTPException(
+                status_code=502,
+                detail="Razorpay did not return a valid billing plan.",
+            )
+        item = plan.get("item")
+        if isinstance(item, dict) and (
+            item.get("amount") != SUBSCRIPTION_AMOUNT_PAISE
+            or item.get("currency") != SUBSCRIPTION_CURRENCY
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail="Razorpay created a plan with unexpected pricing.",
+            )
+        return database.save_billing_plan(
+            SUBSCRIPTION_PLAN_KEY,
+            settings.razorpay_key_id,
+            plan_id,
+            SUBSCRIPTION_AMOUNT_PAISE,
+        )
+
+    def trusted_checkout_url(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "rzp.io"
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            return None
+        return value
 
     @app.get("/auth/login")
     async def login(
@@ -947,6 +1150,319 @@ def create_dashboard_app(settings: Settings, database: Database) -> FastAPI:
             )
         request.session["selected_guild_id"] = str(guild_id)
         return {"guild_id": str(guild_id), "name": guilds[guild_id]}
+
+    @app.get(
+        "/billing",
+        response_class=HTMLResponse,
+        response_model=None,
+    )
+    async def billing_page(
+        request: Request,
+    ) -> HTMLResponse | RedirectResponse:
+        try:
+            await current_admin(request, require_subscription=False)
+        except HTTPException as error:
+            if error.status_code == 401:
+                return RedirectResponse("/login", status_code=302)
+            raise
+        return HTMLResponse(_read_web_template("billing.html"))
+
+    @app.get("/api/billing")
+    async def billing_status(request: Request) -> dict[str, Any]:
+        await current_admin(request, require_subscription=False)
+        guild_id = request.state.guild_id
+        return subscription_response(
+            guild_id, database.get_guild_subscription(guild_id)
+        )
+
+    @app.post("/api/billing/refresh")
+    async def refresh_billing_status(request: Request) -> dict[str, Any]:
+        await current_admin(request, require_subscription=False)
+        guild_id = request.state.guild_id
+        subscription = database.get_guild_subscription(guild_id)
+        if subscription is None:
+            return subscription_response(guild_id, None)
+        client = razorpay_client()
+        try:
+            provider_data = await client.fetch_subscription(
+                subscription.subscription_id
+            )
+        except RazorpayAPIError as error:
+            LOGGER.error(
+                "Could not refresh Razorpay subscription %s.",
+                subscription.subscription_id,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="Could not refresh the subscription with Razorpay.",
+            ) from error
+        subscription = update_subscription_from_provider(
+            subscription, provider_data
+        )
+        return subscription_response(guild_id, subscription)
+
+    @app.post("/api/billing/checkout")
+    async def create_billing_checkout(request: Request) -> dict[str, str]:
+        await current_admin(request, require_subscription=False)
+        guild_id = request.state.guild_id
+        async with billing_creation_lock:
+            existing = database.get_open_guild_subscription(guild_id)
+            if existing is not None:
+                if existing.status == "created":
+                    return {"checkout_url": existing.checkout_url}
+                raise HTTPException(
+                    status_code=409,
+                    detail="This server already has a subscription. Refresh its status.",
+                )
+            client = razorpay_client()
+            try:
+                plan_id = await get_or_create_billing_plan(client)
+                provider_data = await client.create_subscription(
+                    plan_id, guild_id
+                )
+            except RazorpayAPIError as error:
+                LOGGER.error(
+                    "Could not create Razorpay checkout for guild %s.",
+                    guild_id,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail="Razorpay could not create the checkout. Please try again.",
+                ) from error
+            subscription_id = provider_data.get("id")
+            checkout_url = trusted_checkout_url(
+                provider_data.get("short_url")
+            )
+            if (
+                not isinstance(subscription_id, str)
+                or not subscription_id
+                or provider_data.get("plan_id") != plan_id
+                or checkout_url is None
+            ):
+                raise HTTPException(
+                    status_code=502,
+                    detail="Razorpay returned incomplete checkout details.",
+                )
+            try:
+                database.create_guild_subscription(
+                    guild_id,
+                    subscription_id,
+                    plan_id,
+                    checkout_url,
+                )
+            except sqlite3.IntegrityError as error:
+                existing = database.get_open_guild_subscription(guild_id)
+                if existing and existing.status == "created":
+                    return {"checkout_url": existing.checkout_url}
+                raise HTTPException(
+                    status_code=409,
+                    detail="A subscription was created concurrently. Refresh its status.",
+                ) from error
+        return {"checkout_url": checkout_url}
+
+    @app.post("/api/billing/cancel")
+    async def cancel_billing_subscription(
+        request: Request,
+    ) -> dict[str, Any]:
+        await current_admin(request, require_subscription=False)
+        guild_id = request.state.guild_id
+        subscription = database.get_open_guild_subscription(guild_id)
+        if (
+            subscription is None
+            or subscription.status not in {"active", "pending", "halted"}
+            or subscription.current_end is None
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="There is no active subscription that can be cancelled.",
+            )
+        client = razorpay_client()
+        try:
+            provider_data = await client.cancel_subscription(
+                subscription.subscription_id
+            )
+        except RazorpayAPIError as error:
+            LOGGER.error(
+                "Could not cancel Razorpay subscription %s.",
+                subscription.subscription_id,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="Razorpay could not cancel the subscription. Please try again.",
+            ) from error
+        provider_data["cancel_at_cycle_end"] = True
+        subscription = update_subscription_from_provider(
+            subscription, provider_data
+        )
+        return subscription_response(guild_id, subscription)
+
+    @app.post("/api/webhooks/razorpay")
+    async def razorpay_webhook(request: Request) -> dict[str, str]:
+        if (
+            settings.razorpay_key_id is None
+            or settings.razorpay_key_secret is None
+            or settings.razorpay_webhook_secret is None
+        ):
+            raise HTTPException(
+                status_code=503, detail="Razorpay webhooks are not configured."
+            )
+        body = await request.body()
+        signature = request.headers.get("x-razorpay-signature", "")
+        event_id = request.headers.get("x-razorpay-event-id", "")
+        if (
+            not signature
+            or not event_id
+            or event_id != event_id.strip()
+            or len(event_id) > 200
+        ):
+            raise HTTPException(
+                status_code=400, detail="The Razorpay webhook is incomplete."
+            )
+        if not verify_webhook_signature(
+            body, signature, settings.razorpay_webhook_secret
+        ):
+            raise HTTPException(
+                status_code=400, detail="The Razorpay webhook signature is invalid."
+            )
+        try:
+            event = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise HTTPException(
+                status_code=400, detail="The Razorpay webhook body is invalid."
+            ) from None
+        if not isinstance(event, dict):
+            raise HTTPException(
+                status_code=400, detail="The Razorpay webhook body is invalid."
+            )
+        event_type = event.get("event")
+        if not isinstance(event_type, str) or len(event_type) > 100:
+            raise HTTPException(
+                status_code=400, detail="The Razorpay webhook event is invalid."
+            )
+        if event_type not in RAZORPAY_WEBHOOK_EVENTS:
+            return {"status": "ignored"}
+        payload = event.get("payload")
+        subscription_payload = (
+            payload.get("subscription") if isinstance(payload, dict) else None
+        )
+        entity = (
+            subscription_payload.get("entity")
+            if isinstance(subscription_payload, dict)
+            else None
+        )
+        subscription_id = entity.get("id") if isinstance(entity, dict) else None
+        if not isinstance(subscription_id, str) or not subscription_id:
+            raise HTTPException(
+                status_code=400,
+                detail="The Razorpay webhook has no subscription identifier.",
+            )
+        subscription = database.get_subscription_by_id(subscription_id)
+        if subscription is None:
+            LOGGER.warning(
+                "Received Razorpay event %s for an unknown subscription.",
+                event_id,
+            )
+            return {"status": "unmatched"}
+        client = razorpay_client()
+        try:
+            provider_data = await client.fetch_subscription(subscription_id)
+        except RazorpayAPIError as error:
+            LOGGER.error(
+                "Could not confirm subscription state for Razorpay event %s.",
+                event_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Could not confirm the Razorpay subscription state.",
+            ) from error
+        current_status = provider_data.get("status")
+        if (
+            provider_data.get("id") != subscription_id
+            or not isinstance(current_status, str)
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail="Razorpay returned incomplete subscription details.",
+            )
+        current_start = provider_timestamp(provider_data.get("current_start"))
+        current_end = provider_timestamp(provider_data.get("current_end"))
+        cancel_at_cycle_end = provider_data.get("cancel_at_cycle_end")
+        if not isinstance(cancel_at_cycle_end, bool):
+            cancel_at_cycle_end = None
+
+        payment_payload = (
+            payload.get("payment") if isinstance(payload, dict) else None
+        )
+        payment_entity = (
+            payment_payload.get("entity")
+            if isinstance(payment_payload, dict)
+            else None
+        )
+        payment_id: str | None = None
+        amount_paise: int | None = None
+        currency: str | None = None
+        captured_at: str | None = None
+        if isinstance(payment_entity, dict):
+            candidate_payment_id = payment_entity.get("id")
+            candidate_amount = payment_entity.get("amount")
+            candidate_currency = payment_entity.get("currency")
+            candidate_subscription_id = payment_entity.get("subscription_id")
+            capture_indicator = payment_entity.get("captured")
+            is_captured = (
+                capture_indicator is True
+                or capture_indicator == "1"
+                or (type(capture_indicator) is int and capture_indicator == 1)
+                or payment_entity.get("status") == "captured"
+            )
+            if (
+                is_captured
+                and isinstance(candidate_payment_id, str)
+                and (
+                    candidate_subscription_id is None
+                    or candidate_subscription_id == subscription_id
+                )
+                and candidate_amount == SUBSCRIPTION_AMOUNT_PAISE
+                and candidate_currency == SUBSCRIPTION_CURRENCY
+            ):
+                payment_id = candidate_payment_id
+                amount_paise = candidate_amount
+                currency = candidate_currency
+                payment_created_at = payment_entity.get("created_at")
+                if isinstance(payment_created_at, int):
+                    captured_at = datetime.fromtimestamp(
+                        payment_created_at, tz=timezone.utc
+                    ).isoformat()
+                else:
+                    captured_at = datetime.now(timezone.utc).isoformat()
+            elif is_captured:
+                LOGGER.warning(
+                    "Ignored an unexpected payment payload for event %s.",
+                    event_id,
+                )
+        accepted, payment_recorded = database.record_razorpay_webhook(
+            event_id=event_id,
+            event_type=event_type,
+            subscription_id=subscription_id,
+            status=current_status,
+            current_start=current_start,
+            current_end=current_end,
+            cancel_at_cycle_end=cancel_at_cycle_end,
+            payment_id=payment_id,
+            amount_paise=amount_paise,
+            developer_amount_paise=(
+                DEVELOPER_ALLOCATION_PAISE if payment_id else None
+            ),
+            currency=currency,
+            captured_at=captured_at,
+        )
+        if not accepted:
+            return {"status": "duplicate"}
+        if not payment_recorded and payment_id:
+            LOGGER.warning(
+                "Razorpay payment %s was already present in the ledger.",
+                payment_id,
+            )
+        return {"status": "accepted"}
 
     @app.get("/", response_class=HTMLResponse, response_model=None)
     async def index(request: Request) -> HTMLResponse | RedirectResponse:

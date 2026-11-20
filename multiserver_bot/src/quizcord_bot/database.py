@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from fractions import Fraction
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 import time
 
 if TYPE_CHECKING:
@@ -33,6 +33,7 @@ USN_FORMAT_PATTERN = re.compile(
     r"(?:4GM\d{2}CS\d{3}|U\d{2}E\d{2}CS\d{3})", re.IGNORECASE
 )
 LOGGER = logging.getLogger("quizcord_analytics.database")
+DEFAULT_SUBSCRIPTION_GRACE_SECONDS = 30 * 24 * 60 * 60
 
 
 def normalize_usn(value: str) -> str:
@@ -248,6 +249,20 @@ class TopLeaderboards:
 
 
 @dataclass(frozen=True)
+class GuildSubscription:
+    guild_id: int
+    subscription_id: str
+    plan_id: str
+    status: str
+    checkout_url: str
+    current_start: int | None
+    current_end: int | None
+    cancel_at_cycle_end: bool
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
 class _LeaderboardParticipant:
     score: int
     discord_id: str | None
@@ -404,6 +419,100 @@ class Database:
                         ),
                     ),
                 )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS guild_subscription_grace (
+                    guild_id TEXT PRIMARY KEY,
+                    expires_at INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(guild_id) REFERENCES guild_settings(guild_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS subscription_billing_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    enabled_at INTEGER NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS billing_plans (
+                    plan_key TEXT NOT NULL,
+                    razorpay_key_id TEXT NOT NULL,
+                    razorpay_plan_id TEXT NOT NULL UNIQUE,
+                    amount_paise INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (plan_key, razorpay_key_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS guild_subscriptions (
+                    razorpay_subscription_id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    razorpay_plan_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    checkout_url TEXT NOT NULL,
+                    current_start INTEGER,
+                    current_end INTEGER,
+                    cancel_at_cycle_end INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(guild_id) REFERENCES guild_settings(guild_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_guild_subscriptions_guild
+                ON guild_subscriptions(guild_id, created_at)
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_guild_subscriptions_one_open_per_guild
+                ON guild_subscriptions(guild_id)
+                WHERE status IN (
+                    'created', 'authenticated', 'active', 'pending', 'halted'
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS subscription_payments (
+                    razorpay_payment_id TEXT PRIMARY KEY,
+                    razorpay_subscription_id TEXT NOT NULL,
+                    guild_id TEXT NOT NULL,
+                    amount_paise INTEGER NOT NULL,
+                    developer_amount_paise INTEGER NOT NULL,
+                    currency TEXT NOT NULL,
+                    captured_at TEXT NOT NULL,
+                    FOREIGN KEY(razorpay_subscription_id)
+                        REFERENCES guild_subscriptions(razorpay_subscription_id),
+                    FOREIGN KEY(guild_id) REFERENCES guild_settings(guild_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_subscription_payments_guild
+                ON subscription_payments(guild_id, captured_at)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS razorpay_webhook_events (
+                    event_id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS processed_quizcord_messages (
@@ -949,6 +1058,21 @@ class Database:
                     str(faculty_role_id) if faculty_role_id else None,
                 ),
             )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO guild_subscription_grace (
+                    guild_id, expires_at
+                )
+                SELECT ?, ?
+                WHERE EXISTS (
+                    SELECT 1 FROM subscription_billing_state WHERE id = 1
+                )
+                """,
+                (
+                    str(guild_id),
+                    int(time.time()) + DEFAULT_SUBSCRIPTION_GRACE_SECONDS,
+                ),
+            )
 
     def unregister_guild(self, guild_id: int) -> None:
         with self._connect() as connection:
@@ -966,6 +1090,366 @@ class Database:
                 """
             ).fetchall()
         return tuple((int(row[0]), str(row[1])) for row in rows)
+
+    def get_subscription_grace_expires_at(self, guild_id: int) -> int | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT expires_at FROM guild_subscription_grace
+                WHERE guild_id = ?
+                """,
+                (str(guild_id),),
+            ).fetchone()
+        return int(row[0]) if row else None
+
+    def enable_subscription_billing(self, now: int | None = None) -> int:
+        enabled_at = int(time.time()) if now is None else now
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO subscription_billing_state (id, enabled_at)
+                VALUES (1, ?)
+                """,
+                (enabled_at,),
+            )
+            state = connection.execute(
+                "SELECT enabled_at FROM subscription_billing_state WHERE id = 1"
+            ).fetchone()
+            if state is None:
+                raise RuntimeError("Subscription billing state was not persisted.")
+            actual_enabled_at = int(state[0])
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO guild_subscription_grace (
+                    guild_id, expires_at
+                )
+                SELECT guild_id, ?
+                FROM guild_settings
+                WHERE installed = 1
+                """,
+                (
+                    actual_enabled_at + DEFAULT_SUBSCRIPTION_GRACE_SECONDS,
+                ),
+            )
+        return actual_enabled_at
+
+    def has_dashboard_subscription_access(
+        self, guild_id: int, now: int | None = None
+    ) -> bool:
+        current_time = int(time.time()) if now is None else now
+        grace_expires_at = self.get_subscription_grace_expires_at(guild_id)
+        if grace_expires_at is not None and grace_expires_at > current_time:
+            return True
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM guild_subscriptions
+                WHERE guild_id = ?
+                  AND status IN (
+                      'active', 'pending', 'halted', 'cancelled'
+                  )
+                  AND current_end > ?
+                LIMIT 1
+                """,
+                (str(guild_id), current_time),
+            ).fetchone()
+        return row is not None
+
+    def get_guild_subscription(
+        self, guild_id: int
+    ) -> GuildSubscription | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT guild_id, razorpay_subscription_id, razorpay_plan_id,
+                       status, checkout_url, current_start, current_end,
+                       cancel_at_cycle_end, created_at, updated_at
+                FROM guild_subscriptions
+                WHERE guild_id = ?
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (str(guild_id),),
+            ).fetchone()
+        return self._guild_subscription_from_row(row) if row else None
+
+    def get_open_guild_subscription(
+        self, guild_id: int
+    ) -> GuildSubscription | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT guild_id, razorpay_subscription_id, razorpay_plan_id,
+                       status, checkout_url, current_start, current_end,
+                       cancel_at_cycle_end, created_at, updated_at
+                FROM guild_subscriptions
+                WHERE guild_id = ?
+                  AND status IN (
+                      'created', 'authenticated', 'active', 'pending', 'halted'
+                  )
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (str(guild_id),),
+            ).fetchone()
+        return self._guild_subscription_from_row(row) if row else None
+
+    def get_subscription_by_id(
+        self, subscription_id: str
+    ) -> GuildSubscription | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT guild_id, razorpay_subscription_id, razorpay_plan_id,
+                       status, checkout_url, current_start, current_end,
+                       cancel_at_cycle_end, created_at, updated_at
+                FROM guild_subscriptions
+                WHERE razorpay_subscription_id = ?
+                """,
+                (subscription_id,),
+            ).fetchone()
+        return self._guild_subscription_from_row(row) if row else None
+
+    @staticmethod
+    def _guild_subscription_from_row(
+        row: tuple[Any, ...],
+    ) -> GuildSubscription:
+        return GuildSubscription(
+            guild_id=int(row[0]),
+            subscription_id=str(row[1]),
+            plan_id=str(row[2]),
+            status=str(row[3]),
+            checkout_url=str(row[4]),
+            current_start=int(row[5]) if row[5] is not None else None,
+            current_end=int(row[6]) if row[6] is not None else None,
+            cancel_at_cycle_end=bool(row[7]),
+            created_at=str(row[8]),
+            updated_at=str(row[9]),
+        )
+
+    def create_guild_subscription(
+        self,
+        guild_id: int,
+        subscription_id: str,
+        plan_id: str,
+        checkout_url: str,
+    ) -> GuildSubscription:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO guild_subscriptions (
+                    razorpay_subscription_id, guild_id, razorpay_plan_id,
+                    status, checkout_url
+                )
+                VALUES (?, ?, ?, 'created', ?)
+                """,
+                (subscription_id, str(guild_id), plan_id, checkout_url),
+            )
+            row = connection.execute(
+                """
+                SELECT guild_id, razorpay_subscription_id, razorpay_plan_id,
+                       status, checkout_url, current_start, current_end,
+                       cancel_at_cycle_end, created_at, updated_at
+                FROM guild_subscriptions WHERE razorpay_subscription_id = ?
+                """,
+                (subscription_id,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("The subscription was not persisted.")
+        return self._guild_subscription_from_row(row)
+
+    def update_guild_subscription(
+        self,
+        subscription_id: str,
+        *,
+        status: str,
+        current_start: int | None = None,
+        current_end: int | None = None,
+        cancel_at_cycle_end: bool | None = None,
+    ) -> GuildSubscription | None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE guild_subscriptions
+                SET status = ?,
+                    current_start = COALESCE(?, current_start),
+                    current_end = COALESCE(?, current_end),
+                    cancel_at_cycle_end = COALESCE(
+                        ?, cancel_at_cycle_end
+                    ),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE razorpay_subscription_id = ?
+                """,
+                (
+                    status,
+                    current_start,
+                    current_end,
+                    (
+                        int(cancel_at_cycle_end)
+                        if cancel_at_cycle_end is not None
+                        else None
+                    ),
+                    subscription_id,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT guild_id, razorpay_subscription_id, razorpay_plan_id,
+                       status, checkout_url, current_start, current_end,
+                       cancel_at_cycle_end, created_at, updated_at
+                FROM guild_subscriptions WHERE razorpay_subscription_id = ?
+                """,
+                (subscription_id,),
+            ).fetchone()
+        return self._guild_subscription_from_row(row) if row else None
+
+    def get_billing_plan_id(
+        self, plan_key: str, razorpay_key_id: str, amount_paise: int
+    ) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT razorpay_plan_id, amount_paise FROM billing_plans
+                WHERE plan_key = ? AND razorpay_key_id = ?
+                """,
+                (plan_key, razorpay_key_id),
+            ).fetchone()
+        if row is None:
+            return None
+        if int(row[1]) != amount_paise:
+            raise ValueError("The stored Razorpay plan amount does not match.")
+        return str(row[0])
+
+    def save_billing_plan(
+        self,
+        plan_key: str,
+        razorpay_key_id: str,
+        razorpay_plan_id: str,
+        amount_paise: int,
+    ) -> str:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO billing_plans (
+                    plan_key, razorpay_key_id, razorpay_plan_id, amount_paise
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (plan_key, razorpay_key_id, razorpay_plan_id, amount_paise),
+            )
+            row = connection.execute(
+                """
+                SELECT razorpay_plan_id, amount_paise FROM billing_plans
+                WHERE plan_key = ? AND razorpay_key_id = ?
+                """,
+                (plan_key, razorpay_key_id),
+            ).fetchone()
+        if row is None or int(row[1]) != amount_paise:
+            raise RuntimeError("The Razorpay plan could not be persisted.")
+        return str(row[0])
+
+    def record_razorpay_webhook(
+        self,
+        *,
+        event_id: str,
+        event_type: str,
+        subscription_id: str,
+        status: str,
+        current_start: int | None,
+        current_end: int | None,
+        cancel_at_cycle_end: bool | None,
+        payment_id: str | None = None,
+        amount_paise: int | None = None,
+        developer_amount_paise: int | None = None,
+        currency: str | None = None,
+        captured_at: str | None = None,
+    ) -> tuple[bool, bool]:
+        with self._connect() as connection:
+            event_cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO razorpay_webhook_events (
+                    event_id, event_type
+                )
+                VALUES (?, ?)
+                """,
+                (event_id, event_type),
+            )
+            if event_cursor.rowcount == 0:
+                return False, False
+            subscription_row = connection.execute(
+                """
+                SELECT guild_id FROM guild_subscriptions
+                WHERE razorpay_subscription_id = ?
+                """,
+                (subscription_id,),
+            ).fetchone()
+            if subscription_row is None:
+                return True, False
+            guild_id = str(subscription_row[0])
+            connection.execute(
+                """
+                UPDATE guild_subscriptions
+                SET status = ?,
+                    current_start = COALESCE(?, current_start),
+                    current_end = COALESCE(?, current_end),
+                    cancel_at_cycle_end = COALESCE(
+                        ?, cancel_at_cycle_end
+                    ),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE razorpay_subscription_id = ?
+                """,
+                (
+                    status,
+                    current_start,
+                    current_end,
+                    (
+                        int(cancel_at_cycle_end)
+                        if cancel_at_cycle_end is not None
+                        else None
+                    ),
+                    subscription_id,
+                ),
+            )
+            payment_recorded = False
+            if (
+                payment_id
+                and amount_paise is not None
+                and developer_amount_paise is not None
+                and currency is not None
+                and captured_at is not None
+            ):
+                payment_cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO subscription_payments (
+                        razorpay_payment_id, razorpay_subscription_id, guild_id,
+                        amount_paise, developer_amount_paise, currency,
+                        captured_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        payment_id,
+                        subscription_id,
+                        guild_id,
+                        amount_paise,
+                        developer_amount_paise,
+                        currency,
+                        captured_at,
+                    ),
+                )
+                payment_recorded = payment_cursor.rowcount == 1
+        return True, payment_recorded
+
+    def get_developer_allocation_total(self, guild_id: int) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COALESCE(SUM(developer_amount_paise), 0)
+                FROM subscription_payments WHERE guild_id = ?
+                """,
+                (str(guild_id),),
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def set_faculty_role(
         self, guild_id: int, faculty_role_id: int | None

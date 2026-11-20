@@ -219,7 +219,6 @@ class SettingsTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "TURNSTILE_SITE_KEY"):
                 Settings.from_environment()
-
         values["TURNSTILE_SECRET_KEY"] = "turnstile-secret-key"
         with patch("quizcord_bot.config.load_dotenv"), patch.dict(
             os.environ, values, clear=True
@@ -228,6 +227,43 @@ class SettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.turnstile_site_key, "turnstile-site-key")
         self.assertEqual(settings.turnstile_secret_key, "turnstile-secret-key")
+
+    def test_razorpay_credentials_are_optional_but_must_be_configured_together(
+        self,
+    ) -> None:
+        with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+            os.environ, {"DISCORD_BOT_TOKEN": "test-token"}, clear=True
+        ):
+            settings = Settings.from_environment()
+        self.assertIsNone(settings.razorpay_key_id)
+        self.assertIsNone(settings.razorpay_key_secret)
+        self.assertIsNone(settings.razorpay_webhook_secret)
+
+        with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+            os.environ,
+            {
+                "DISCORD_BOT_TOKEN": "test-token",
+                "RAZORPAY_KEY_ID": "rzp_test_id",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "RAZORPAY_KEY_ID"):
+                Settings.from_environment()
+
+        with patch("quizcord_bot.config.load_dotenv"), patch.dict(
+            os.environ,
+            {
+                "DISCORD_BOT_TOKEN": "test-token",
+                "RAZORPAY_KEY_ID": "rzp_test_id",
+                "RAZORPAY_KEY_SECRET": "test-secret",
+                "RAZORPAY_WEBHOOK_SECRET": "webhook-secret",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_environment()
+        self.assertEqual(settings.razorpay_key_id, "rzp_test_id")
+        self.assertEqual(settings.razorpay_key_secret, "test-secret")
+        self.assertEqual(settings.razorpay_webhook_secret, "webhook-secret")
 
     def test_railway_port_overrides_local_dashboard_port(self) -> None:
         with patch("quizcord_bot.config.load_dotenv"), patch.dict(
