@@ -662,7 +662,17 @@ class DashboardWebTests(unittest.TestCase):
         with patch.object(self.database, "get_quiz_session_summaries", return_value=()) as summaries:
             page = self.client.get("/api/sessions?guild_id=67890&offset=50")
             self.assertEqual(page.status_code, 200)
-            summaries.assert_called_once_with(67890, limit=50, offset=50)
+            self.assertEqual(page.headers["x-has-more"], "false")
+            summaries.assert_called_once_with(67890, limit=51, offset=50)
+        summary = self.database.get_quiz_session_summaries(67890, limit=1)[0]
+        with patch.object(
+            self.database, "get_quiz_session_summaries", return_value=(summary,) * 51
+        ) as summaries:
+            page = self.client.get("/api/sessions?guild_id=67890")
+            self.assertEqual(page.status_code, 200)
+            self.assertEqual(page.headers["x-has-more"], "true")
+            self.assertEqual(len(page.json()), 50)
+            summaries.assert_called_once_with(67890, limit=51, offset=0)
         self.assertEqual(self.client.get("/api/sessions?offset=-1").status_code, 422)
         available_guilds = self.client.get("/api/guilds")
         self.assertEqual(

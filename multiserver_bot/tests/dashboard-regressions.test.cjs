@@ -15,7 +15,9 @@ function fixture(search = '') {
   const document = {getElementById(id) { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); },
     createElement: node, body: node(), head: node()};
   const context = vm.createContext({document, URL, URLSearchParams, console, setTimeout, clearTimeout,
-    location: {pathname: '/', search, origin: 'https://example.test', protocol: 'https:'}, window: {}});
+    history: {state: null, pushState(state) { this.state = state; }, replaceState(state) { this.state = state; }},
+    location: {pathname: '/', search, origin: 'https://example.test', protocol: 'https:'},
+    window: {addEventListener() {}}});
   return {context, document, nodes};
 }
 const run = (f, code) => vm.runInContext(code, f.context);
@@ -31,13 +33,18 @@ for (const requested of ['older-session', null]) {
       const data = url === '/api/sessions?offset=0' ? latest.slice() :
         url === '/api/sessions?offset=50' ? [{session_id: 'page-two', status: 'completed'}] :
         {session: {session_id: url.split('/').at(-1), status: 'completed'}};
-      return {ok: true, json: async () => data};
+      return {ok: true,
+        headers: {get: name => name.toLowerCase() === 'x-has-more' &&
+          url === '/api/sessions?offset=0' ? 'true' : 'false'},
+        json: async () => data};
     };
     run(f, source('admin-dashboard.js').split('    initializeGuildSelector().then(()=>{')[0]);
     run(f, 'render = summary => { globalThis.rendered = summary; };');
     await run(f, 'refresh()');
     assert.equal(f.context.rendered.session.session_id, requested || 'new-0');
     assert(f.nodes.get('session-select').children.some(option => option.value === (requested || 'new-0')));
+    assert.equal(f.nodes.get('sessions-older').disabled, false);
+    assert.match(f.nodes.get('session-page-status').textContent, /more available/);
     await f.nodes.get('sessions-older').listeners.click();
     await settle();
     assert(calls.includes('/api/sessions?offset=50'));
@@ -48,6 +55,42 @@ for (const requested of ['older-session', null]) {
     assert.equal(f.context.rendered.session.session_id, 'new-0');
   });
 }
+
+test('session navigation is queued while a polling request is in flight', async () => {
+  const f = fixture();
+  const calls = [];
+  let releasePoll;
+  let pollRequest = false;
+  const sessionsResponse = (data, hasMore) => ({ok: true,
+    headers: {get: name => name.toLowerCase() === 'x-has-more' && hasMore ? 'true' : 'false'},
+    json: async () => data});
+  f.context.fetch = async url => {
+    calls.push(url);
+    if (url === '/api/sessions?offset=0') {
+      if (pollRequest) return new Promise(resolve => { releasePoll = () => resolve(sessionsResponse(
+        [{session_id: 'new-0', status: 'completed'}], true)); });
+      return sessionsResponse([{session_id: 'new-0', status: 'completed'}], true);
+    }
+    if (url === '/api/sessions?offset=50') {
+      return sessionsResponse([{session_id: 'page-two', status: 'completed'}], false);
+    }
+    return {ok: true, json: async () => ({session: {session_id: url.split('/').at(-1), status: 'completed'}})};
+  };
+  run(f, source('admin-dashboard.js').split('    initializeGuildSelector().then(()=>{')[0]);
+  run(f, 'render = summary => { globalThis.rendered = summary; };');
+  await run(f, 'refresh()');
+
+  pollRequest = true;
+  const poll = run(f, 'refresh()');
+  await settle();
+  f.nodes.get('sessions-older').listeners.click();
+  releasePoll();
+  await poll;
+  await settle();
+
+  assert(calls.includes('/api/sessions?offset=50'));
+  assert.equal(f.context.rendered.session.session_id, 'page-two');
+});
 
 test('faculty list, search, add and remove explicitly use the displayed guild', async () => {
   const f = fixture();

@@ -4,12 +4,14 @@ const select = document.getElementById("session-select");
     const sessionHeading = document.getElementById("session-heading");
     const newerSessions = document.getElementById("sessions-newer");
     const olderSessions = document.getElementById("sessions-older");
+    const sessionPageStatus = document.getElementById("session-page-status");
     const leaderboardSearch = document.getElementById("leaderboard-search");
     const initialSession = new URLSearchParams(location.search).get("session");
     const facultyStudentPath = location.pathname.startsWith("/faculty/students/");
     const studentPath = facultyStudentPath ? location.pathname.slice("/faculty/students/".length) : location.pathname.startsWith("/students/") ? location.pathname.slice("/students/".length) : null;
     const studentUSN = studentPath ? decodeURIComponent(studentPath) : null;
     const dashboardViewStateKey = "quizcordDashboardView";
+    const sessionPageSize = 50;
     const dashboardViews = new Set(["sessions","users","top-leaderboard"]);
     const savedView = history.state?.[dashboardViewStateKey];
     const guildSelect = document.getElementById("guild-select");
@@ -44,6 +46,7 @@ const select = document.getElementById("session-select");
     let sessionOffset = 0;
     let activeView = dashboardViews.has(savedView) ? savedView : "sessions";
     let pollBusy = false;
+    let pendingSessionPageRefresh = false;
     let userSearchQuery = "";
     let pendingDirectoryUsers = null;
     let leaderboardSearchQuery = "";
@@ -426,8 +429,14 @@ const select = document.getElementById("session-select");
         if(response.status===401){location.replace("/");return;}
         if(!response.ok)throw new Error("Could not load quiz sessions.");
         const sessions=await response.json();
+        const hasMore=response.headers.get("X-Has-More")==="true";
         newerSessions.disabled=sessionOffset===0;
-        olderSessions.disabled=sessions.length<50;
+        olderSessions.disabled=!hasMore;
+        newerSessions.title=sessionOffset===0?"Already showing the newest sessions.":"Load newer sessions.";
+        olderSessions.title=hasMore?"Load older sessions.":"No older sessions are available.";
+        sessionPageStatus.textContent=sessions.length
+          ?`Showing sessions ${sessionOffset+1}-${sessionOffset+sessions.length}${hasMore?" (more available).":sessionOffset===0?". All recorded sessions are shown; choose a quiz above.":". End of recorded sessions."}`
+          :"No recorded quiz sessions.";
         activeSession=activeSession||sessions[0]?.session_id;
         if(!activeSession){content.replaceChildren(el("div","empty","No quiz sessions have been recorded yet. Start a Quizcord quiz to see its live dashboard."));return;}
         const detail=await fetch("/api/sessions/"+encodeURIComponent(activeSession),{cache:"no-store"});
@@ -439,7 +448,14 @@ const select = document.getElementById("session-select");
         select.value=activeSession;
         if(activeView==="sessions")render(summary);
       }catch(error){content.replaceChildren(el("div","empty error",error.message));}
-      finally{pollBusy=false;}
+      finally{
+        pollBusy=false;
+        if(pendingSessionPageRefresh){
+          pendingSessionPageRefresh=false;
+          activeSession=null;
+          refresh();
+        }
+      }
     }
     async function refreshUsers(){
       if(pollBusy||activeView!=="users")return;pollBusy=true;
@@ -474,7 +490,15 @@ const select = document.getElementById("session-select");
     dashboardTabs.addEventListener("click",event=>{const button=event.target.closest("button[data-view]");if(button)switchView(button.dataset.view);});
     leaderboardSearch.addEventListener("input",()=>{leaderboardSearchQuery=leaderboardSearch.value;filterLeaderboard();});
     select.addEventListener("change",()=>{activeSession=select.value;refresh();});
-    function changeSessionPage(direction){if(pollBusy)return;sessionOffset=Math.max(0,sessionOffset+direction*50);activeSession=null;refresh();}
+    function changeSessionPage(direction){
+      const nextOffset=Math.max(0,sessionOffset+direction*sessionPageSize);
+      if(nextOffset===sessionOffset)return;
+      sessionOffset=nextOffset;
+      sessionPageStatus.textContent=direction>0?"Loading older sessions...":"Loading newer sessions...";
+      if(pollBusy){pendingSessionPageRefresh=true;return;}
+      activeSession=null;
+      refresh();
+    }
     newerSessions.addEventListener("click",()=>changeSessionPage(-1));
     olderSessions.addEventListener("click",()=>changeSessionPage(1));
     initializeGuildSelector().then(()=>{

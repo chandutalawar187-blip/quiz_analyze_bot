@@ -666,6 +666,21 @@ select {
   outline: 2px solid var(--accent-strong);
   outline-offset: 2px;
 }
+.attendance-toggle:disabled {
+  color: var(--text-muted);
+  opacity: .55;
+  cursor: not-allowed;
+}
+.attendance-toggle:disabled:hover {
+  border-color: var(--line-strong);
+  background: var(--panel);
+}
+.session-page-status {
+  flex: 1 0 100%;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: right;
+}
 .panel h2 { font-size: 16px; margin: 0; }
 .panel-sub {
   font-size: 12px;

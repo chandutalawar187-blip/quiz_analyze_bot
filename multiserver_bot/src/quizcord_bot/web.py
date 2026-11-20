@@ -1659,14 +1659,16 @@ _read_web_template("admin_login.html").replace(
 
     @app.get("/api/sessions")
     async def sessions(
-        request: Request, offset: int = Query(default=0, ge=0)
+        request: Request, response: Response, offset: int = Query(default=0, ge=0)
     ) -> list[dict[str, Any]]:
         await current_admin(request)
+        summaries = database.get_quiz_session_summaries(
+            request.state.guild_id, limit=51, offset=offset
+        )
+        response.headers["X-Has-More"] = str(len(summaries) > 50).lower()
         return [
             _summary_overview(summary)
-            for summary in database.get_quiz_session_summaries(
-                request.state.guild_id, limit=50, offset=offset
-            )
+            for summary in summaries[:50]
         ]
 
     @app.get("/api/top-leaderboard")
